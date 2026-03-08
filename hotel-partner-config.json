@@ -1,0 +1,31 @@
+{
+  "default": {
+    "hotelDescription": "Beachfront resort with direct WhatsApp booking assistance and flexible room options.",
+    "amenitiesSummary": "Private beach access, family apartments, sea-view suites, breakfast options.",
+    "aiEnabled": true,
+    "aiTone": "friendly",
+    "instantWelcomeTemplate": "Welcome to {{hotel_name}}. Tell us your check-in/check-out dates and number of guests to get instant options.",
+    "instantQuoteTemplate": "Thanks {{guest_name}}. We currently suggest {{room_type}} at {{nightly_rate}} per night for {{nights}} nights. Would you like us to reserve it?",
+    "instantUnavailableTemplate": "Sorry, that room type is limited for your dates. We can offer {{alternative_room}} instead. Would you like details?",
+    "instantConfirmationTemplate": "Great news {{guest_name}}. Your stay is confirmed: {{room_type}} from {{check_in}} to {{check_out}}. Booking ID: {{booking_id}}.",
+    "aiKnowledgeBase": ""
+  },
+  "hotels": {
+    "cmmdom5o90000rozix9blpvi2": {
+      "hotelDescription": "Beachfront resort with direct WhatsApp booking assistance and flexible room options.",
+      "amenitiesSummary": "Private beach access, family apartments, sea-view suites, breakfast options.",
+      "whatsappPhoneNumberId": "1002161622980212",
+      "aiEnabled": true,
+      "aiTone": "friendly",
+      "instantWelcomeTemplate": "Welcome to {{hotel_name}}. Tell us your check-in/check-out dates and number of guests to get instant options.",
+      "instantQuoteTemplate": "Thanks {{guest_name}}. We currently suggest {{room_type}} at {{nightly_rate}} per night for {{nights}} nights. Would you like us to reserve it?",
+      "instantUnavailableTemplate": "Sorry, that room type is limited for your dates. We can offer {{alternative_room}} instead. Would you like details?",
+      "instantConfirmationTemplate": "Great news {{guest_name}}. Your stay is confirmed: {{room_type}} from {{check_in}} to {{check_out}}. Booking ID: {{booking_id}}.",
+      "aiKnowledgeBase": "",
+      "aiKnowledgeBaseEn": "",
+      "aiKnowledgeBaseAr": "",
+      "aiKnowledgeBaseEs": "",
+      "aiKnowledgeBaseFr": ""
+    }
+  }
+}

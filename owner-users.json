@@ -1,0 +1,14 @@
+[
+  {
+    "email": "owner@chatastay.local",
+    "passwordHash": "06a4688d1e433291960c40dc3d01af4d:b9055cc4f8201926e7b6460f75810c1d3ca736c66780426078aea10d0eef37b1737366f7e7b93552a9242c6cbc431686c5a400cf90a6418dd0bc8b0bb410e44a",
+    "role": "OWNER",
+    "isActive": true,
+    "failedAttempts": 0,
+    "lockedUntil": null,
+    "requirePasswordReset": false,
+    "twoFactorEnabled": false,
+    "twoFactorSecret": null,
+    "pendingTwoFactorSecret": null
+  }
+]

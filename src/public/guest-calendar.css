@@ -1,0 +1,274 @@
+.mini-chat-wrap {
+  display: grid;
+  gap: 10px;
+}
+
+.mini-bubble {
+  max-width: 560px;
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.mini-bubble-out {
+  margin-left: auto;
+  background: #dcf8c6;
+  border: 1px solid #b7e8a7;
+  color: #0f5132;
+  font-weight: 700;
+}
+
+.mini-bubble-card {
+  background: #ffffff;
+  border: 1px solid #d8dee6;
+}
+
+.compact-controls {
+  max-width: 620px;
+  background: #f8fafc;
+  border: 1px solid #dbe4ef;
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.calendar-shell {
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 10px;
+  animation: calFadeIn 0.28s ease;
+}
+
+.calendar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  gap: 10px;
+}
+
+.calendar-title-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.calendar-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0;
+}
+
+.calendar-today-badge {
+  background: #eff6ff;
+  color: #1e3a8a;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.calendar-weekday {
+  font-size: 10px;
+  color: #64748b;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.calendar-day {
+  min-height: 52px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #0f172a;
+  cursor: pointer;
+  padding: 4px;
+  text-align: left;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.14s ease,
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease;
+  animation: dayPop 0.2s ease both;
+  transform-origin: center;
+}
+
+.calendar-day:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 10px rgba(2, 132, 199, 0.15);
+}
+
+.calendar-day.disabled {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.calendar-day.selected {
+  border-color: #0284c7;
+  background: #0ea5e9;
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(2, 132, 199, 0.3);
+  animation: selectedPulse 0.28s ease;
+}
+
+.calendar-day.in-range {
+  border-color: #bae6fd;
+  background: #e0f2fe;
+  color: #0c4a6e;
+  animation: rangeSweep 0.24s ease both;
+}
+
+.calendar-day.today {
+  border-color: #22c55e;
+  box-shadow: inset 0 0 0 1px #22c55e;
+}
+
+.calendar-day-num {
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.calendar-day-meta {
+  font-size: 10px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.calendar-day-reason {
+  font-size: 9px;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+
+.selection-card {
+  border: 1px solid #dbe4ef;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 10px;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.12s ease;
+}
+
+.selection-card strong {
+  color: #0f172a;
+}
+
+.selection-card.active {
+  background: #ecfeff;
+  border-color: #67e8f9;
+  transform: translateY(-1px);
+}
+
+.calendar-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.calendar-loading::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  border-radius: 999px;
+  border: 2px solid #99f6e4;
+  border-top-color: #0d9488;
+  animation: spin 0.8s linear infinite;
+}
+
+.calendar-form {
+  max-width: 620px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes dayPop {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes selectedPulse {
+  0% {
+    transform: scale(0.96);
+  }
+  60% {
+    transform: scale(1.03);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes rangeSweep {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes calFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 700px) {
+  .mini-bubble {
+    max-width: 100%;
+  }
+
+  .calendar-day {
+    min-height: 48px;
+    padding: 3px;
+  }
+
+  .calendar-day-meta {
+    font-size: 9px;
+  }
+}

@@ -1,0 +1,42 @@
+<h2>Conversations</h2>
+<p class="muted">AI-assisted WhatsApp conversation queue.</p>
+<div class="actions">
+  <a class="btn-link primary" href="/admin/bookings">See Conversion Report</a>
+  <a class="btn-link" href="/admin/bookings?status=PENDING">Pending Follow-ups</a>
+  <a class="btn-link" href="/admin/dashboard">Back to Dashboard</a>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Phone</th>
+      <th>Last Message</th>
+      <th>Detected Intent</th>
+      <th>Automation State</th>
+      <th>Drill Down</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>+968 9XXX 1101</td>
+      <td>"Do you have sea view tomorrow?"</td>
+      <td>Availability check</td>
+      <td><span class="badge ok">Auto replied</span></td>
+      <td><a class="inline-link" href="/admin/inventory">Check availability</a></td>
+    </tr>
+    <tr>
+      <td>+971 5XXX 7740</td>
+      <td>"Need family room for 3 nights"</td>
+      <td>Booking intent</td>
+      <td><span class="badge pending">Quote sent</span></td>
+      <td><a class="inline-link" href="/admin/bookings?status=PENDING">View pending bookings</a></td>
+    </tr>
+    <tr>
+      <td>+968 9XXX 8200</td>
+      <td>"Can I check in at 10 AM?"</td>
+      <td>Special request</td>
+      <td><span class="badge alert">Needs manual reply</span></td>
+      <td><a class="inline-link" href="/admin/calendar">Check room calendar</a></td>
+    </tr>
+  </tbody>
+</table>

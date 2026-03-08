@@ -1,0 +1,84 @@
+<h2>Dashboard</h2>
+<p class="muted">
+  Live snapshot for Al Ashkhara Beach Resort. This is your WhatsApp booking command center.
+</p>
+<div class="actions">
+  <a class="btn-link primary" href="/admin/bookings">Open Booking Reports</a>
+  <a class="btn-link" href="/admin/calendar">Open Room Calendar</a>
+  <a class="btn-link" href="/admin/inventory">Manage Inventory</a>
+  <a class="btn-link" href="/admin/rooms">Update Prices</a>
+</div>
+
+<div class="grid-4">
+  <article class="stat">
+    <h3>Today Messages</h3>
+    <p><a class="stat-link" href="/admin/conversations">128</a></p>
+  </article>
+  <article class="stat">
+    <h3>Pending Requests</h3>
+    <p><a class="stat-link" href="/admin/bookings?status=PENDING">11</a></p>
+  </article>
+  <article class="stat">
+    <h3>Confirmed Bookings</h3>
+    <p><a class="stat-link" href="/admin/bookings?status=CONFIRMED">24</a></p>
+  </article>
+  <article class="stat">
+    <h3>Occupancy This Week</h3>
+    <p><a class="stat-link" href="/admin/calendar?days=7">74%</a></p>
+  </article>
+</div>
+
+<div class="grid-2" style="margin-top: 14px">
+  <section>
+    <h3>Recent WhatsApp Conversations</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Guest</th>
+          <th>Intent</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><a class="inline-link" href="/admin/conversations">Faisal A.</a></td>
+          <td>2-night stay request</td>
+          <td><span class="badge pending">Awaiting payment</span></td>
+        </tr>
+        <tr>
+          <td><a class="inline-link" href="/admin/bookings?status=CONFIRMED">Huda M.</a></td>
+          <td>Family room inquiry</td>
+          <td><span class="badge ok">Booked</span></td>
+        </tr>
+        <tr>
+          <td><a class="inline-link" href="/admin/conversations">Mark L.</a></td>
+          <td>Early check-in request</td>
+          <td><span class="badge alert">Needs staff reply</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Quick Hotel Snapshot</h3>
+    <table>
+      <tbody>
+        <tr>
+          <th>Total rooms</th>
+          <td><a class="inline-link" href="/admin/rooms">24</a></td>
+        </tr>
+        <tr>
+          <th>Available tonight</th>
+          <td><a class="inline-link" href="/admin/inventory">6</a></td>
+        </tr>
+        <tr>
+          <th>Average nightly rate</th>
+          <td><a class="inline-link" href="/admin/rooms">39 OMR</a></td>
+        </tr>
+        <tr>
+          <th>Top source</th>
+          <td><a class="inline-link" href="/admin/conversations">WhatsApp Direct</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+</div>

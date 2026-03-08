@@ -1,0 +1,333 @@
+{
+  "hotel_profile": {
+    "hotel_name": "Al Ashkhara Beach Resort",
+    "brand_or_collection": "Independent",
+    "property_type": "Beach Resort",
+    "short_description": "Beachfront resort in South Al Sharqiah, Oman, in a quiet area on the road toward Masirah and Duqm.",
+    "long_description": "Al Ashkhara Beach Resort is positioned directly on the beach in a calm setting away from noise. The location is known for attractive beaches, moderate weather, and seasonal wind and water activities.",
+    "languages_supported": [
+      "Arabic",
+      "English"
+    ]
+  },
+  "location": {
+    "village": "Al Ashkhara",
+    "governorate": "South Al Sharqiah",
+    "country": "Oman",
+    "distance_from_jalan_bani_bu_ali_km": 37,
+    "distance_from_sur_km": 140,
+    "distance_from_muscat_km": 325,
+    "distance_from_al_ashkhara_village_km": 15,
+    "road_context": "On the coastal road linking Al Ashkhara, Mahoot, Masirah route, and Duqm industrial area."
+  },
+  "room_types": [
+    {
+      "code": "STANDARD_SUPERIOR",
+      "name": "Standard Superior Room",
+      "view": "Sea View",
+      "occupancy_note": "Designed for 2 adults + 1 child.",
+      "brochure_rates": {
+        "currency": "OMR",
+        "basis": "Per room per night",
+        "with_breakfast": true,
+        "amount": 30.0,
+        "tour_operator_discount_note": "Up to 15% discount from rack rate."
+      }
+    },
+    {
+      "code": "STANDARD_EXECUTIVE",
+      "name": "Standard Executive Room",
+      "view": "Not Sea View",
+      "occupancy_note": "Designed for 2 adults + 2 children.",
+      "brochure_rates": {
+        "currency": "OMR",
+        "basis": "Per room per night",
+        "with_breakfast": true,
+        "amount": 35.0,
+        "tour_operator_discount_note": "Up to 15% discount from rack rate."
+      }
+    },
+    {
+      "code": "SUITE_ROOM",
+      "name": "Suite Room",
+      "view": "Balcony (view not explicitly priced by view type)",
+      "occupancy_note": "Up to 3 adults, or 2 adults + up to 3 children.",
+      "brochure_rates": {
+        "currency": "OMR",
+        "basis": "Per room per night",
+        "with_breakfast": true,
+        "amount": 40.0,
+        "tour_operator_discount_note": "Up to 15% discount from rack rate."
+      }
+    },
+    {
+      "code": "SMALL_APARTMENT",
+      "name": "Small Apartment",
+      "view": "Balcony",
+      "occupancy_note": "Up to 3 adults, or 2 adults + up to 3 children.",
+      "brochure_rates": {
+        "currency": "OMR",
+        "basis": "Per room per night",
+        "with_breakfast": true,
+        "amount": 40.0,
+        "tour_operator_discount_note": "Up to 15% discount from rack rate."
+      }
+    }
+  ],
+  "room_descriptions": {
+    "STANDARD_SUPERIOR": {
+      "summary": "Suite-style bedroom with spacious balcony and sea view.",
+      "features": [
+        "Double or Twin beds",
+        "Wardrobe and dressing table",
+        "A/C",
+        "Fridge",
+        "Electric kettle",
+        "Tea, coffee, and milk",
+        "TV with Nile Sat channels"
+      ]
+    },
+    "STANDARD_EXECUTIVE": {
+      "summary": "Suite-style bedroom with spacious balcony and non-sea-view orientation.",
+      "features": [
+        "Double or Twin beds",
+        "Wardrobe and dressing table",
+        "A/C",
+        "Fridge",
+        "Electric kettle",
+        "Tea, coffee, and milk",
+        "TV with Nile Sat channels"
+      ]
+    },
+    "SUITE_ROOM": {
+      "summary": "Bedroom plus seating room, attached bath, and balcony for family stays.",
+      "features": [
+        "Double bed",
+        "Wardrobe and dressing table",
+        "A/C in bedroom and seating room",
+        "Sofa seating",
+        "Fridge",
+        "Electric kettle",
+        "Tea, coffee, and milk",
+        "TV"
+      ]
+    },
+    "SMALL_APARTMENT": {
+      "summary": "Suite bedroom plus seating room, pantry, and balcony.",
+      "features": [
+        "Double bed",
+        "Wardrobe and dressing table",
+        "Sofa bed",
+        "Coffee table with chairs",
+        "A/C",
+        "Fridge",
+        "Electric kettle",
+        "Tea, coffee, and milk",
+        "TV"
+      ]
+    }
+  },
+  "amenities": {
+    "general": [
+      "Direct beachfront location",
+      "Quiet setting away from city noise",
+      "Function/event capability",
+      "Function hall for meetings and presentations"
+    ],
+    "family": [
+      "Family-oriented accommodation layouts",
+      "Kids playground",
+      "Sports areas around the resort"
+    ],
+    "recreation_facilities": [
+      "Three swimming pools (two kids, one adults)",
+      "Entertainment hall (10m x 5m)",
+      "Billiards, table tennis, and hockey table",
+      "Private BBQ sheds"
+    ]
+  },
+  "restaurant": {
+    "description": "Beachfront-view restaurant with three different halls; operates during meal timings.",
+    "meal_timings": {
+      "breakfast": "07:30-10:00",
+      "lunch": "13:00-16:00",
+      "dinner": "19:00-21:30"
+    },
+    "breakfast": {
+      "style": "Continental buffet breakfast",
+      "brochure_rates": {
+        "currency": "OMR",
+        "adult_per_head_if_not_included": 2.0,
+        "kid_upto_8_per_head_if_not_included": 1.5
+      }
+    },
+    "lunch": {
+      "notes": "Set buffet options; special orders considered subject to availability.",
+      "menu_examples": [
+        "Rice + Chicken or Fried Fish + Salad + Desserts + Soft Drinks + Water",
+        "Rice + Mutton or Fried Fish + Salad + Desserts + Soft Drinks + Water"
+      ],
+      "brochure_rates": {
+        "currency": "OMR",
+        "per_person": 3.5,
+        "includes_service_charges": true
+      }
+    },
+    "dinner": {
+      "notes": "Served outdoors under pergola or in main hall depending on weather; special orders subject to availability.",
+      "menu_examples": [
+        "Mixed grills: Half grilled chicken + mutton tikka + Arabic bread + salad + desserts + soft drinks + water",
+        "Mixed grills: Grilled fish + mutton tikka + Arabic bread + salad + desserts + soft drinks + water"
+      ],
+      "brochure_rates": {
+        "currency": "OMR",
+        "per_person": 4.5,
+        "includes_service_charges": true
+      }
+    },
+    "capacity_note": "Restaurant can cater around 50 people at a time."
+  },
+  "coffee_shop": {
+    "description": "Classic western-style coffee shop with sea-view window and outdoor pergola seating.",
+    "beverages": [
+      "Espresso",
+      "Americano",
+      "Latte"
+    ],
+    "snacks": [
+      "Burgers",
+      "Sandwiches",
+      "Pizza",
+      "Sweets"
+    ],
+    "hours": "10:00-22:00",
+    "break_time": "14:00-16:00",
+    "brochure_rates_note": "Rates are applied according to the available menu."
+  },
+  "activities": [
+    {
+      "name": "Swimming Pools",
+      "details": "Three pools in total: two for kids and one for adults.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Entertainment Center",
+      "details": "10x5 meter hall with billiards, table tennis, and hockey table.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Fishing Trips / Boat Tours",
+      "details": "Group or individual trips starting from Al Ashkhara fishermen's port.",
+      "advance_booking_required": true,
+      "booking_note": "Book one day in advance through hotel reception."
+    },
+    {
+      "name": "Desert Bikes (Quad Riding)",
+      "details": "Riding on sand dunes and the beach.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Fishing Rods / Lines",
+      "details": "Fishing tools available for guest use.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Sports & Kids Activities",
+      "details": "Kids playground, football and volleyball areas around the resort.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Omani Traditional Tent Experience",
+      "details": "Sunrise and sea-view experience with Omani coffee in Bedouin ambience.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Private BBQ Sheds",
+      "details": "Private BBQ spaces; grills, charcoal, and accessories can be provided at cost.",
+      "advance_booking_required": false
+    },
+    {
+      "name": "Kite Surfing Training Center (Seasonal)",
+      "details": "Operates in collaboration with a known school in Oman.",
+      "season_window": "Mid May to end of September",
+      "reference": "www.kitesurfing-lessons.com"
+    }
+  ],
+  "policies": {
+    "children_policy": [
+      "Standard room: up to two children below 8 years allowed.",
+      "Suite room: up to three children allowed at room rate; extra child is 10 OMR, up to total 4 children."
+    ],
+    "extra_person_policy": [
+      "Extra adult is 15 OMR; maximum total 3 adults in twin room without children.",
+      "Extra adult is 15 OMR; maximum total 4 adults in suite room."
+    ],
+    "rate_and_inventory_policy": [
+      "Rates are in local currency (OMR).",
+      "Advertised room rates apply to selected dates only.",
+      "Rates are subject to availability and may change without prior notice.",
+      "Rooms may be limited on public holidays, school breaks, and weekends.",
+      "Rates are per room per night."
+    ],
+    "tax_fee_note": "Rates include service tax/service charges and/or other applicable local charges depending on locality.",
+    "changes_allowed": [
+      "Guest name change allowed at least 3 days before check-in.",
+      "No other booking changes allowed; cancel and rebook if needed."
+    ]
+  },
+  "cancellation_policy": {
+    "summary": "Bookings are non-refundable within 3 days of check-in.",
+    "rules": [
+      "Cancellation is allowed at least 3 days before scheduled check-in; cancellation fees apply.",
+      "For permitted cancellations, amount minus cancellation fee is credited to a credit shell for future bookings.",
+      "Credit is valid for 3 months from cancellation date, currency-specific, and non-transferable.",
+      "If cancelled less than 3 days before check-in, the total booking amount is forfeited.",
+      "Promotional bookings may be non-cancellable unless explicitly stated otherwise."
+    ]
+  },
+  "contacts": {
+    "website": "www.ashkhara.com",
+    "email": "info@ashkhara.com",
+    "instagram": "ashkhara",
+    "management_contact": {
+      "name": "Tariq Alrasbi (MD)",
+      "mobile": "94082424"
+    },
+    "front_desk_mobile": [
+      "25535666",
+      "255335999"
+    ]
+  },
+  "faq_seed": [
+    {
+      "question": "What room types are available?",
+      "answer": "The resort offers Standard Superior Room, Standard Executive Room, Suite Room, and Small Apartment.",
+      "topic": "room_types"
+    },
+    {
+      "question": "What are your meal timings?",
+      "answer": "Restaurant timings are Breakfast 07:30-10:00, Lunch 13:00-16:00, and Dinner 19:00-21:30.",
+      "topic": "restaurant"
+    },
+    {
+      "question": "What activities are available?",
+      "answer": "Activities include pools, entertainment center games, fishing/boat trips, desert bikes, sports areas, traditional tent experience, and private BBQ sheds.",
+      "topic": "activities"
+    },
+    {
+      "question": "Do you have a coffee shop?",
+      "answer": "Yes, a western-style coffee shop serves espresso, americano, latte, and snacks from 10:00-22:00 with a 14:00-16:00 break.",
+      "topic": "coffee_shop"
+    },
+    {
+      "question": "What is the cancellation policy?",
+      "answer": "Bookings are non-refundable within 3 days of check-in. Eligible earlier cancellations receive credit shell (minus fees), valid for 3 months.",
+      "topic": "cancellation_policy"
+    },
+    {
+      "question": "How can I contact the resort?",
+      "answer": "You can contact info@ashkhara.com or front desk numbers 25535666 / 255335999.",
+      "topic": "contacts"
+    }
+  ]
+}
