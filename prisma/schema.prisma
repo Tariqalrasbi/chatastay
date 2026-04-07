@@ -61,6 +61,10 @@ enum PaymentStatus {
   SUCCEEDED
   FAILED
   REFUNDED
+  /// Local purchase order — B2B / company billing; follow-up via finance
+  LPO
+  /// Payment initiated by guest via bank transfer to friend/contact (manual reconciliation)
+  FRIENDS_TRANSFER
 }
 
 enum PaymentKind {
@@ -73,6 +77,10 @@ enum ChannelProvider {
   AIRBNB
   EXPEDIA
   DIRECT
+  WHATSAPP
+  PHONE
+  CORPORATE
+  REFERRAL
 }
 
 enum SyncStatus {
@@ -80,6 +88,135 @@ enum SyncStatus {
   RUNNING
   SUCCESS
   FAILED
+}
+
+enum FbOutletType {
+  RESTAURANT
+  COFFEE_SHOP
+}
+
+enum FbServiceMode {
+  ROOM_SERVICE
+  DINING_IN
+}
+
+enum FbOrderStatus {
+  POSTED
+  VOID
+}
+
+/// Lightweight kitchen / outlet ticket lifecycle (internal ops; not full POS).
+enum OutletTicketStatus {
+  NEW
+  ACKNOWLEDGED
+  PREPARING
+  READY
+  DELIVERED
+  CANCELLED
+}
+
+enum OutletTicketSource {
+  FB_MENU
+  FOLIO_CHARGE
+}
+
+/// Ledger lines for room-unit folio (charges, desk payments, adjustments) — reportable, soft-void only.
+/// Extended with REFUND / DISCOUNT for proper accounting (no silent edits to original lines).
+enum FolioTransactionType {
+  FNB_CHARGE
+  ACTIVITY_CHARGE
+  OTHER_SERVICE_CHARGE
+  PAYMENT
+  ADJUSTMENT
+  REFUND
+  DISCOUNT
+}
+
+enum FolioOutletCategory {
+  RESTAURANT
+  CAFE
+  ACTIVITY
+  ROOM_SERVICE
+  OTHER
+}
+
+enum FolioPostingTarget {
+  GUEST_FOLIO
+  BOOKING_ACCOUNT
+  ROOM_ACCOUNT
+}
+
+enum FolioTxnPaymentStatus {
+  UNPAID
+  PAID
+  VOIDED
+  REFUNDED
+  PENDING
+  PARTIALLY_PAID
+}
+
+/// Canonical ledger kind for reporting, POS mapping, and AI (mirrors FolioTransactionType but richer taxonomy).
+enum FolioLedgerKind {
+  ROOM_CHARGE
+  FNB_CHARGE
+  ACTIVITY_CHARGE
+  SERVICE_CHARGE
+  PAYMENT
+  ADJUSTMENT
+  DISCOUNT
+  REFUND
+  TAX
+  FEE
+}
+
+/// Revenue / outlet grouping for P&L and outlet reports (normalized; prefer over free text).
+enum FolioRevenueCategory {
+  ACCOMMODATION
+  RESTAURANT
+  CAFE
+  ROOM_SERVICE
+  ACTIVITY
+  LAUNDRY
+  TRANSPORT
+  MINIBAR
+  OTHER
+}
+
+/// Origin of the posting — audit, POS reconciliation, automation.
+enum FolioTxnSourceType {
+  MANUAL_FRONTDESK
+  ADMIN_PANEL
+  WHATSAPP_BOOKING
+  POS_RESTAURANT
+  POS_CAFE
+  ACTIVITY_DESK
+  SYSTEM_AUTO
+  API
+}
+
+enum FolioStatus {
+  OPEN
+  CLOSED
+  SETTLED
+  DISPUTED
+  CANCELLED
+}
+
+/// Staff / guest notification queue (Phase 1: persistence only; delivery wiring comes later).
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum OutletKind {
+  RESTAURANT
+  CAFE
+  ACTIVITY
+  ROOM_SERVICE
+  OTHER
 }
 
 model Hotel {
@@ -98,6 +235,7 @@ model Hotel {
   users          HotelUser[]
   properties     Property[]
   roomTypes      RoomType[]
+  roomUnits      RoomUnit[]
   inventories    Inventory[]
   guests         Guest[]
   conversations  Conversation[]
@@ -112,6 +250,16 @@ model Hotel {
   conversationSessions ConversationSession[]
   bookingDrafts  BookingDraft[]
   calendarSessions CalendarSession[]
+  menuItems      MenuItem[]
+  fbOrders       FbOrder[]
+  outletOrderTickets OutletOrderTicket[]
+  folioTransactions FolioTransaction[]
+  folios         Folio[]
+  outlets        Outlet[]
+  outletMenuItems OutletMenuItem[]
+  paymentAllocations PaymentAllocation[]
+  bookingStatusHistories BookingStatusHistory[]
+  notifications         Notification[]
 }
 
 model HotelUser {
@@ -127,6 +275,12 @@ model HotelUser {
   updatedAt    DateTime @updatedAt
 
   @@unique([hotelId, email])
+  folioTxnsCreated FolioTransaction[] @relation("FolioTxnCreatedBy")
+  folioTxnsVoided  FolioTransaction[] @relation("FolioTxnVoidedBy")
+  folioTxnsUpdated FolioTransaction[] @relation("FolioTxnUpdatedBy")
+  foliosCreated    Folio[]            @relation("FolioCreatedBy")
+  bookingStatusHistories BookingStatusHistory[]
+  notifications          Notification[]
 }
 
 model Property {
@@ -164,7 +318,9 @@ model RoomType {
   updatedAt       DateTime    @updatedAt
   inventory       Inventory[]
   bookings        Booking[]
+  roomUnits       RoomUnit[]
   channelMappings ChannelMapping[]
+  folioTransactions FolioTransaction[]
 
   @@unique([propertyId, code])
 }
@@ -194,6 +350,8 @@ model Guest {
   fullName       String?
   phoneE164      String
   email          String?
+  /// ISO nationality / country of passport (optional; front desk & reporting).
+  nationality    String?
   locale         String?        @default("en")
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -202,6 +360,11 @@ model Guest {
   conversationSessions ConversationSession[]
   bookingDrafts  BookingDraft[]
   calendarSessions CalendarSession[]
+  fbOrders       FbOrder[]
+  outletOrderTickets OutletOrderTicket[]
+  folioTransactions FolioTransaction[]
+  folios         Folio[]
+  notifications  Notification[]
 
   @@unique([hotelId, phoneE164])
 }
@@ -215,11 +378,12 @@ model Conversation {
   guestId       String
   guest         Guest             @relation(fields: [guestId], references: [id], onDelete: Cascade)
   channel       ChannelProvider   @default(DIRECT)
-  state         ConversationState @default(NEW)
-  lastMessageAt DateTime?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-  messages      Message[]
+  state           ConversationState @default(NEW)
+  agentHandoffAt  DateTime?
+  lastMessageAt   DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  messages        Message[]
   bookings      Booking[]
   sessions      ConversationSession[]
   bookingDrafts BookingDraft[]
@@ -249,6 +413,8 @@ model Booking {
   property       Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
   roomTypeId     String
   roomType       RoomType      @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  roomUnitId     String?
+  roomUnit       RoomUnit?     @relation(fields: [roomUnitId], references: [id], onDelete: SetNull)
   guestId        String
   guest          Guest         @relation(fields: [guestId], references: [id], onDelete: Restrict)
   conversationId String?
@@ -263,10 +429,339 @@ model Booking {
   status         BookingStatus @default(PENDING)
   source         ChannelProvider @default(DIRECT)
   paymentStatus  PaymentStatus @default(PENDING)
+  /// Human-friendly ref for staff & guests (e.g. WA-260404-001). Routes/APIs still use `id`.
+  referenceCode  String?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   paymentIntents PaymentIntent[]
   bookingDraft   BookingDraft?
+  fbOrders       FbOrder[]
+  outletOrderTickets OutletOrderTicket[]
+  folioTransactions FolioTransaction[]
+  folios         Folio[]
+  statusHistory  BookingStatusHistory[]
+  auditLogEntries AuditLog[] @relation("BookingAuditLogs")
+
+  @@unique([hotelId, referenceCode])
+  @@index([hotelId, referenceCode])
+}
+
+/// Immutable log of booking lifecycle status changes (PMS audit / reporting).
+model BookingStatusHistory {
+  id           String         @id @default(cuid())
+  hotelId      String
+  hotel        Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookingId    String
+  booking      Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  fromStatus   BookingStatus?
+  toStatus     BookingStatus
+  source       String         @default("SYSTEM")
+  actorUserId  String?
+  actorUser    HotelUser?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  note         String?
+  createdAt    DateTime       @default(now())
+
+  @@index([hotelId, bookingId])
+  @@index([hotelId, createdAt])
+}
+
+/// Financial ledger container for a stay. Default MAIN folio per booking; structure allows split/company folios later.
+model Folio {
+  id              String      @id @default(cuid())
+  hotelId         String
+  hotel           Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookingId       String
+  booking         Booking     @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  guestId         String?
+  guest           Guest?      @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  roomUnitId      String?
+  roomUnit        RoomUnit?   @relation(fields: [roomUnitId], references: [id], onDelete: SetNull)
+  folioCode       String      @default("MAIN")
+  folioStatus     FolioStatus @default(OPEN)
+  currency        String      @default("OMR")
+  openedAt        DateTime    @default(now())
+  closedAt        DateTime?
+  notes           String?
+  createdByUserId String?
+  createdBy       HotelUser?  @relation("FolioCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  transactions    FolioTransaction[]
+  paymentAllocations PaymentAllocation[]
+
+  @@unique([bookingId, folioCode])
+  @@index([hotelId, bookingId])
+  @@index([hotelId, folioStatus])
+}
+
+/// Master revenue outlets (POS / activity desks). MenuItem remains for legacy F&B orders; OutletMenuItem is the PMS catalog path.
+model Outlet {
+  id         String     @id @default(cuid())
+  hotelId    String
+  hotel      Hotel      @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  code       String
+  name       String
+  outletType OutletKind
+  isActive   Boolean    @default(true)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  menuItems  OutletMenuItem[]
+  folioTransactions FolioTransaction[]
+
+  @@unique([hotelId, code])
+  @@index([hotelId, outletType, isActive])
+}
+
+model OutletMenuItem {
+  id          String   @id @default(cuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  outletId    String
+  outlet      Outlet   @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  itemCode    String
+  itemName    String
+  description String?
+  category    String?
+  unitPrice   Float
+  taxRate     Float?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  folioTransactions FolioTransaction[]
+
+  @@index([hotelId, outletId, isActive])
+  @@index([hotelId, itemCode])
+}
+
+/// Optional FIFO / split application of a payment to specific charge lines (proper accounting, multi-line settlement).
+model PaymentAllocation {
+  id                     String   @id @default(cuid())
+  hotelId                String
+  hotel                  Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  folioId                String
+  folio                  Folio    @relation(fields: [folioId], references: [id], onDelete: Cascade)
+  paymentTransactionId   String
+  paymentTransaction     FolioTransaction @relation("AllocPaymentTxn", fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  appliedToTransactionId String?
+  appliedToTransaction   FolioTransaction? @relation("AllocChargeTxn", fields: [appliedToTransactionId], references: [id], onDelete: SetNull)
+  amountApplied          Float
+  createdAt              DateTime @default(now())
+
+  @@index([hotelId, folioId])
+  @@index([paymentTransactionId])
+  @@index([appliedToTransactionId])
+}
+
+model MenuItem {
+  id          String       @id @default(cuid())
+  hotelId     String
+  hotel       Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  outletType  FbOutletType
+  name        String
+  description String?
+  unitPrice   Float
+  currency    String       @default("OMR")
+  sortOrder   Int          @default(0)
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  orderLines  FbOrderLine[]
+  folioTransactions FolioTransaction[]
+
+  @@index([hotelId, outletType, isActive])
+}
+
+model FbOrder {
+  id          String        @id @default(cuid())
+  hotelId     String
+  hotel       Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookingId   String
+  booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  guestId     String
+  guest       Guest         @relation(fields: [guestId], references: [id], onDelete: Restrict)
+  outletType  FbOutletType
+  serviceMode FbServiceMode
+  status      FbOrderStatus @default(POSTED)
+  totalAmount Float
+  notes       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  lines       FbOrderLine[]
+  outletOrderTicket OutletOrderTicket?
+
+  @@index([hotelId, bookingId])
+  @@index([guestId])
+}
+
+model FbOrderLine {
+  id           String    @id @default(cuid())
+  orderId      String
+  order        FbOrder   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItemId   String?
+  menuItem     MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  itemNameSnap String
+  quantity     Int
+  unitPrice    Float
+  lineTotal    Float
+
+  @@index([orderId])
+}
+
+/// Guest folio line item (blueprint name: FolioLine). Single ledger model — do not add a duplicate FolioLine table.
+model FolioTransaction {
+  id                 String                 @id @default(cuid())
+  hotelId            String
+  hotel              Hotel                  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  folioId            String?
+  folio              Folio?                 @relation(fields: [folioId], references: [id], onDelete: SetNull)
+  bookingId          String?
+  booking            Booking?               @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  guestId            String?
+  guest              Guest?                 @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  roomUnitId         String?
+  roomUnit           RoomUnit?              @relation(fields: [roomUnitId], references: [id], onDelete: SetNull)
+  roomTypeId         String?
+  roomType           RoomType?              @relation(fields: [roomTypeId], references: [id], onDelete: SetNull)
+
+  transactionType    FolioTransactionType
+  /// Reporting / POS taxonomy (populated for new rows; legacy rows may be null until backfilled).
+  ledgerKind         FolioLedgerKind?
+  /// Normalized revenue bucket for outlet P&L (populated for new rows).
+  revenueCategory    FolioRevenueCategory?
+  sourceType         FolioTxnSourceType     @default(ADMIN_PANEL)
+
+  outletCategory     FolioOutletCategory
+
+  outletId           String?
+  outlet             Outlet?                @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  outletMenuItemId   String?
+  outletMenuItem     OutletMenuItem?        @relation(fields: [outletMenuItemId], references: [id], onDelete: SetNull)
+  menuItemId         String?
+  menuItem           MenuItem?              @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  itemCode           String?
+  itemName           String
+  description        String?
+
+  quantity           Int                    @default(1)
+  unitPrice          Float
+  grossAmount        Float
+  discountAmount     Float                  @default(0)
+  taxAmount          Float                  @default(0)
+  netAmount          Float
+
+  currency           String                 @default("OMR")
+
+  postingTarget      FolioPostingTarget     @default(BOOKING_ACCOUNT)
+
+  folioPaymentStatus FolioTxnPaymentStatus  @default(UNPAID)
+  folioPaymentMethod String?
+  referenceNumber    String?
+
+  chargeDate         DateTime               @default(now())
+  /// When the service was consumed (distinct from postedAt / chargeDate when back-posting).
+  serviceDate        DateTime?
+  postedAt           DateTime               @default(now())
+  effectiveDate      DateTime?
+
+  notes              String?
+  staffNote          String?
+  internalNote       String?
+
+  createdByUserId    String?
+  createdBy          HotelUser?             @relation("FolioTxnCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedByUserId    String?
+  updatedBy          HotelUser?             @relation("FolioTxnUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  voidedAt           DateTime?
+  voidedByUserId     String?
+  voidedBy           HotelUser?             @relation("FolioTxnVoidedBy", fields: [voidedByUserId], references: [id], onDelete: SetNull)
+  voidReason         String?
+  /// Denormalized for fast filtering; always in sync with voidedAt in application layer.
+  isVoided           Boolean                @default(false)
+
+  parentTransactionId String?
+  parentTransaction   FolioTransaction?     @relation("FolioTxnParent", fields: [parentTransactionId], references: [id], onDelete: SetNull)
+  childTransactions   FolioTransaction[]    @relation("FolioTxnParent")
+
+  externalSourceId    String?
+  externalSourcePayload String?
+
+  allocationsAsPayment PaymentAllocation[]  @relation("AllocPaymentTxn")
+  allocationsAsCharge  PaymentAllocation[]  @relation("AllocChargeTxn")
+
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@index([hotelId, bookingId])
+  @@index([hotelId, folioId])
+  @@index([hotelId, folioId, chargeDate])
+  @@index([hotelId, roomUnitId, chargeDate])
+  @@index([bookingId, folioPaymentStatus])
+  @@index([hotelId, ledgerKind])
+  @@index([hotelId, revenueCategory])
+  @@index([hotelId, sourceType])
+  @@index([hotelId, isVoided])
+  @@index([hotelId, chargeDate])
+  @@index([parentTransactionId])
+
+  outletOrderTicket OutletOrderTicket?
+}
+
+/// Internal outlet order ticket — one per FbOrder (menu POS) or per qualifying FolioTransaction (desk charge).
+model OutletOrderTicket {
+  id        String @id @default(cuid())
+  hotelId   String
+  hotel     Hotel  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  guestId   String?
+  guest     Guest?  @relation(fields: [guestId], references: [id], onDelete: SetNull)
+
+  source OutletTicketSource
+
+  fbOrderId String?  @unique
+  fbOrder   FbOrder? @relation(fields: [fbOrderId], references: [id], onDelete: Cascade)
+
+  folioTransactionId String?           @unique
+  folioTransaction   FolioTransaction? @relation(fields: [folioTransactionId], references: [id], onDelete: SetNull)
+
+  /// Filter key: FbOutletType value or FolioOutletCategory name (e.g. RESTAURANT, COFFEE_SHOP, ROOM_SERVICE).
+  outletKey   String
+  serviceMode FbServiceMode?
+  notes       String?
+
+  ticketStatus OutletTicketStatus @default(NEW)
+
+  /// Last outlet WhatsApp notify attempt (aligned with ticket; internal board stays source of truth).
+  whatsappNotifyAt     DateTime?
+  whatsappNotifyOk     Boolean?
+  whatsappNotifyDetail String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([hotelId, ticketStatus])
+  @@index([hotelId, outletKey])
+  @@index([hotelId, createdAt])
+}
+
+model RoomUnit {
+  id         String   @id @default(cuid())
+  hotelId    String
+  hotel      Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  roomTypeId String
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  name       String
+  sortOrder  Int?
+  isActive   Boolean  @default(true)
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  bookings   Booking[]
+  folioTransactions FolioTransaction[]
+  folios     Folio[]
+
+  @@unique([roomTypeId, name])
+  @@index([hotelId, roomTypeId, isActive])
 }
 
 model Plan {
@@ -416,9 +911,38 @@ model AuditLog {
   action      String
   entityType  String
   entityId    String?
+  /// When the audit entry concerns a booking, set for faster filtering (optional).
+  bookingId   String?
+  booking     Booking? @relation("BookingAuditLogs", fields: [bookingId], references: [id], onDelete: SetNull)
   metadataJson String?
   createdAt   DateTime @default(now())
 
+  @@index([hotelId, createdAt])
+  @@index([hotelId, bookingId])
+}
+
+/// Durable notification record (in-app / future email & push). Phase 1: store only; no sender worker yet.
+model Notification {
+  id          String             @id @default(cuid())
+  hotelId     String
+  hotel       Hotel              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  guestId     String?
+  guest       Guest?             @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  hotelUserId String?
+  hotelUser   HotelUser?         @relation(fields: [hotelUserId], references: [id], onDelete: SetNull)
+  channel     String             @default("IN_APP")
+  type        String
+  title       String?
+  body        String
+  status      NotificationStatus @default(PENDING)
+  payloadJson String?
+  readAt      DateTime?
+  sentAt      DateTime?
+  createdAt   DateTime           @default(now())
+
+  @@index([hotelId, status])
+  @@index([hotelId, guestId])
+  @@index([hotelId, hotelUserId])
   @@index([hotelId, createdAt])
 }
 

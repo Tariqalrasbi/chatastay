@@ -5,6 +5,12 @@ export type PartnerSetupConfig = {
   hotelDescription: string;
   amenitiesSummary: string;
   whatsappPhoneNumberId: string;
+  /** E.164-ish digits for outlet order alerts (restaurant / kitchen / café / room service / activity). */
+  outletRestaurantWhatsAppE164: string;
+  outletCoffeeShopWhatsAppE164: string;
+  /** Room-service prep; if empty, falls back to restaurant number for RS folio charges. */
+  outletRoomServiceWhatsAppE164: string;
+  outletActivityWhatsAppE164: string;
   aiEnabled: boolean;
   aiTone: "friendly" | "premium" | "concise";
   instantWelcomeTemplate: string;
@@ -24,6 +30,10 @@ const defaultPartnerSetupConfig: PartnerSetupConfig = {
   hotelDescription: "Beachfront resort with direct WhatsApp booking assistance and flexible room options.",
   amenitiesSummary: "Private beach access, family apartments, sea-view suites, breakfast options.",
   whatsappPhoneNumberId: "",
+  outletRestaurantWhatsAppE164: "",
+  outletCoffeeShopWhatsAppE164: "",
+  outletRoomServiceWhatsAppE164: "",
+  outletActivityWhatsAppE164: "",
   aiEnabled: true,
   aiTone: "friendly",
   instantWelcomeTemplate: "Welcome to {{hotel_name}}. Tell us your check-in/check-out dates and number of guests to get instant options.",
@@ -51,6 +61,13 @@ function sanitizePartnerConfig(parsed: Partial<PartnerSetupConfig> | undefined):
     hotelDescription: source.hotelDescription ?? defaultPartnerSetupConfig.hotelDescription,
     amenitiesSummary: source.amenitiesSummary ?? defaultPartnerSetupConfig.amenitiesSummary,
     whatsappPhoneNumberId: source.whatsappPhoneNumberId ?? defaultPartnerSetupConfig.whatsappPhoneNumberId,
+    outletRestaurantWhatsAppE164:
+      source.outletRestaurantWhatsAppE164 ?? defaultPartnerSetupConfig.outletRestaurantWhatsAppE164,
+    outletCoffeeShopWhatsAppE164:
+      source.outletCoffeeShopWhatsAppE164 ?? defaultPartnerSetupConfig.outletCoffeeShopWhatsAppE164,
+    outletRoomServiceWhatsAppE164:
+      source.outletRoomServiceWhatsAppE164 ?? defaultPartnerSetupConfig.outletRoomServiceWhatsAppE164,
+    outletActivityWhatsAppE164: source.outletActivityWhatsAppE164 ?? defaultPartnerSetupConfig.outletActivityWhatsAppE164,
     aiEnabled: typeof source.aiEnabled === "boolean" ? source.aiEnabled : defaultPartnerSetupConfig.aiEnabled,
     aiTone:
       source.aiTone === "friendly" || source.aiTone === "premium" || source.aiTone === "concise"

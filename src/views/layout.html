@@ -102,6 +102,7 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
+        flex: 1;
       }
       nav a,
       nav button {
@@ -122,9 +123,132 @@
       nav form {
         margin: 0;
       }
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+      }
+      .sidebar-nav {
+        flex: 1;
+      }
+      .sidebar-logout {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(255, 255, 255, 0.2);
+      }
+      .top-level-link {
+        font-weight: 700;
+      }
+      nav a.top-level-active {
+        background: #25d366;
+        color: #083d2d;
+        border-color: transparent;
+      }
+      nav a.active-link {
+        background: #25d366;
+        color: #083d2d;
+        border-color: transparent;
+        font-weight: 700;
+      }
+      .top-subnav {
+        margin: 0 0 12px;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: #f7faf9;
+      }
+      .section-tabs {
+        display: none;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .section-tabs.active {
+        display: flex;
+      }
+      .section-tabs a {
+        text-decoration: none;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 7px 11px;
+        color: var(--wa-deep);
+        background: #fff;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .section-tabs a.active-link {
+        background: var(--wa-green);
+        border-color: transparent;
+        color: #083d2d;
+      }
       .content {
         padding: 24px;
         min-width: 0;
+      }
+      .admin-toast-stack {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 10000;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-width: min(380px, calc(100vw - 32px));
+        pointer-events: none;
+      }
+      .admin-toast {
+        pointer-events: auto;
+        background: #fff;
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--wa-deep);
+        border-radius: 10px;
+        padding: 10px 12px;
+        box-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
+        animation: adminToastIn 0.25s ease-out;
+      }
+      .admin-toast-booking {
+        border-left-color: #b45309;
+        background: #fffbeb;
+      }
+      .admin-toast-title {
+        display: block;
+        font-size: 13px;
+        margin: 0 0 4px;
+        color: var(--text);
+      }
+      .admin-toast-body {
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.35;
+        max-height: 4.2em;
+        overflow: hidden;
+      }
+      .admin-toast-out {
+        opacity: 0;
+        transform: translateX(8px);
+        transition: opacity 0.35s ease, transform 0.35s ease;
+      }
+      @keyframes adminToastIn {
+        from {
+          opacity: 0;
+          transform: translateY(-6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .nav-live-badge {
+        display: inline-block;
+        min-width: 1.1em;
+        padding: 1px 6px;
+        margin-left: 4px;
+        font-size: 11px;
+        font-weight: 800;
+        line-height: 1.3;
+        border-radius: 999px;
+        background: #fbbf24;
+        color: #422006;
+        vertical-align: middle;
       }
       .panel {
         background: var(--card);
@@ -277,6 +401,42 @@
         background: #fee2e2;
         color: #991b1b;
       }
+      html[dir="rtl"] body {
+        text-align: right;
+      }
+      html[dir="rtl"] .shell {
+        grid-template-columns: 1fr 280px;
+      }
+      html[dir="rtl"] .sidebar {
+        order: 2;
+        box-shadow: -6px 0 24px rgba(7, 94, 84, 0.18);
+      }
+      html[dir="rtl"] .content {
+        order: 1;
+      }
+      html[dir="rtl"] .lang-switcher {
+        justify-content: flex-end;
+      }
+      html[dir="rtl"] nav a,
+      html[dir="rtl"] nav button {
+        text-align: right;
+      }
+      html[dir="rtl"] th,
+      html[dir="rtl"] td {
+        text-align: right;
+      }
+      html[dir="rtl"] .actions {
+        justify-content: flex-end;
+      }
+      html[dir="rtl"] .section-tabs {
+        justify-content: flex-end;
+      }
+      html[dir="rtl"] .bubble.inbound {
+        justify-self: end;
+      }
+      html[dir="rtl"] .bubble.outbound {
+        justify-self: start;
+      }
       @media (max-width: 980px) {
         .shell {
           grid-template-columns: 1fr;
@@ -364,6 +524,15 @@
           text-align: left;
           padding-right: 10px;
         }
+        html[dir="rtl"] tbody td {
+          text-align: left;
+        }
+        html[dir="rtl"] tbody td::before {
+          float: right;
+          text-align: right;
+          padding-right: 0;
+          padding-left: 10px;
+        }
         tbody th {
           display: block;
           border-bottom: 0;
@@ -390,9 +559,11 @@
           <strong>{{hotelName}}</strong>
           <span>{{hotelSign}}</span>
         </div>
-        <nav>{{navLinks}}</nav>
+        <nav class="sidebar-nav">{{navLinks}}</nav>
+        <div class="sidebar-logout">{{logoutAction}}</div>
       </aside>
       <main class="content">
+        <div class="top-subnav">{{sectionTabs}}</div>
         <section class="panel">{{content}}</section>
       </main>
     </div>
@@ -417,6 +588,52 @@
         document.querySelectorAll("[data-lang-link]").forEach((link) => {
           if (link.getAttribute("data-lang-link") === lang) {
             link.classList.add("active");
+          }
+        });
+
+        const normalizePath = (href) => {
+          if (!href) return "";
+          try {
+            const u = new URL(href, window.location.origin);
+            return u.pathname.replace(/\/+$/, "") || "/";
+          } catch {
+            return "";
+          }
+        };
+        const currentPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
+        const groupByPath = (path) => {
+          if (path.startsWith("/admin/front-desk")) return "frontdesk";
+          if (
+            path.startsWith("/admin/bookings") ||
+            path.startsWith("/admin/calendar") ||
+            path.startsWith("/admin/conversations") ||
+            path.startsWith("/admin/rooms") ||
+            path.startsWith("/admin/inventory") ||
+            path.startsWith("/admin/offers") ||
+            path.startsWith("/admin/fb")
+          )
+            return "reservations";
+          if (path.startsWith("/admin/profile") || path.startsWith("/admin/users") || path.startsWith("/admin/subscription") || path.startsWith("/admin/billing") || path.startsWith("/admin/integrations") || path.startsWith("/admin/setup")) return "account";
+          if (path.startsWith("/admin/reports") || path.startsWith("/admin/ai-analytics") || path.startsWith("/admin/booking-funnel") || path.startsWith("/admin/routing-health")) return "insights";
+          return "dashboard";
+        };
+        const activeGroup = groupByPath(currentPath);
+
+        document.querySelectorAll(".top-level-link").forEach((link) => {
+          if (link.getAttribute("data-top-group") === activeGroup) {
+            link.classList.add("top-level-active");
+          }
+        });
+
+        const sections = Array.from(document.querySelectorAll(".section-tabs"));
+        sections.forEach((section) => {
+          if (section.getAttribute("data-section") === activeGroup) {
+            section.classList.add("active");
+            section.querySelectorAll("a").forEach((subLink) => {
+              if (normalizePath(subLink.getAttribute("href")) === currentPath) {
+                subLink.classList.add("active-link");
+              }
+            });
           }
         });
 
@@ -447,14 +664,22 @@
             "ChatAstay Admin": "تشاتا ستاي - لوحة التحكم",
             "WhatsApp-first booking ops": "إدارة الحجوزات عبر واتساب",
             "Dashboard": "لوحة التحكم",
+            "Reservations": "الحجوزات",
+            "Account": "الحساب",
+            "Insights": "الرؤى",
+            "Hotel Profile": "ملف الفندق",
+            "Room Board": "لوحة الغرف",
             "Rooms": "الغرف",
             "Inventory": "المخزون",
             "Bookings": "الحجوزات",
             "Calendar": "التقويم",
             "Conversations": "المحادثات",
+            "Users": "المستخدمون",
             "Subscription": "الاشتراك",
             "Billing": "الفواتير",
             "Integrations": "التكاملات",
+            "Settings": "الإعدادات",
+            "Reports": "التقارير",
             "Logout": "تسجيل الخروج",
             "Login": "تسجيل الدخول",
             "Admin Login": "تسجيل دخول الإدارة",
@@ -463,6 +688,7 @@
             "Password": "كلمة المرور",
             "Rooms & Pricing": "الغرف والأسعار",
             "Inventory Control": "إدارة المخزون",
+            "Room Availability": "توفر الغرف",
             "Reports & Bookings": "التقارير والحجوزات",
             "Room Calendar": "تقويم الغرف",
             "Conversation Detail": "تفاصيل المحادثة",
@@ -520,5 +746,7 @@
         }
       })();
     </script>
+    <div id="adminToastStack" class="admin-toast-stack" aria-live="polite"></div>
+    {{extraScripts}}
   </body>
 </html>

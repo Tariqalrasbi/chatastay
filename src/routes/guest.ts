@@ -1,4 +1,6 @@
 import { Router } from "express";
+import fs from "node:fs";
+import path from "node:path";
 import { prisma } from "../db";
 import { findAvailableRoomType, getDayAvailability, toIsoDate } from "../core/availability";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
@@ -31,6 +33,34 @@ function addDays(input: Date, days: number): Date {
 }
 
 const defaultHotelSlug = process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort";
+const offersFile = path.join(process.cwd(), "hotel-offers.json");
+
+type GuestOffer = {
+  id: string;
+  code: string;
+  title: string;
+  type: string;
+  discountPercent: number;
+  isActive: boolean;
+  seasonStart?: string;
+  seasonEnd?: string;
+  minNights?: number;
+  minDaysBeforeCheckIn?: number;
+  stayX?: number;
+  stayY?: number;
+  corporateOnly?: boolean;
+};
+
+function readActiveOffersForGuest(): GuestOffer[] {
+  try {
+    if (!fs.existsSync(offersFile)) return [];
+    const raw = JSON.parse(fs.readFileSync(offersFile, "utf8")) as unknown;
+    if (!Array.isArray(raw)) return [];
+    return (raw as GuestOffer[]).filter((offer) => offer.isActive);
+  } catch {
+    return [];
+  }
+}
 
 function parseIntSafe(raw: unknown, fallback: number, min: number, max: number): number {
   const num = Number(raw);
@@ -106,10 +136,78 @@ guestRouter.get("/", async (req, res) => {
   const error = typeof req.query.error === "string" ? req.query.error.trim() : "";
 
   if (!bookingId || !phone) {
+    const hotel =
+      (await prisma.hotel.findUnique({
+        where: { slug: defaultHotelSlug },
+        include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
+      })) ??
+      (await prisma.hotel.findFirst({
+        include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
+      }));
+    const offers = readActiveOffersForGuest();
+
+    const roomRows = hotel?.roomTypes
+      .map(
+        (room) => `<tr>
+      <td>${escapeHtml(room.name)}</td>
+      <td>${room.capacity}</td>
+      <td>${room.baseNightlyRate.toFixed(2)} ${escapeHtml(hotel.currency)}</td>
+      <td>${room.totalInventory}</td>
+    </tr>`
+      )
+      .join("");
+
+    const offerRows = offers
+      .map((offer) => {
+        const conditionParts: string[] = [];
+        if (offer.type === "STAY_X_GET_Y_FREE" && offer.stayX && offer.stayY) conditionParts.push(`Stay ${offer.stayX} get ${offer.stayY} free`);
+        if (offer.type === "EARLY_BOOKING" && offer.minDaysBeforeCheckIn) conditionParts.push(`${offer.minDaysBeforeCheckIn}+ days ahead`);
+        if (offer.type === "LONG_STAY" && offer.minNights) conditionParts.push(`${offer.minNights}+ nights`);
+        if (offer.type === "SEASONAL" && offer.seasonStart && offer.seasonEnd) conditionParts.push(`${offer.seasonStart} to ${offer.seasonEnd}`);
+        if (offer.corporateOnly) conditionParts.push("Corporate only");
+        return `<tr>
+      <td>${escapeHtml(offer.title)}</td>
+      <td>${escapeHtml(offer.type)}</td>
+      <td>${offer.discountPercent}%</td>
+      <td>${escapeHtml(conditionParts.join(" • ") || "Standard offer terms")}</td>
+    </tr>`;
+      })
+      .join("");
+
+    const contactPhone = normalizePhone(hotel?.whatsappPhone ?? "");
+    const waLink = contactPhone ? `https://wa.me/${encodeURIComponent(contactPhone)}` : "";
+
     const content = `
 <h1>Guest Booking Portal</h1>
-<p class="muted">Check your booking status, stay dates, and payment status.</p>
+<p class="muted">View rooms and offers, check booking details, and contact the hotel.</p>
 ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
+<section style="margin-bottom:14px">
+  <h2>Rooms</h2>
+  <table>
+    <thead><tr><th>Room</th><th>Capacity</th><th>Rate</th><th>Inventory</th></tr></thead>
+    <tbody>${roomRows || '<tr><td colspan="4">No rooms available.</td></tr>'}</tbody>
+  </table>
+  <p style="margin-top:10px"><a class="inline-link" href="/guest/calendar${hotel ? `?hotelId=${encodeURIComponent(hotel.id)}` : ""}">Check availability calendar</a></p>
+</section>
+<section style="margin-bottom:14px">
+  <h2>Offers</h2>
+  <table>
+    <thead><tr><th>Offer</th><th>Type</th><th>Discount</th><th>Details</th></tr></thead>
+    <tbody>${offerRows || '<tr><td colspan="4">No active offers right now.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin-bottom:14px">
+  <h2>Contact Hotel</h2>
+  <p class="muted">Need help? Contact our team directly.</p>
+  <div style="display:flex; gap:8px; flex-wrap:wrap">
+    ${waLink ? `<a class="inline-link" href="${waLink}" target="_blank" rel="noopener noreferrer">WhatsApp</a>` : ""}
+    ${hotel?.whatsappPhone ? `<span class="inline-link" style="text-decoration:none">${escapeHtml(hotel.whatsappPhone)}</span>` : ""}
+    <a class="inline-link" href="mailto:${escapeHtml(process.env.ADMIN_EMAIL ?? "reservations@chatastay.local")}">Email hotel</a>
+  </div>
+</section>
+<section>
+<h2>Check Booking Details</h2>
+<p class="muted">Enter your booking information to view stay and payment status.</p>
 <form method="post" action="/guest/lookup">
   <label>Booking ID
     <input type="text" name="bookingId" value="${escapeHtml(bookingId)}" placeholder="WB-ABC123" required />
@@ -118,7 +216,8 @@ ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
     <input type="text" name="phone" value="${escapeHtml(phone)}" placeholder="9689XXXXXXX" required />
   </label>
   <button type="submit">Check Booking</button>
-</form>`;
+</form>
+</section>`;
     res.type("html").send(guestLayout(content));
     return;
   }

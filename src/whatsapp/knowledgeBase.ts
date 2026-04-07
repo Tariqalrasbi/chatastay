@@ -185,3 +185,37 @@ export function buildKnowledgeFallbackMessage(): string {
   return "I could not find that specific detail in the current hotel knowledge file yet. You can ask about rooms, amenities, meals, coffee shop, activities, policies, cancellation, or contacts.";
 }
 
+export function getRoomTypesForBookingSubmenu(): string {
+  return buildRoomTypesAnswer();
+}
+
+export function getOffersForBookingSubmenu(): string {
+  const k = knowledge as Record<string, unknown>;
+  const offers = Array.isArray(k.offers) ? (k.offers as string[]) : undefined;
+  if (offers && offers.length > 0) {
+    return "Current offers and promotions:\n" + offers.map((o, i) => `${i + 1}. ${o}`).join("\n");
+  }
+  return "No current offers or promotions are listed. For the best available rate, please check availability for your dates.";
+}
+
+export function getLocationAndHotelInfoForSubmenu(): string {
+  const loc = knowledge.location as {
+    village?: string;
+    governorate?: string;
+    country?: string;
+    road_context?: string;
+    distance_from_muscat_km?: number;
+    distance_from_sur_km?: number;
+  };
+  const profile = knowledge.hotel_profile as { short_description?: string; hotel_name?: string };
+  const parts: string[] = [];
+  if (profile.hotel_name) parts.push(profile.hotel_name + ".");
+  if (profile.short_description) parts.push(profile.short_description);
+  if (loc.village || loc.governorate || loc.country) {
+    parts.push(`Location: ${[loc.village, loc.governorate, loc.country].filter(Boolean).join(", ")}.`);
+  }
+  if (loc.road_context) parts.push(loc.road_context);
+  if (loc.distance_from_muscat_km != null) parts.push(`About ${loc.distance_from_muscat_km} km from Muscat.`);
+  return parts.length > 0 ? parts.join("\n") : "Location and hotel information is not available in the current knowledge file.";
+}
+

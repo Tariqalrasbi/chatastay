@@ -1,0 +1,30 @@
+{
+  "mealPlans": {
+    "NONE": { "perPersonPerNight": 0 },
+    "BREAKFAST": { "perPersonPerNight": 4 },
+    "HALF_BOARD": { "perPersonPerNight": 15 }
+  },
+  "extras": [
+    {
+      "id": "airport_transfer",
+      "label": "Airport transfer (one-way)",
+      "amount": 25,
+      "applyPerNight": false,
+      "applyPerHour": false
+    },
+    {
+      "id": "extra_bed",
+      "label": "Extra bed",
+      "amount": 10,
+      "applyPerNight": true,
+      "applyPerHour": false
+    },
+    {
+      "id": "bike_rent",
+      "label": "Bikes rent",
+      "amount": 10,
+      "applyPerNight": false,
+      "applyPerHour": true
+    }
+  ]
+}

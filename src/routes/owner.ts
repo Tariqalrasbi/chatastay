@@ -314,17 +314,39 @@ async function logOwnerAudit(params: {
   entityType: string;
   entityId?: string;
   metadata?: Record<string, unknown>;
+  actorEmail?: string;
 }): Promise<void> {
+  const email = params.actorEmail ?? ownerActorEmail;
   await prisma.auditLog.create({
     data: {
       hotelId: params.hotelId,
-      actorEmail: ownerActorEmail,
+      actorEmail: email,
+      actorUserId: `OWNER:${email}`,
       action: params.action,
       entityType: params.entityType,
       entityId: params.entityId,
       metadataJson: params.metadata ? JSON.stringify(params.metadata) : undefined
     }
   });
+}
+
+function getOwnerSessionEmail(req: Request): string | undefined {
+  const token = getOwnerSessionToken(req);
+  if (!token) return undefined;
+  const session = ownerSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) return undefined;
+  return session.email;
+}
+
+/** True for roles allowed to change physical room-type capacity (not SUPPORT). */
+function canManageRoomCapacity(req: Request): boolean {
+  const email = getOwnerSessionEmail(req);
+  if (!email) return false;
+  const ownerEmail = (process.env.OWNER_EMAIL ?? "owner@chatastay.local").trim().toLowerCase();
+  if (email.toLowerCase() === ownerEmail) return true;
+  const user = loadOwnerUsers().find((u) => u.email === email.toLowerCase());
+  const role = user?.role ?? "SUPPORT";
+  return role === "OWNER" || role === "PLATFORM_ADMIN";
 }
 
 function ownerLayout(content: string, authenticated: boolean): string {
@@ -844,6 +866,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
       <td>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Open</a>
+          <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/extranet">Open Extranet (Safe)</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/impersonate">Read-only Extranet</a>
@@ -860,7 +883,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
 
   const content = `
 <h2>Hotels</h2>
-<p class="muted">Manage all partner hotels, status, and subscriptions.</p>
+<p class="muted">Manage all partner hotels, status, and subscriptions. Use <strong>Activate</strong> to reactivate a suspended hotel.</p>
 <form method="get" action="/owner/hotels" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
   <input type="text" name="q" value="${escapeHtml(q)}" placeholder="Search by name or slug" style="min-width:260px; padding:9px; border:1px solid #d8dee6; border-radius:8px" />
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Search</button>
@@ -1097,6 +1120,7 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
 <div class="actions">
   <a class="btn-link" href="/owner/hotels">Back to hotels</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
+  <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity (totals)</a>
   <a class="btn-link primary" href="/admin/dashboard">Open partner extranet</a>
 </div>
 <div class="grid-2">
@@ -1136,6 +1160,99 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
   res.type("html").send(ownerLayout(content, true));
 });
 
+ownerRouter.get("/hotels/:id/room-capacity", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) {
+    res
+      .status(403)
+      .type("html")
+      .send(
+        ownerLayout(
+          '<h2>Access denied</h2><p>Only platform owner or platform admin can edit physical room totals.</p><p><a class="btn-link" href="/owner/hotels">Back to hotels</a></p>',
+          true
+        )
+      );
+    return;
+  }
+  const hotelId = String(req.params.id ?? "");
+  const hotel = await prisma.hotel.findUnique({
+    where: { id: hotelId },
+    include: { roomTypes: { orderBy: { name: "asc" } } }
+  });
+  if (!hotel) {
+    res.status(404).type("html").send(ownerLayout("<h2>Room capacity</h2><p>Hotel not found.</p>", true));
+    return;
+  }
+  const saved = req.query.saved ? '<p class="badge ok">Physical room totals updated.</p>' : "";
+  const rows = hotel.roomTypes
+    .map(
+      (rt) => `<tr>
+      <td>${escapeHtml(rt.name)}</td>
+      <td><code>${escapeHtml(rt.code)}</code></td>
+      <td>${rt.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge pending">Inactive</span>'}</td>
+      <td>
+        <input type="number" min="0" name="total_${escapeHtml(rt.id)}" value="${rt.totalInventory}" style="width:100px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </td>
+    </tr>`
+    )
+    .join("");
+  const content = `
+<h2>Room capacity: ${escapeHtml(hotel.displayName)}</h2>
+<p class="muted">Set the <strong>maximum number of sellable rooms</strong> per category (physical cap). Hotel admins cannot change these; they adjust daily bookable counts under <em>Room Availability</em> in the partner console (up to this cap).</p>
+${saved}
+<div class="actions">
+  <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Back to hotel</a>
+  <a class="btn-link primary" href="/owner/hotels">All hotels</a>
+</div>
+<form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity" style="margin-top:12px">
+  <table>
+    <thead><tr><th>Room type</th><th>Code</th><th>Status</th><th>Total rooms (cap)</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="4">No room types.</td></tr>'}</tbody>
+  </table>
+  <button type="submit" style="margin-top:12px; padding:10px 16px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Save totals</button>
+</form>`;
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/hotels/:id/room-capacity", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) {
+    res.status(403).type("html").send(ownerLayout("<h2>Access denied</h2><p>Insufficient role.</p>", true));
+    return;
+  }
+  const hotelId = String(req.params.id ?? "");
+  const hotel = await prisma.hotel.findUnique({ where: { id: hotelId } });
+  if (!hotel) {
+    res.redirect("/owner/hotels");
+    return;
+  }
+  const actorEmail = getOwnerSessionEmail(req) ?? ownerActorEmail;
+  const body = req.body as Record<string, unknown>;
+  const roomTypes = await prisma.roomType.findMany({ where: { hotelId } });
+  for (const rt of roomTypes) {
+    const key = `total_${rt.id}`;
+    if (body[key] === undefined) continue;
+    const n = Math.max(0, parseInt(String(body[key]), 10) || 0);
+    await prisma.roomType.update({ where: { id: rt.id }, data: { totalInventory: n } });
+    const invs = await prisma.inventory.findMany({ where: { roomTypeId: rt.id, hotelId } });
+    for (const inv of invs) {
+      const nextTotal = Math.min(inv.total, n);
+      const nextReserved = Math.min(inv.reserved, nextTotal);
+      await prisma.inventory.update({
+        where: { id: inv.id },
+        data: { total: nextTotal, reserved: nextReserved }
+      });
+    }
+    await logOwnerAudit({
+      hotelId: hotel.id,
+      action: "OWNER_ROOM_TYPE_TOTAL_SET",
+      entityType: "RoomType",
+      entityId: rt.id,
+      metadata: { code: rt.code, totalInventory: n },
+      actorEmail
+    });
+  }
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/room-capacity?saved=1`);
+});
+
 ownerRouter.get("/hotels/:id/whatsapp", requireOwnerAuth, async (req, res) => {
   const hotelId = String(req.params.id ?? "");
   const hotel = await prisma.hotel.findUnique({ where: { id: hotelId } });
@@ -1154,7 +1271,7 @@ ${updatedNotice}
     <input type="text" name="whatsappPhone" value="${escapeHtml(hotel.whatsappPhone ?? "")}" placeholder="9689XXXXXXX" style="width:100%; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
   </label>
   <label>WhatsApp Phone Number ID (Cloud API)
-    <input type="text" name="whatsappPhoneNumberId" value="${escapeHtml(config.whatsappPhoneNumberId)}" placeholder="1002161622980212" required style="width:100%; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+    <input type="text" name="whatsappPhoneNumberId" value="${escapeHtml(config.whatsappPhoneNumberId)}" placeholder="Meta WhatsApp → API setup → Phone number ID" required style="width:100%; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
   </label>
   <button type="submit" style="padding:10px 14px; border:0; border-radius:10px; background:#0b6e6e; color:#fff; font-weight:700; cursor:pointer">Save Routing</button>
 </form>
@@ -1207,56 +1324,104 @@ ownerRouter.post("/hotels/:id/whatsapp", requireOwnerAuth, async (req, res) => {
 ownerRouter.get("/subscriptions", requireOwnerAuth, async (_req, res) => {
   const plans = await prisma.plan.findMany({ where: { isActive: true }, orderBy: { monthlyPrice: "asc" } });
   const subscriptions = await prisma.subscription.findMany({
-    where: { status: { in: ["ACTIVE", "TRIALING", "PAST_DUE"] } },
     include: { hotel: true, plan: true },
     orderBy: { createdAt: "desc" }
   });
 
   const rows = subscriptions
     .map(
-      (subscription) => `<tr>
+      (subscription) => {
+        const isActiveOrTrialing =
+          subscription.status === "ACTIVE" || subscription.status === "TRIALING";
+        const badgeClass =
+          subscription.status === "ACTIVE"
+            ? "ok"
+            : subscription.status === "PAST_DUE"
+              ? "alert"
+              : subscription.status === "CANCELED"
+                ? "pending"
+                : "pending";
+        return `<tr>
       <td>${escapeHtml(subscription.hotel.displayName)}</td>
       <td>${escapeHtml(subscription.plan.name)}</td>
       <td>${formatMoney(subscription.plan.monthlyPrice, subscription.hotel.currency)}</td>
-      <td><span class="badge ${
-        subscription.status === "ACTIVE" ? "ok" : subscription.status === "PAST_DUE" ? "alert" : "pending"
-      }">${escapeHtml(subscription.status)}</span></td>
+      <td><span class="badge ${badgeClass}">${escapeHtml(subscription.status)}</span></td>
       <td>${formatDate(subscription.currentPeriodEnd)}</td>
       <td>${escapeHtml(subscription.plan.code)}</td>
       <td>
-        <form method="post" action="/owner/subscriptions/${encodeURIComponent(subscription.id)}/update" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
-          <select name="planId" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
-            ${plans
-              .map(
-                (plan) =>
-                  `<option value="${escapeHtml(plan.id)}" ${plan.id === subscription.planId ? "selected" : ""}>${escapeHtml(
-                    plan.name
-                  )}</option>`
-              )
-              .join("")}
-          </select>
-          <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
-            <option value="TRIALING" ${subscription.status === "TRIALING" ? "selected" : ""}>TRIALING</option>
-            <option value="ACTIVE" ${subscription.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option>
-            <option value="PAST_DUE" ${subscription.status === "PAST_DUE" ? "selected" : ""}>PAST_DUE</option>
-            <option value="CANCELED" ${subscription.status === "CANCELED" ? "selected" : ""}>CANCELED</option>
-          </select>
-          <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Save</button>
-        </form>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+          <form method="post" action="/owner/subscriptions/${encodeURIComponent(subscription.id)}/set-status" style="margin:0">
+            <input type="hidden" name="status" value="ACTIVE" />
+            <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#166534; color:#fff; font-weight:700; cursor:pointer" ${isActiveOrTrialing ? "disabled" : ""}>Enable</button>
+          </form>
+          <form method="post" action="/owner/subscriptions/${encodeURIComponent(subscription.id)}/set-status" style="margin:0">
+            <input type="hidden" name="status" value="CANCELED" />
+            <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#991b1b; color:#fff; font-weight:700; cursor:pointer" ${!isActiveOrTrialing ? "disabled" : ""}>Disable</button>
+          </form>
+          <form method="post" action="/owner/subscriptions/${encodeURIComponent(subscription.id)}/update" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:0">
+            <select name="planId" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
+              ${plans
+                .map(
+                  (plan) =>
+                    `<option value="${escapeHtml(plan.id)}" ${plan.id === subscription.planId ? "selected" : ""}>${escapeHtml(
+                      plan.name
+                    )}</option>`
+                )
+                .join("")}
+            </select>
+            <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
+              <option value="TRIALING" ${subscription.status === "TRIALING" ? "selected" : ""}>TRIALING</option>
+              <option value="ACTIVE" ${subscription.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option>
+              <option value="PAST_DUE" ${subscription.status === "PAST_DUE" ? "selected" : ""}>PAST_DUE</option>
+              <option value="CANCELED" ${subscription.status === "CANCELED" ? "selected" : ""}>CANCELED</option>
+            </select>
+            <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; cursor:pointer">Save</button>
+          </form>
+        </div>
       </td>
-      </tr>`
+      </tr>`;
+      }
     )
     .join("");
 
   const content = `
 <h2>Subscriptions</h2>
-<p class="muted">Platform subscription control across all active tenants.</p>
+<p class="muted">Enable or disable subscriptions per hotel; reactivate canceled subscriptions. Suspended hotels can be reactivated from <a class="inline-link" href="/owner/hotels">Hotels</a> (Activate button).</p>
 <table>
   <thead><tr><th>Hotel</th><th>Plan</th><th>Monthly Price</th><th>Status</th><th>Renewal</th><th>Plan Code</th><th>Actions</th></tr></thead>
   <tbody>${rows || '<tr><td colspan="7">No subscriptions found.</td></tr>'}</tbody>
 </table>`;
 
   res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/subscriptions/:id/set-status", requireOwnerAuth, async (req, res) => {
+  const subscriptionId = String(req.params.id ?? "");
+  const status = String(req.body.status ?? "").toUpperCase();
+  if (status !== "ACTIVE" && status !== "CANCELED") {
+    res.redirect("/owner/subscriptions");
+    return;
+  }
+  const subscription = await prisma.subscription.findUnique({
+    where: { id: subscriptionId },
+    include: { hotel: true, plan: true }
+  });
+  if (!subscription) {
+    res.redirect("/owner/subscriptions");
+    return;
+  }
+  await prisma.subscription.update({
+    where: { id: subscription.id },
+    data: { status: status as SubscriptionStatus }
+  });
+  await logOwnerAudit({
+    hotelId: subscription.hotelId,
+    action: status === "ACTIVE" ? "SUBSCRIPTION_ENABLED_BY_OWNER" : "SUBSCRIPTION_DISABLED_BY_OWNER",
+    entityType: "Subscription",
+    entityId: subscription.id,
+    metadata: { newStatus: status }
+  });
+  res.redirect("/owner/subscriptions");
 });
 
 ownerRouter.post("/subscriptions/:id/update", requireOwnerAuth, async (req, res) => {

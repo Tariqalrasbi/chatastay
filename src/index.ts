@@ -6,9 +6,14 @@ import { adminRouter } from "./routes/admin";
 import { guestRouter } from "./routes/guest";
 import { ownerRouter } from "./routes/owner";
 import { whatsappWebhookRouter } from "./whatsapp/webhookRouter";
+import { logWhatsAppStartupHints } from "./whatsapp/send";
 
 const app = express();
-const port = Number(process.env.PORT ?? 3000);
+const rawPort = process.env.PORT ?? "3000";
+const parsedPort = Number.parseInt(String(rawPort), 10);
+const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
+/** Bind all interfaces by default so `localhost`, `127.0.0.1`, and LAN URLs behave consistently (override with HOST=127.0.0.1 if needed). */
+const host = process.env.HOST ?? "0.0.0.0";
 
 // Stripe webhook requires raw body for signature verification.
 app.use("/api/payments/webhook/stripe", express.raw({ type: "application/json" }));
@@ -26,6 +31,22 @@ app.use("/guest", guestRouter);
 app.use("/owner", ownerRouter);
 app.use("/whatsapp/webhook", whatsappWebhookRouter);
 
-app.listen(port, () => {
-  console.log(`ChatAstay server listening on http://localhost:${port}`);
+const server = app.listen(port, host, () => {
+  const urlHost = host === "0.0.0.0" ? "localhost" : host;
+  console.log(`ChatAstay server listening on http://${urlHost}:${port}`);
+  console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
+  console.log(`(Keep this terminal open while you use the app.)`);
+  logWhatsAppStartupHints();
+});
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(
+      `[chatastay] Port ${port} is already in use. Stop the other process or use another port, e.g. PORT=3001 npm run dev\n` +
+        `            (macOS) See what holds the port: lsof -nP -iTCP:${port} -sTCP:LISTEN`
+    );
+  } else {
+    console.error("[chatastay] Server failed to start:", err.message);
+  }
+  process.exit(1);
 });

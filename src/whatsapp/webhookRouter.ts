@@ -33,13 +33,28 @@ function extractInboundText(message: Record<string, unknown>): string | undefine
 }
 
 whatsappWebhookRouter.get("/", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const verifyToken = req.query["hub.verify_token"];
+  const mode = typeof req.query["hub.mode"] === "string" ? req.query["hub.mode"] : "";
+  const verifyToken =
+    typeof req.query["hub.verify_token"] === "string" ? req.query["hub.verify_token"].trim() : "";
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && verifyToken === process.env.WHATSAPP_VERIFY_TOKEN) {
-    res.status(200).send(challenge);
+  const expected = (process.env.WHATSAPP_VERIFY_TOKEN ?? "").trim();
+
+  if (!expected) {
+    console.error("WhatsApp webhook verify: WHATSAPP_VERIFY_TOKEN is not set in environment.");
+    res.sendStatus(503);
     return;
   }
+
+  if (mode === "subscribe" && verifyToken === expected && challenge !== undefined && challenge !== null) {
+    res.status(200).type("text/plain").send(String(challenge));
+    return;
+  }
+
+  console.warn("WhatsApp webhook verify failed", {
+    modeOk: mode === "subscribe",
+    tokenMatch: verifyToken === expected,
+    hasChallenge: challenge !== undefined && challenge !== null
+  });
   res.sendStatus(403);
 });
 

@@ -1,16 +1,34 @@
 import crypto from "node:crypto";
 import { prisma } from "../db";
 
+export type ConversationMode = "IDLE" | "BOOKING_MODE" | "QUESTION_MODE" | "AGENT_MODE";
+
+/** Step in the structured WhatsApp booking flow (adults → children → rooms → checkin → checkout → room_choice). */
+export type BookingStep = "adults" | "children" | "rooms" | "checkin" | "checkout" | "room_choice";
+
 export type PersistentSessionState = {
   language: string;
   stage: string;
   lastActivityAt?: string;
+  conversationMode?: ConversationMode;
+  awaitingGuestName?: boolean;
+  awaitingBookingLookup?: boolean;
+  myBookingCandidateIds?: string[];
+  /** Current step in structured booking flow; when set, bot collects adults → children → rooms → checkin → checkout then shows room choices. */
+  bookingStep?: BookingStep | null;
+  adultCount?: number;
+  childCount?: number;
+  /** When bookingStep is room_choice, list of offers shown so we can resolve selection to total/nights. */
+  bookingRoomOffers?: Array<{ roomTypeId: string; roomTypeName: string; propertyId: string; total: number; nights: number }>;
   phoneNumberId?: string;
   guestName?: string;
   checkIn?: string;
   checkOut?: string;
   checkInOptions?: string[];
   checkOutOptions?: string[];
+  /** Guest chose "Other date" and should reply with a typed YYYY-MM-DD next. */
+  manualCheckInDate?: boolean;
+  manualCheckOutDate?: boolean;
   guestCount?: number;
   roomCount?: number;
   suggestedRoomTypeId?: string;
@@ -62,8 +80,9 @@ export async function loadConversationSession(params: {
   });
   if (!persisted) {
     return {
-      language: params.defaultLanguage,
-      stage: "IDLE"
+      language: "",
+      stage: "IDLE",
+      conversationMode: "IDLE"
     };
   }
   const metadata = parseMetadata(persisted.metadataJson);
@@ -72,8 +91,9 @@ export async function loadConversationSession(params: {
   const isExpiredByInactivity = Number.isFinite(persistedLastActivity) && now - persistedLastActivity >= conversationInactivityTtlMs;
   if (isExpiredByInactivity) {
     return {
-      language: persisted.language || params.defaultLanguage,
+      language: "",
       stage: "IDLE",
+      conversationMode: "IDLE",
       lastActivityAt: new Date(now).toISOString()
     };
   }
@@ -82,14 +102,33 @@ export async function loadConversationSession(params: {
     language: persisted.language,
     stage: persisted.stage,
     lastActivityAt: persistedLastActivityRaw ?? persisted.updatedAt.toISOString(),
+    conversationMode: (metadata.conversationMode as ConversationMode) || "IDLE",
+    awaitingGuestName: Boolean(metadata.awaitingGuestName),
+    awaitingBookingLookup: Boolean(metadata.awaitingBookingLookup),
+    myBookingCandidateIds: Array.isArray(metadata.myBookingCandidateIds)
+      ? (metadata.myBookingCandidateIds as string[]).filter((x): x is string => typeof x === "string")
+      : undefined,
     phoneNumberId: typeof metadata.phoneNumberId === "string" ? metadata.phoneNumberId : undefined,
     guestName: typeof metadata.guestName === "string" ? metadata.guestName : undefined,
     checkIn: typeof metadata.checkIn === "string" ? metadata.checkIn : undefined,
     checkOut: typeof metadata.checkOut === "string" ? metadata.checkOut : undefined,
     checkInOptions: Array.isArray(metadata.checkInOptions) ? metadata.checkInOptions.filter((x): x is string => typeof x === "string") : undefined,
     checkOutOptions: Array.isArray(metadata.checkOutOptions) ? metadata.checkOutOptions.filter((x): x is string => typeof x === "string") : undefined,
+    manualCheckInDate: typeof metadata.manualCheckInDate === "boolean" ? metadata.manualCheckInDate : undefined,
+    manualCheckOutDate: typeof metadata.manualCheckOutDate === "boolean" ? metadata.manualCheckOutDate : undefined,
     guestCount: typeof metadata.guestCount === "number" ? metadata.guestCount : undefined,
     roomCount: typeof metadata.roomCount === "number" ? metadata.roomCount : undefined,
+    bookingStep:
+      typeof metadata.bookingStep === "string" && ["adults", "children", "rooms", "checkin", "checkout", "room_choice"].includes(metadata.bookingStep)
+        ? (metadata.bookingStep as BookingStep)
+        : undefined,
+    adultCount: typeof metadata.adultCount === "number" ? metadata.adultCount : undefined,
+    childCount: typeof metadata.childCount === "number" ? metadata.childCount : undefined,
+    bookingRoomOffers: Array.isArray(metadata.bookingRoomOffers)
+      ? (metadata.bookingRoomOffers as Array<{ roomTypeId: string; roomTypeName: string; propertyId: string; total: number; nights: number }>).filter(
+          (o) => o && typeof o.roomTypeId === "string" && typeof o.total === "number" && typeof o.nights === "number"
+        )
+      : undefined,
     suggestedRoomTypeId: typeof metadata.suggestedRoomTypeId === "string" ? metadata.suggestedRoomTypeId : undefined,
     suggestedRoomTypeName: typeof metadata.suggestedRoomTypeName === "string" ? metadata.suggestedRoomTypeName : undefined,
     suggestedPropertyId: typeof metadata.suggestedPropertyId === "string" ? metadata.suggestedPropertyId : undefined,
@@ -111,14 +150,24 @@ export async function saveConversationSession(params: {
   const expiresAt = new Date(Date.now() + (params.ttlMs ?? conversationInactivityTtlMs));
   const metadata = {
     lastActivityAt: params.state.lastActivityAt ?? nowIso,
+    conversationMode: params.state.conversationMode ?? "IDLE",
+    awaitingGuestName: Boolean(params.state.awaitingGuestName),
+    awaitingBookingLookup: Boolean(params.state.awaitingBookingLookup),
+    myBookingCandidateIds: params.state.myBookingCandidateIds ?? null,
     phoneNumberId: params.state.phoneNumberId ?? null,
     guestName: params.state.guestName ?? null,
     checkIn: params.state.checkIn ?? null,
     checkOut: params.state.checkOut ?? null,
     checkInOptions: params.state.checkInOptions ?? [],
     checkOutOptions: params.state.checkOutOptions ?? [],
+    manualCheckInDate: params.state.manualCheckInDate ?? null,
+    manualCheckOutDate: params.state.manualCheckOutDate ?? null,
     guestCount: params.state.guestCount ?? null,
     roomCount: params.state.roomCount ?? null,
+    bookingStep: params.state.bookingStep ?? null,
+    adultCount: params.state.adultCount ?? null,
+    childCount: params.state.childCount ?? null,
+    bookingRoomOffers: params.state.bookingRoomOffers ?? null,
     suggestedRoomTypeId: params.state.suggestedRoomTypeId ?? null,
     suggestedRoomTypeName: params.state.suggestedRoomTypeName ?? null,
     suggestedPropertyId: params.state.suggestedPropertyId ?? null,
@@ -169,7 +218,7 @@ export async function upsertBookingDraft(params: {
     status: "OPEN",
     checkIn: params.state.checkIn ? new Date(params.state.checkIn) : null,
     checkOut: params.state.checkOut ? new Date(params.state.checkOut) : null,
-    adults: params.state.guestCount ?? 2,
+    adults: params.state.adultCount ?? params.state.guestCount ?? 2,
     rooms: params.state.roomCount ?? 1,
     guestName: params.state.guestName ?? null,
     roomTypeId: params.state.suggestedRoomTypeId ?? null,
@@ -181,6 +230,7 @@ export async function upsertBookingDraft(params: {
     metadataJson: JSON.stringify({
       stage: params.state.stage,
       nights: params.state.nights ?? null,
+      childCount: params.state.childCount ?? null,
       checkInOptions: params.state.checkInOptions ?? [],
       checkOutOptions: params.state.checkOutOptions ?? []
     }),

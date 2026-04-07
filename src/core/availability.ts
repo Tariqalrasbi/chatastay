@@ -1,5 +1,7 @@
 import { BookingStatus } from "@prisma/client";
 import { prisma } from "../db";
+import { inventoryDayRangeExclusive } from "./inventoryDate";
+import { roomTypeAllowsOccupancy } from "./roomOccupancy";
 
 export type RoomOffer = {
   roomTypeId: string;
@@ -40,6 +42,9 @@ export async function findAvailableRoomType(params: {
   checkOut: Date;
   guests: number;
   rooms: number;
+  /** When set with children, filters by room-type adult/child rules (not only total capacity). */
+  adults?: number;
+  children?: number;
 }): Promise<RoomOffer | null> {
   const nights = Math.ceil((params.checkOut.getTime() - params.checkIn.getTime()) / (1000 * 60 * 60 * 24));
   if (nights <= 0) return null;
@@ -50,9 +55,16 @@ export async function findAvailableRoomType(params: {
     orderBy: { baseNightlyRate: "asc" }
   });
 
-  for (const roomType of roomTypes) {
+  const useMix = params.adults !== undefined && params.children !== undefined;
+  const filtered = useMix
+    ? roomTypes.filter((rt) => roomTypeAllowsOccupancy(rt.code, params.adults!, params.children!).ok)
+    : roomTypes;
+
+  const stayStart = startOfDay(params.checkIn);
+  const stayEnd = startOfDay(params.checkOut);
+  for (const roomType of filtered) {
     const inventoryRows = await prisma.inventory.findMany({
-      where: { hotelId: params.hotelId, roomTypeId: roomType.id, date: { gte: params.checkIn, lt: params.checkOut } },
+      where: { hotelId: params.hotelId, roomTypeId: roomType.id, date: { gte: stayStart, lt: stayEnd } },
       select: { total: true, reserved: true, closedOut: true }
     });
 
@@ -88,6 +100,73 @@ export async function findAvailableRoomType(params: {
     }
   }
   return null;
+}
+
+/** Returns all room types that have availability for the given dates/guests/rooms, ordered by price. */
+export async function findAvailableRoomTypes(params: {
+  hotelId: string;
+  checkIn: Date;
+  checkOut: Date;
+  guests: number;
+  rooms: number;
+  adults?: number;
+  children?: number;
+}): Promise<RoomOffer[]> {
+  const nights = Math.ceil((params.checkOut.getTime() - params.checkIn.getTime()) / (1000 * 60 * 60 * 24));
+  if (nights <= 0) return [];
+
+  const capacityPerRoom = Math.ceil(params.guests / Math.max(1, params.rooms));
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: params.hotelId, isActive: true, capacity: { gte: capacityPerRoom } },
+    orderBy: { baseNightlyRate: "asc" }
+  });
+
+  const useMix = params.adults !== undefined && params.children !== undefined;
+  const filtered = useMix
+    ? roomTypes.filter((rt) => roomTypeAllowsOccupancy(rt.code, params.adults!, params.children!).ok)
+    : roomTypes;
+
+  const stayStart = startOfDay(params.checkIn);
+  const stayEnd = startOfDay(params.checkOut);
+  const offers: RoomOffer[] = [];
+  for (const roomType of filtered) {
+    const inventoryRows = await prisma.inventory.findMany({
+      where: { hotelId: params.hotelId, roomTypeId: roomType.id, date: { gte: stayStart, lt: stayEnd } },
+      select: { total: true, reserved: true, closedOut: true }
+    });
+
+    let availableRooms: number;
+    if (!inventoryRows.length) {
+      const overlapping = await prisma.booking.count({
+        where: {
+          hotelId: params.hotelId,
+          roomTypeId: roomType.id,
+          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+          checkIn: { lt: params.checkOut },
+          checkOut: { gt: params.checkIn }
+        }
+      });
+      availableRooms = Math.max(0, roomType.totalInventory - overlapping);
+    } else if (inventoryRows.some((row) => row.closedOut)) {
+      availableRooms = 0;
+    } else {
+      availableRooms = inventoryRows.reduce((min, row) => Math.min(min, Math.max(0, row.total - row.reserved)), Number.POSITIVE_INFINITY);
+    }
+
+    if (availableRooms >= params.rooms) {
+      const nightlyTotal = Number((roomType.baseNightlyRate * params.rooms).toFixed(2));
+      const total = Number((nightlyTotal * nights).toFixed(2));
+      offers.push({
+        roomTypeId: roomType.id,
+        roomTypeName: roomType.name,
+        propertyId: roomType.propertyId,
+        nightlyTotal,
+        total,
+        nights
+      });
+    }
+  }
+  return offers;
 }
 
 export async function getAvailableCheckInDates(params: {
@@ -162,9 +241,10 @@ export async function getDayAvailability(params: {
   let minAvailableRoomsAcrossTypes = 0;
   let cheapestRate: number | undefined;
   let sawClosedOut = false;
+  const dayRange = inventoryDayRangeExclusive(checkIn);
   for (const roomType of roomTypes) {
     const inventory = await prisma.inventory.findFirst({
-      where: { hotelId: params.hotelId, roomTypeId: roomType.id, date: checkIn },
+      where: { hotelId: params.hotelId, roomTypeId: roomType.id, date: { gte: dayRange.gte, lt: dayRange.lt } },
       select: { total: true, reserved: true, closedOut: true }
     });
     if (inventory?.closedOut) {

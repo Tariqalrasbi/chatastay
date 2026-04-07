@@ -1,11 +1,20 @@
 import { Router } from "express";
 import Stripe from "stripe";
+import { BookingStatus } from "@prisma/client";
 import { prisma } from "../db";
+import { recordBookingStatusChange } from "../core/bookingStatusHistory";
 import { handleIncomingWhatsAppMessage } from "../whatsapp/conversationController";
+import { buildBookingInvoicePdf } from "../core/invoicePdf";
+import { loadPartnerSetupConfig } from "../core/partnerSetup";
+import { sendWhatsAppDocument } from "../whatsapp/send";
 
 export const apiRouter = Router();
 const defaultHotelSlug = "al-ashkhara-beach-resort";
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+
+function formatDate(input: Date): string {
+  return input.toISOString().slice(0, 10);
+}
 
 function getStripeClient(): Stripe | null {
   const apiKey = process.env.STRIPE_SECRET_KEY;
@@ -59,9 +68,20 @@ async function applyPaymentStatus(
   providerPayload?: string
 ): Promise<void> {
   const paymentIntent = await prisma.paymentIntent.findUnique({
-    where: { id: localPaymentIntentId }
+    where: { id: localPaymentIntentId },
+    include: {
+      hotel: true,
+      booking: {
+        include: {
+          guest: true,
+          roomType: true,
+          property: true
+        }
+      }
+    }
   });
   if (!paymentIntent) return;
+  const wasSucceeded = paymentIntent.status === "SUCCEEDED";
 
   await prisma.paymentIntent.update({
     where: { id: paymentIntent.id },
@@ -72,10 +92,20 @@ async function applyPaymentStatus(
   });
 
   if (paymentIntent.bookingId) {
+    const prevBookingStatus = paymentIntent.booking?.status ?? null;
     await prisma.booking.update({
       where: { id: paymentIntent.bookingId },
-      data: { paymentStatus: status }
+      data: { paymentStatus: status, ...(status === "SUCCEEDED" ? { status: "CONFIRMED" } : {}) }
     });
+    if (status === "SUCCEEDED" && prevBookingStatus && prevBookingStatus !== BookingStatus.CONFIRMED) {
+      await recordBookingStatusChange(prisma, {
+        hotelId: paymentIntent.hotelId,
+        bookingId: paymentIntent.bookingId,
+        fromStatus: prevBookingStatus,
+        toStatus: BookingStatus.CONFIRMED,
+        source: "STRIPE_WEBHOOK"
+      });
+    }
   }
 
   await upsertPaymentTransaction({
@@ -87,6 +117,66 @@ async function applyPaymentStatus(
     status: status === "SUCCEEDED" ? "succeeded" : "failed",
     providerPayload
   });
+
+  if (!wasSucceeded && status === "SUCCEEDED" && paymentIntent.booking && paymentIntent.booking.status === "CONFIRMED") {
+    let invoiceId = paymentIntent.invoiceId ?? null;
+    if (!invoiceId) {
+      const invoice = await prisma.invoice.create({
+        data: {
+          hotelId: paymentIntent.hotelId,
+          amountSubtotal: paymentIntent.amount,
+          amountTax: 0,
+          amountTotal: paymentIntent.amount,
+          currency: paymentIntent.currency,
+          status: "PAID",
+          paidAt: new Date()
+        }
+      });
+      invoiceId = invoice.id;
+      await prisma.paymentIntent.update({
+        where: { id: paymentIntent.id },
+        data: { invoiceId }
+      });
+    }
+
+    const booking = paymentIntent.booking;
+    const invoicePdf = await buildBookingInvoicePdf({
+      documentKind: "receipt",
+      invoiceNumber: `RCP-${booking.id}`,
+      issuedAt: new Date(),
+      hotelName: paymentIntent.hotel.displayName,
+      hotelCity: paymentIntent.hotel.city,
+      hotelCountry: paymentIntent.hotel.country,
+      guestName: booking.guest.fullName ?? "Guest",
+      guestPhone: booking.guest.phoneE164,
+      bookingId: booking.id,
+      bookingStatus: "CONFIRMED",
+      paymentStatus: "SUCCEEDED",
+      roomType: booking.roomType.name,
+      selectedUnit: null,
+      propertyName: booking.property.name,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      nights: booking.nights,
+      adults: booking.adults,
+      children: booking.children,
+      totalAmount: paymentIntent.amount,
+      currency: paymentIntent.currency
+    });
+
+    const toPhone = booking.guest.phoneE164.replace(/\D/g, "");
+    if (toPhone) {
+      const config = loadPartnerSetupConfig(paymentIntent.hotelId);
+      await sendWhatsAppDocument({
+        to: toPhone,
+        filename: `${booking.id}-receipt-${formatDate(new Date())}.pdf`,
+        body: invoicePdf,
+        caption: `${paymentIntent.hotel.displayName}: receipt for booking ${booking.id}. Payment received: ${paymentIntent.amount.toFixed(2)} ${paymentIntent.currency}.`,
+        phoneNumberId: config.whatsappPhoneNumberId || undefined,
+        conversationId: booking.conversationId ?? undefined
+      });
+    }
+  }
 }
 
 function toMinorUnits(amount: number, currency: string): number {

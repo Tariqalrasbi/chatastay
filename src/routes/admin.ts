@@ -2,22 +2,250 @@ import { Router, Request, Response, NextFunction } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { BookingStatus, ConversationState, MessageDirection, PaymentStatus } from "@prisma/client";
+import { AsyncLocalStorage } from "node:async_hooks";
+import multer from "multer";
+import type { Prisma } from "@prisma/client";
+import {
+  BookingStatus,
+  ChannelProvider,
+  ConversationState,
+  FbOrderStatus,
+  FbOutletType,
+  FbServiceMode,
+  FolioOutletCategory,
+  FolioTransactionType,
+  FolioTxnPaymentStatus,
+  MessageDirection,
+  OutletTicketSource,
+  OutletTicketStatus,
+  PaymentStatus
+} from "@prisma/client";
+import Stripe from "stripe";
+import nodemailer from "nodemailer";
 import { prisma } from "../db";
+import { inventoryDayRangeExclusive } from "../core/inventoryDate";
+import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
+import { recordBookingStatusChange } from "../core/bookingStatusHistory";
+import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { loadPartnerSetupConfig, savePartnerSetupConfig, applyPartnerTemplate, type PartnerSetupConfig } from "../core/partnerSetup";
-import { buildBookingInvoicePdf } from "../core/invoicePdf";
-import { sendWhatsAppDocument, sendWhatsAppText } from "../whatsapp/send";
+import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
+import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
+import { createFbOrdersFromMenuLines, getFbFolioForBooking } from "../core/fbFolio";
+import { notifyOutletForFolioCharge } from "../core/outletOrderNotify";
+import {
+  cancelOutletTicketForFolioTransaction,
+  createOutletTicketForFolioCharge,
+  folioChargeQualifiesForOutletTicket
+} from "../core/outletTickets";
+import {
+  ensureActiveFolio,
+  getFolioByBookingId,
+  getFolioSummary,
+  listFolioTransactions,
+  postChargeToFolio,
+  postPaymentToFolio,
+  postRefundToFolio,
+  voidFolioTransaction
+} from "../core/folioService";
+import { computeRoomUnitFolioSummary, mapChargeCategoryToFolio, parsePostingTarget, round2 } from "../core/roomUnitFolio";
+import { DEFAULT_FB_MENU_2026, appendMissingFbMenuItems } from "../core/defaultFbMenuSeed";
+import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
+import { allocateBookingReferenceCode, displayBookingReference } from "../core/bookingReference";
+import { buildManualCheckInPageHtml, manualCheckInFormFromBody } from "./manualCheckInForm";
+import { sendWhatsAppDocument, sendWhatsAppText, trySendWhatsAppText } from "../whatsapp/send";
+import {
+  bookingComDomains,
+  buildBookingComSyncPlan,
+  type BookingComSyncDomain,
+  type BookingComSyncMode
+} from "../channelManager/bookingComArchitecture";
 
 export const adminRouter = Router();
 
 const viewsDir = path.join(process.cwd(), "src", "views");
 const sessionCookieName = "chatastay_admin_session";
-const activeSessions = new Set<string>();
+type PermissionAction = "VIEW" | "EDIT" | "CREATE" | "DELETE" | "MANAGE";
+type PermissionModule = "ROOMS" | "BOOKINGS" | "REPORTS" | "BILLING" | "CONVERSATIONS" | "USERS";
+type ModulePermissionSet = Record<PermissionAction, boolean>;
+type PermissionMatrix = Record<PermissionModule, ModulePermissionSet>;
+
+const permissionModules: PermissionModule[] = ["ROOMS", "BOOKINGS", "REPORTS", "BILLING", "CONVERSATIONS", "USERS"];
+const permissionActions: PermissionAction[] = ["VIEW", "EDIT", "CREATE", "DELETE", "MANAGE"];
+const adminPermissionsFile = path.join(process.cwd(), "admin-user-permissions.json");
+const uploadsDir = path.join(process.cwd(), "src", "public", "uploads", "id-cards");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+const idCardUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadsDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || "").slice(0, 10) || ".bin";
+      cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
+
+type AdminSession = {
+  staffId: string;
+  email: string;
+  permissions: PermissionMatrix;
+};
+
+const activeSessions = new Map<string, AdminSession>();
+const auditActorContext = new AsyncLocalStorage<{ staffId?: string; staffEmail?: string }>();
+const passwordResetTtlMs = 60 * 60 * 1000; // 1 hour
+const passwordResetTokens = new Map<string, { email: string; expiresAt: number }>();
+const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password: string, passwordHash: string): boolean {
+  const [salt, stored] = passwordHash.split(":");
+  if (!salt || !stored) return false;
+  const derived = crypto.scryptSync(password, salt, 64).toString("hex");
+  const a = Buffer.from(stored, "hex");
+  const b = Buffer.from(derived, "hex");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function getStripeClient(): Stripe | null {
+  const apiKey = process.env.STRIPE_SECRET_KEY;
+  if (!apiKey) return null;
+  return new Stripe(apiKey);
+}
+
+function toMinorUnits(amount: number, currency: string): number {
+  const zeroDecimal = new Set(["JPY", "KRW"]);
+  const threeDecimal = new Set(["BHD", "KWD", "OMR"]);
+  const upper = currency.toUpperCase();
+  const factor = zeroDecimal.has(upper) ? 1 : threeDecimal.has(upper) ? 1000 : 100;
+  return Math.round(amount * factor);
+}
+
+function buildFullPermissions(): PermissionMatrix {
+  return {
+    ROOMS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    BOOKINGS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    REPORTS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    BILLING: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    CONVERSATIONS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    USERS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true }
+  };
+}
+
+function buildNoPermissions(): PermissionMatrix {
+  return {
+    ROOMS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    BOOKINGS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    REPORTS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    BILLING: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    CONVERSATIONS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    USERS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false }
+  };
+}
+
+function defaultPermissionsForRole(role: string): PermissionMatrix {
+  if (role === "MANAGER") return buildFullPermissions();
+  if (role === "FINANCE") {
+    const p = buildNoPermissions();
+    p.BILLING = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    p.REPORTS = { VIEW: true, EDIT: false, CREATE: false, DELETE: false, MANAGE: false };
+    p.BOOKINGS = { VIEW: true, EDIT: false, CREATE: false, DELETE: false, MANAGE: false };
+    return p;
+  }
+  if (role === "STAFF") {
+    const p = buildNoPermissions();
+    p.ROOMS = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
+    p.BOOKINGS = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    p.CONVERSATIONS = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    p.REPORTS = { VIEW: true, EDIT: false, CREATE: false, DELETE: false, MANAGE: false };
+    return p;
+  }
+  return buildNoPermissions();
+}
+
+function normalizePermissionMatrix(input: unknown): PermissionMatrix {
+  const empty = buildNoPermissions();
+  if (!input || typeof input !== "object") return empty;
+  const raw = input as Record<string, unknown>;
+  for (const moduleName of permissionModules) {
+    const row = raw[moduleName];
+    if (!row || typeof row !== "object") continue;
+    const rowRaw = row as Record<string, unknown>;
+    for (const action of permissionActions) {
+      empty[moduleName][action] = rowRaw[action] === true;
+    }
+  }
+  return empty;
+}
+
+function readPermissionStore(): Record<string, PermissionMatrix> {
+  try {
+    if (!fs.existsSync(adminPermissionsFile)) return {};
+    const parsed = JSON.parse(fs.readFileSync(adminPermissionsFile, "utf8")) as Record<string, unknown>;
+    const out: Record<string, PermissionMatrix> = {};
+    for (const [email, matrix] of Object.entries(parsed)) {
+      out[email.toLowerCase()] = normalizePermissionMatrix(matrix);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writePermissionStore(store: Record<string, PermissionMatrix>): void {
+  fs.writeFileSync(adminPermissionsFile, JSON.stringify(store, null, 2), "utf8");
+}
+
+function getPermissionsForEmail(email: string): PermissionMatrix {
+  const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
+  if (email.toLowerCase() === adminEmail) return buildFullPermissions();
+  const store = readPermissionStore();
+  return store[email.toLowerCase()] ?? buildNoPermissions();
+}
+
+async function sendPasswordResetEmail(to: string, resetLink: string): Promise<boolean> {
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.MAIL_FROM || process.env.ADMIN_EMAIL || "noreply@chatastay.local";
+  if (!host || !user || !pass) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn("[Admin] Password reset: SMTP not configured. Reset link (dev only):", resetLink);
+    }
+    return false;
+  }
+  try {
+    const transporter = nodemailer.createTransport({
+      host,
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: process.env.SMTP_SECURE === "true",
+      auth: { user, pass }
+    });
+    await transporter.sendMail({
+      from,
+      to,
+      subject: "Reset your admin password",
+      text: `You requested a password reset. Open this link within 1 hour to set a new password:\n\n${resetLink}\n\nIf you did not request this, ignore this email.`,
+      html: `<p>You requested a password reset. <a href="${escapeHtml(resetLink)}">Click here</a> to set a new password (link expires in 1 hour).</p><p>If you did not request this, ignore this email.</p>`
+    });
+    return true;
+  } catch (err) {
+    console.error("[Admin] Password reset email failed:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
 const hotelName = "Al Ashkhara Beach Resort";
 const hotelSign = "Seafront Hospitality, Oman";
 const reportStartDefault = "2026-03-01";
 const reportEndDefault = "2026-03-31";
 const tourOperatorDiscount = 0.15;
+const offersFile = path.join(process.cwd(), "hotel-offers.json");
 const seasonalBaseRates: Record<string, { high: number; low: number }> = {
   STD_SUPERIOR: { high: 30, low: 25 },
   STD_EXEC: { high: 35, low: 30 },
@@ -25,31 +253,324 @@ const seasonalBaseRates: Record<string, { high: number; low: number }> = {
   APARTMENT: { high: 50, low: 40 }
 };
 
+type OfferType =
+  | "PERCENTAGE_DISCOUNT"
+  | "STAY_X_GET_Y_FREE"
+  | "EARLY_BOOKING"
+  | "LONG_STAY"
+  | "SEASONAL"
+  | "CORPORATE_RATE";
+
+type OfferDefinition = {
+  id: string;
+  code: string;
+  title: string;
+  type: OfferType;
+  discountPercent: number;
+  stayX?: number;
+  stayY?: number;
+  minDaysBeforeCheckIn?: number;
+  minNights?: number;
+  seasonStart?: string;
+  seasonEnd?: string;
+  corporateOnly?: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function getDefaultOffers(): OfferDefinition[] {
+  const now = new Date().toISOString();
+  return [
+    {
+      id: crypto.randomUUID(),
+      code: "TOUR_OPERATOR_15",
+      title: "Tour Operator 15%",
+      type: "PERCENTAGE_DISCOUNT",
+      discountPercent: 15,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    },
+    {
+      id: crypto.randomUUID(),
+      code: "STAY_3_GET_1",
+      title: "Stay 3 Nights Get 1 Free",
+      type: "STAY_X_GET_Y_FREE",
+      discountPercent: 25,
+      stayX: 3,
+      stayY: 1,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    },
+    {
+      id: crypto.randomUUID(),
+      code: "EARLY_BIRD_10",
+      title: "Early Booking 10%",
+      type: "EARLY_BOOKING",
+      discountPercent: 10,
+      minDaysBeforeCheckIn: 21,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    },
+    {
+      id: crypto.randomUUID(),
+      code: "LONG_STAY_12",
+      title: "Long Stay 12%",
+      type: "LONG_STAY",
+      discountPercent: 12,
+      minNights: 7,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    },
+    {
+      id: crypto.randomUUID(),
+      code: "SUMMER_18",
+      title: "Seasonal Summer 18%",
+      type: "SEASONAL",
+      discountPercent: 18,
+      seasonStart: "2026-06-01",
+      seasonEnd: "2026-08-31",
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    },
+    {
+      id: crypto.randomUUID(),
+      code: "CORP_20",
+      title: "Corporate Rate 20%",
+      type: "CORPORATE_RATE",
+      discountPercent: 20,
+      corporateOnly: true,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now
+    }
+  ];
+}
+
+function readOffers(): OfferDefinition[] {
+  try {
+    if (!fs.existsSync(offersFile)) {
+      const seeded = getDefaultOffers();
+      fs.writeFileSync(offersFile, JSON.stringify(seeded, null, 2), "utf8");
+      return seeded;
+    }
+    const raw = JSON.parse(fs.readFileSync(offersFile, "utf8")) as unknown;
+    if (!Array.isArray(raw)) return getDefaultOffers();
+    return raw as OfferDefinition[];
+  } catch {
+    return getDefaultOffers();
+  }
+}
+
+function writeOffers(offers: OfferDefinition[]): void {
+  fs.writeFileSync(offersFile, JSON.stringify(offers, null, 2), "utf8");
+}
+
 function readView(name: string): string {
   return fs.readFileSync(path.join(viewsDir, name), "utf8");
+}
+
+/** Client-side polling for conversation activity (no WebSockets in this stack). */
+function getAdminLiveScript(): string {
+  return `<script>
+(function () {
+  var POLL_MS = 8000;
+  var disabled = false;
+  var lastSince = new Date(Date.now() - 15000).toISOString();
+  var pendingBadge = 0;
+  var listReloadTimer = null;
+
+  function esc(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/"/g, "&quot;");
+  }
+  function formatDt(iso) {
+    try {
+      return new Date(iso).toISOString().replace("T", " ").slice(0, 16);
+    } catch (e) {
+      return "";
+    }
+  }
+  function toast(title, body, kind) {
+    var stack = document.getElementById("adminToastStack");
+    if (!stack) return;
+    var el = document.createElement("div");
+    el.className = "admin-toast" + (kind === "booking" ? " admin-toast-booking" : "");
+    el.innerHTML = '<strong class="admin-toast-title">' + esc(title) + '</strong><p class="admin-toast-body">' + esc(body) + '</p>';
+    stack.appendChild(el);
+    window.setTimeout(function () {
+      el.classList.add("admin-toast-out");
+      window.setTimeout(function () { el.remove(); }, 400);
+    }, 9000);
+  }
+  function updateBadge(delta) {
+    var badge = document.getElementById("adminConvLiveBadge");
+    if (!badge) return;
+    pendingBadge = Math.max(0, pendingBadge + delta);
+    badge.textContent = String(Math.min(99, pendingBadge));
+    badge.hidden = pendingBadge === 0;
+  }
+  function currentConversationId() {
+    var n = document.querySelector("[data-chat-conversation-id]");
+    return n ? n.getAttribute("data-chat-conversation-id") : null;
+  }
+  function buildBubble(m) {
+    var inbound = m.direction === "INBOUND";
+    var sender = inbound ? "Guest" : (m.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI");
+    var intentHtml = "";
+    if (m.aiIntent && m.aiIntent !== "MANUAL_REPLY") {
+      intentHtml = '<p class="bubble-meta">Intent: ' + esc(m.aiIntent) + "</p>";
+    }
+    return (
+      '<article class="bubble ' + (inbound ? "inbound" : "outbound") + '">' +
+      '<div class="bubble-head"><span><strong>' + esc(sender) + '</strong></span><span>' + formatDt(m.createdAt) + "</span></div>" +
+      '<p class="bubble-body">' + esc(m.body) + "</p>" + intentHtml + "</article>"
+    );
+  }
+  function refreshDetailMessages(cid) {
+    var wrap = document.querySelector("[data-chat-conversation-id]");
+    if (!wrap || wrap.getAttribute("data-chat-conversation-id") !== cid) return;
+    var since = wrap.getAttribute("data-chat-last-msg-at") || "";
+    var url = "/admin/conversations/live/" + encodeURIComponent(cid) + "/messages?since=" + encodeURIComponent(since);
+    fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) {
+        if (r.status === 401 || r.status === 403) return null;
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.ok || !data.messages || !data.messages.length) return;
+        var timeline = document.querySelector(".chat-messages .timeline");
+        if (!timeline) return;
+        data.messages.forEach(function (m) {
+          timeline.insertAdjacentHTML("beforeend", buildBubble(m));
+        });
+        var last = data.messages[data.messages.length - 1];
+        if (last && last.createdAt) wrap.setAttribute("data-chat-last-msg-at", last.createdAt);
+        var cm = document.querySelector(".chat-messages");
+        if (cm) cm.scrollTop = cm.scrollHeight;
+      })
+      .catch(function () {});
+  }
+  function maybeReloadList() {
+    var p = (window.location.pathname || "").replace(/\/+$/, "") || "/";
+    if (p !== "/admin/conversations") return;
+    if (listReloadTimer) window.clearTimeout(listReloadTimer);
+    listReloadTimer = window.setTimeout(function () {
+      window.location.reload();
+    }, 500);
+  }
+  function handleEvents(events) {
+    if (!events || !events.length) return;
+    updateBadge(events.length);
+    events.forEach(function (ev) {
+      var t = ev.title || "Conversation";
+      var b = ev.preview || "";
+      toast(t, b, ev.category === "booking" ? "booking" : "inquiry");
+      if (ev.conversationId && ev.conversationId === currentConversationId()) {
+        refreshDetailMessages(ev.conversationId);
+      }
+    });
+    maybeReloadList();
+  }
+  function pollActivity() {
+    if (disabled) return;
+    fetch("/admin/conversations/live/activity?since=" + encodeURIComponent(lastSince), {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (r) {
+        if (r.status === 401 || r.status === 403) {
+          disabled = true;
+          return null;
+        }
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.ok) return;
+        if (data.serverTime) lastSince = data.serverTime;
+        handleEvents(data.events || []);
+      })
+      .catch(function () {});
+  }
+  function pollDetailCatchUp() {
+    var cid = currentConversationId();
+    if (!cid) return;
+    refreshDetailMessages(cid);
+  }
+  var link = document.querySelector("[data-admin-conv-link]");
+  if (link) {
+    link.addEventListener("click", function () {
+      pendingBadge = 0;
+      var badge = document.getElementById("adminConvLiveBadge");
+      if (badge) badge.hidden = true;
+    });
+  }
+  window.setInterval(function () {
+    pollActivity();
+    pollDetailCatchUp();
+  }, POLL_MS);
+  pollActivity();
+  pollDetailCatchUp();
+})();
+<\/script>`;
 }
 
 function renderLayout(content: string, authenticated: boolean): string {
   const layout = readView("layout.html");
   const navHtml = authenticated
     ? [
-        '<a href="/admin/dashboard">Dashboard</a>',
-        '<a href="/admin/rooms">Rooms</a>',
-        '<a href="/admin/inventory">Inventory</a>',
+        '<a class="top-level-link" data-top-group="dashboard" href="/admin/room-board">Dashboard</a>',
+        '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
+        '<a class="top-level-link" data-top-group="account" href="/admin/profile">Account</a>',
+        '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>'
+      ].join("")
+    : '<a href="/admin/login">Login</a>';
+  const logoutHtml = authenticated
+    ? '<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>'
+    : "";
+  const sectionTabsHtml = authenticated
+    ? [
+        '<div class="section-tabs" data-section="dashboard">',
+        '<a href="/admin/room-board">Room Board</a>',
+        '<a href="/admin/handover-sheet">Handover Sheet</a>',
+        "</div>",
+        '<div class="section-tabs" data-section="frontdesk">',
+        '<a href="/admin/front-desk/check-in">Manual check-in</a>',
+        '<a href="/admin/front-desk/check-out">Manual check-out</a>',
+        "</div>",
+        '<div class="section-tabs" data-section="reservations">',
         '<a href="/admin/bookings">Bookings</a>',
+        '<a href="/admin/fb/menu">F&amp;B menu</a>',
+        '<a href="/admin/outlet-dashboard">Outlet board</a>',
         '<a href="/admin/calendar">Calendar</a>',
-        '<a href="/admin/conversations">Conversations</a>',
+        '<a href="/admin/conversations" data-admin-conv-link>Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
+        '<a href="/admin/rooms">Room Rate</a>',
+        '<a href="/admin/inventory">Room Availability</a>',
+        '<a href="/admin/offers">Offers</a>',
+        "</div>",
+        '<div class="section-tabs" data-section="account">',
+        '<a href="/admin/profile">Hotel Profile</a>',
+        '<a href="/admin/users">Users</a>',
         '<a href="/admin/subscription">Subscription</a>',
         '<a href="/admin/billing">Billing</a>',
         '<a href="/admin/integrations">Integrations</a>',
-        '<a href="/admin/setup">Setup</a>',
+        '<a href="/admin/setup">Settings</a>',
+        "</div>",
+        '<div class="section-tabs" data-section="insights">',
+        '<a href="/admin/reports-center">Reports</a>',
         '<a href="/admin/ai-analytics">AI Analytics</a>',
         '<a href="/admin/booking-funnel">Booking Funnel</a>',
         '<a href="/admin/routing-health">Routing Health</a>',
-        '<a href="/guest">Guest Portal</a>',
-        '<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>'
+        "</div>"
       ].join("")
-    : '<a href="/admin/login">Login</a>';
+    : "";
   const langSwitcherHtml = '<a href="?lang=en" data-lang-link="en">EN</a><a href="?lang=ar" data-lang-link="ar">AR</a>';
 
   return layout
@@ -61,7 +582,10 @@ function renderLayout(content: string, authenticated: boolean): string {
     .replace("{{hotelName}}", hotelName)
     .replace("{{hotelSign}}", hotelSign)
     .replace("{{navLinks}}", navHtml)
-    .replace("{{content}}", content);
+    .replace("{{sectionTabs}}", sectionTabsHtml)
+    .replace("{{logoutAction}}", logoutHtml)
+    .replace("{{content}}", content)
+    .replace("{{extraScripts}}", authenticated ? getAdminLiveScript() : "");
 }
 
 function renderPage(pageFile: string, authenticated: boolean): string {
@@ -83,6 +607,16 @@ function formatDate(input: Date | null | undefined): string {
   return input.toISOString().slice(0, 10);
 }
 
+/** Local calendar date YYYY-MM-DD for <input type="date"> and date-filter round-trip. Avoids UTC shift. */
+function formatDateForInput(input: Date | null | undefined): string {
+  if (!input) return "";
+  const y = input.getFullYear();
+  const m = input.getMonth() + 1;
+  const d = input.getDate();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${y}-${pad(m)}-${pad(d)}`;
+}
+
 function formatDateTime(input: Date | null | undefined): string {
   if (!input) return "-";
   return input.toISOString().replace("T", " ").slice(0, 16);
@@ -94,17 +628,39 @@ function startOfDay(input: Date): Date {
   return date;
 }
 
+/** Inclusive end date for default booking-report "to" filter: last day of the month +3 months ahead of `now` (shows upcoming WhatsApp stays, not only the current calendar month). */
+function defaultBookingReportInclusiveEnd(now: Date): Date {
+  return new Date(now.getFullYear(), now.getMonth() + 4, 0);
+}
+
 function addDays(input: Date, days: number): Date {
   const date = new Date(input);
   date.setDate(date.getDate() + days);
   return date;
 }
 
+/** Parse YYYY-MM-DD as local calendar date (no UTC). Prevents one-day shift in date filters. */
 function parseDateInput(raw: unknown, fallback: Date): Date {
-  if (typeof raw !== "string" || !raw) return fallback;
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return fallback;
-  return startOfDay(parsed);
+  if (typeof raw !== "string" || !raw.trim()) return fallback;
+  const s = raw.trim();
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
+  if (match) {
+    const y = Number(match[1]);
+    const m = Number(match[2]) - 1;
+    const d = Number(match[3]);
+    const parsed = new Date(y, m, d);
+    if (parsed.getFullYear() === y && parsed.getMonth() === m && parsed.getDate() === d)
+      return parsed;
+  }
+  const legacy = new Date(s);
+  if (!Number.isNaN(legacy.getTime())) return startOfDay(legacy);
+  return fallback;
+}
+
+function endOfDay(input: Date): Date {
+  const date = new Date(input);
+  date.setHours(23, 59, 59, 999);
+  return date;
 }
 
 function parseNumberInput(raw: unknown, fallback: number): number {
@@ -176,6 +732,11 @@ function enumerateDates(start: Date, days: number): Date[] {
   return Array.from({ length: days }, (_, index) => addDays(start, index));
 }
 
+function csvEscapeField(value: string): string {
+  if (/[",\r\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
 function parseAuditMetadata(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
   try {
@@ -186,11 +747,13 @@ function parseAuditMetadata(raw: string | null | undefined): Record<string, unkn
   }
 }
 
-function buildUnitCode(roomTypeCode: string, unitNo: number): string {
-  return `${roomTypeCode}-${String(unitNo).padStart(2, "0")}`;
-}
-
 async function getBookingUnitCode(bookingId: string): Promise<string | null> {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: { roomUnit: { select: { name: true } } }
+  });
+  if (booking?.roomUnit?.name) return booking.roomUnit.name;
+
   const lastUnitSelection = await prisma.auditLog.findFirst({
     where: {
       action: "BOOKING_UNIT_SELECTED",
@@ -232,7 +795,10 @@ async function sendInvoicePdfForBooking(params: {
   bookingId: string;
   trigger: string;
   force?: boolean;
+  /** Defaults to invoice (folio). Quotation/receipt use distinct PDF titles and guest captions. */
+  documentKind?: GuestDocumentKind;
 }): Promise<{ sent: boolean; skipped: boolean; error?: string }> {
+  const documentKind: GuestDocumentKind = params.documentKind ?? "invoice";
   const [hotel, booking] = await Promise.all([
     prisma.hotel.findUnique({ where: { id: params.hotelId } }),
     prisma.booking.findFirst({
@@ -247,21 +813,32 @@ async function sendInvoicePdfForBooking(params: {
   ]);
 
   if (!hotel || !booking) {
-    return { sent: false, skipped: false, error: "Booking or hotel not found for invoice send." };
+    return { sent: false, skipped: false, error: "Booking or hotel not found for document send." };
   }
-  if (booking.status !== BookingStatus.CONFIRMED) {
+
+  if (documentKind === "quotation") {
+    if (booking.status === BookingStatus.CANCELLED) {
+      return { sent: false, skipped: true };
+    }
+  } else if (booking.status !== BookingStatus.CONFIRMED) {
     return { sent: false, skipped: true };
   }
 
-  const lastDispatch = await getLatestInvoiceDispatch(booking.id);
-  if (!params.force && lastDispatch.sentAt && lastDispatch.paymentStatusAtSend === booking.paymentStatus) {
-    return { sent: false, skipped: true };
+  if (documentKind === "invoice") {
+    const lastDispatch = await getLatestInvoiceDispatch(booking.id);
+    if (!params.force && lastDispatch.sentAt && lastDispatch.paymentStatusAtSend === booking.paymentStatus) {
+      return { sent: false, skipped: true };
+    }
   }
 
   const selectedUnitCode = await getBookingUnitCode(booking.id);
-  const invoiceNumber = `INV-${booking.id}`;
-  const filename = `${booking.id}-invoice-${formatDate(new Date())}.pdf`;
+  const fbFolio = await getFbFolioForBooking(booking.id);
+  const grandTotal = Number((booking.totalAmount + fbFolio.subtotal).toFixed(2));
+  const refPrefix = documentKind === "quotation" ? "QUO" : documentKind === "receipt" ? "RCP" : "INV";
+  const invoiceNumber = `${refPrefix}-${booking.id}`;
+  const filename = `${booking.id}-${documentKind}-${formatDate(new Date())}.pdf`;
   const invoicePdf = await buildBookingInvoicePdf({
+    documentKind,
     invoiceNumber,
     issuedAt: new Date(),
     hotelName: hotel.displayName,
@@ -281,7 +858,10 @@ async function sendInvoicePdfForBooking(params: {
     adults: booking.adults,
     children: booking.children,
     totalAmount: booking.totalAmount,
-    currency: booking.currency
+    currency: booking.currency,
+    fbLines: fbFolio.lines,
+    fbSubtotal: fbFolio.subtotal,
+    grandTotal
   });
 
   const toPhone = normalizePhoneForWhatsApp(booking.guest.phoneE164);
@@ -289,17 +869,38 @@ async function sendInvoicePdfForBooking(params: {
     return { sent: false, skipped: false, error: "Guest phone number is missing or invalid." };
   }
 
+  const hotelLead = hotel.displayName;
+  const caption =
+    documentKind === "quotation"
+      ? `${hotelLead}: here is your stay quotation (${invoiceNumber}). This is not a booking confirmation—our team will confirm details with you.`
+      : documentKind === "receipt"
+        ? `${hotelLead}: receipt ${invoiceNumber} for booking ${booking.id}. Payment status: ${booking.paymentStatus}.`
+        : `${hotelLead}: invoice ${invoiceNumber} for booking ${booking.id}. Payment status: ${booking.paymentStatus}.`;
+
+  const partner = loadPartnerSetupConfig(hotel.id);
   try {
     await sendWhatsAppDocument({
       to: toPhone,
       filename,
       body: invoicePdf,
-      caption: `Invoice ${invoiceNumber} for booking ${booking.id}. Payment status: ${booking.paymentStatus}.`
+      caption,
+      phoneNumberId: partner.whatsappPhoneNumberId || undefined
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message.slice(0, 160) : "Failed to send invoice PDF";
+    let message = error instanceof Error ? error.message.slice(0, 500) : "Failed to send PDF";
+    if (/fetch failed|Failed to fetch|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|certificate/i.test(message)) {
+      message =
+        "Could not reach WhatsApp (Meta) from this server — network/DNS/firewall or SSL issue. Booking is saved; open the booking to resend the invoice when connectivity is fixed.";
+    }
     return { sent: false, skipped: false, error: message };
   }
+
+  const outboundLabel =
+    documentKind === "quotation"
+      ? `Quotation PDF ${invoiceNumber} sent to guest.`
+      : documentKind === "receipt"
+        ? `Receipt PDF ${invoiceNumber} sent to guest.`
+        : `Invoice PDF ${invoiceNumber} sent to guest. Payment status at send: ${booking.paymentStatus}.`;
 
   if (booking.conversationId) {
     await prisma.message.create({
@@ -307,8 +908,9 @@ async function sendInvoicePdfForBooking(params: {
         hotelId: hotel.id,
         conversationId: booking.conversationId,
         direction: MessageDirection.OUTBOUND,
-        body: `Invoice PDF ${invoiceNumber} sent to guest. Payment status at send: ${booking.paymentStatus}.`,
-        aiIntent: "INVOICE_SENT"
+        body: outboundLabel,
+        aiIntent:
+          documentKind === "quotation" ? "QUOTATION_SENT" : documentKind === "receipt" ? "RECEIPT_SENT" : "INVOICE_SENT"
       }
     });
     await prisma.conversation.update({
@@ -324,6 +926,7 @@ async function sendInvoicePdfForBooking(params: {
     entityId: booking.id,
     metadata: {
       trigger: params.trigger,
+      documentKind,
       invoiceNumber,
       filename,
       sentTo: toPhone,
@@ -339,12 +942,147 @@ async function sendInvoicePdfForBooking(params: {
   return { sent: true, skipped: false };
 }
 
+async function ensureDefaultFbMenu(hotelId: string): Promise<void> {
+  const n = await prisma.menuItem.count({ where: { hotelId } });
+  if (n > 0) return;
+  await prisma.menuItem.createMany({
+    data: DEFAULT_FB_MENU_2026.map((row) => ({ hotelId, ...row }))
+  });
+}
+
+async function sendBookingPaymentLinkAfterConfirmation(params: {
+  hotelId: string;
+  bookingId: string;
+}): Promise<{ sent: boolean; skipped: boolean; url?: string; error?: string }> {
+  const [hotel, booking] = await Promise.all([
+    prisma.hotel.findUnique({ where: { id: params.hotelId } }),
+    prisma.booking.findFirst({
+      where: { id: params.bookingId, hotelId: params.hotelId },
+      include: { guest: true, roomType: true, conversation: true }
+    })
+  ]);
+  if (!hotel || !booking) return { sent: false, skipped: false, error: "Booking or hotel not found." };
+  if (booking.status !== BookingStatus.CONFIRMED) return { sent: false, skipped: true };
+
+  const stripe = getStripeClient();
+  if (!stripe) return { sent: false, skipped: false, error: "Stripe is not configured." };
+
+  const localPaymentIntent = await prisma.paymentIntent.create({
+    data: {
+      hotelId: hotel.id,
+      kind: "BOOKING",
+      provider: "stripe",
+      amount: booking.totalAmount,
+      currency: hotel.currency,
+      status: "REQUIRES_ACTION",
+      bookingId: booking.id
+    }
+  });
+
+  const successUrl =
+    process.env.STRIPE_CHECKOUT_SUCCESS_URL ??
+    `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`;
+  const cancelUrl = process.env.STRIPE_CHECKOUT_CANCEL_URL ?? `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`;
+
+  let checkoutSession: Stripe.Checkout.Session;
+  try {
+    checkoutSession = await stripe.checkout.sessions.create({
+      mode: "payment",
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      client_reference_id: localPaymentIntent.id,
+      customer_email: booking.guest.email ?? undefined,
+      metadata: {
+        paymentIntentId: localPaymentIntent.id,
+        bookingId: booking.id,
+        hotelId: hotel.id
+      },
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: hotel.currency.toLowerCase(),
+            unit_amount: toMinorUnits(booking.totalAmount, hotel.currency),
+            product_data: {
+              name: `Booking ${booking.id} - ${hotel.displayName}`,
+              description: `${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}`
+            }
+          }
+        }
+      ],
+      payment_intent_data: {
+        metadata: {
+          paymentIntentId: localPaymentIntent.id,
+          bookingId: booking.id,
+          hotelId: hotel.id
+        }
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to create payment link.";
+    return { sent: false, skipped: false, error: message };
+  }
+
+  const paymentIntent = await prisma.paymentIntent.update({
+    where: { id: localPaymentIntent.id },
+    data: {
+      externalIntentId: checkoutSession.id,
+      paymentLinkUrl: checkoutSession.url ?? undefined,
+      metadataJson: JSON.stringify({
+        stripeCheckoutSessionId: checkoutSession.id,
+        stripePaymentIntent: checkoutSession.payment_intent
+      })
+    }
+  });
+
+  const link = paymentIntent.paymentLinkUrl;
+  if (!link) return { sent: false, skipped: false, error: "Payment link URL is unavailable." };
+  const to = normalizePhoneForWhatsApp(booking.guest.phoneE164);
+  if (!to) return { sent: false, skipped: false, error: "Guest phone number is invalid." };
+
+  const config = loadPartnerSetupConfig(hotel.id);
+  const msg = [
+    `Booking ${booking.id} is confirmed.`,
+    `Room: ${booking.roomType.name}`,
+    `Stay: ${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}`,
+    `Amount due: ${booking.totalAmount.toFixed(2)} ${hotel.currency}`,
+    `Pay securely using this link: ${link}`
+  ].join("\n");
+
+  try {
+    await sendWhatsAppText({
+      to,
+      body: msg,
+      phoneNumberId: config.whatsappPhoneNumberId || undefined,
+      conversationId: booking.conversationId ?? undefined
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to send payment link via WhatsApp.";
+    return { sent: false, skipped: false, error: message };
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "BOOKING_PAYMENT_LINK_SENT",
+    entityType: "Booking",
+    entityId: booking.id,
+    metadata: {
+      paymentIntentId: paymentIntent.id,
+      checkoutSessionId: checkoutSession.id,
+      sentTo: to
+    }
+  });
+  return { sent: true, skipped: false, url: link };
+}
+
 async function getMinInventoryForStay(params: { hotelId: string; roomTypeId: string; checkIn: Date; checkOut: Date; fallback: number }): Promise<number> {
+  const stayStart = startOfDay(params.checkIn);
+  const stayEnd = startOfDay(params.checkOut);
   const inventoryRows = await prisma.inventory.findMany({
     where: {
       hotelId: params.hotelId,
       roomTypeId: params.roomTypeId,
-      date: { gte: params.checkIn, lt: params.checkOut }
+      date: { gte: stayStart, lt: stayEnd }
     },
     select: { total: true }
   });
@@ -368,11 +1106,15 @@ async function getBookedUnitsForStay(params: {
       checkOut: { gt: params.checkIn },
       ...(params.excludeBookingId ? { id: { not: params.excludeBookingId } } : {})
     },
-    select: { id: true }
+    select: { id: true, roomUnit: { select: { name: true } } }
   });
   if (!overlappingBookings.length) return new Set<string>();
 
-  const bookingIds = overlappingBookings.map((booking) => booking.id);
+  const selectedUnits = new Set<string>(overlappingBookings.map((booking) => booking.roomUnit?.name).filter((name): name is string => Boolean(name)));
+  const missingIds = overlappingBookings.filter((booking) => !booking.roomUnit).map((booking) => booking.id);
+  if (!missingIds.length) return selectedUnits;
+
+  const bookingIds = missingIds;
   const unitSelections = await prisma.auditLog.findMany({
     where: {
       action: "BOOKING_UNIT_SELECTED",
@@ -390,11 +1132,53 @@ async function getBookedUnitsForStay(params: {
       selectedByBooking.set(log.entityId, metadata.unitCode);
     }
   }
-  return new Set<string>(Array.from(selectedByBooking.values()));
+  for (const value of selectedByBooking.values()) selectedUnits.add(value);
+  return selectedUnits;
 }
 
 function buildBookingId(): string {
   return `WS-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+}
+
+function normalizeGuestPhoneE164(input: string): string {
+  const d = input.replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("968")) return `+${d}`;
+  if (d.length === 8) return `+968${d}`;
+  return `+${d}`;
+}
+
+function nightsBetweenCheckInOut(checkIn: Date, checkOut: Date): number {
+  const s = startOfDay(checkIn).getTime();
+  const e = startOfDay(checkOut).getTime();
+  const n = Math.round((e - s) / 86400000);
+  return Math.max(1, n);
+}
+
+async function assertInventoryCanReserveTx(
+  tx: Prisma.TransactionClient,
+  params: { hotelId: string; roomTypeId: string; checkIn: Date; checkOut: Date; rooms: number }
+): Promise<void> {
+  const { hotelId, roomTypeId, checkIn, checkOut, rooms } = params;
+  const roomType = await tx.roomType.findFirst({
+    where: { id: roomTypeId, hotelId },
+    select: { totalInventory: true }
+  });
+  const defaultTotal = roomType?.totalInventory ?? 1;
+  let date = startOfDay(checkIn);
+  const end = startOfDay(checkOut);
+  while (date.getTime() < end.getTime()) {
+    const dr = inventoryDayRangeExclusive(date);
+    const row = await tx.inventory.findFirst({
+      where: { hotelId, roomTypeId, date: { gte: dr.gte, lt: dr.lt } },
+      select: { total: true, reserved: true, closedOut: true }
+    });
+    if (row?.closedOut) throw new Error("Inventory is closed for one or more nights in this stay.");
+    const total = row?.total ?? defaultTotal;
+    const reserved = row?.reserved ?? 0;
+    if (reserved + rooms > total) throw new Error("Not enough availability for this stay (inventory is full for one or more nights).");
+    date = addDays(date, 1);
+  }
 }
 
 async function logAudit(params: {
@@ -402,15 +1186,19 @@ async function logAudit(params: {
   action: string;
   entityType: string;
   entityId?: string;
+  bookingId?: string | null;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
+  const actor = auditActorContext.getStore();
   await prisma.auditLog.create({
     data: {
       hotelId: params.hotelId,
-      actorEmail: process.env.ADMIN_EMAIL ?? "admin@chatastay.local",
+      actorUserId: actor?.staffId,
+      actorEmail: actor?.staffEmail ?? process.env.ADMIN_EMAIL ?? "admin@chatastay.local",
       action: params.action,
       entityType: params.entityType,
       entityId: params.entityId,
+      bookingId: params.bookingId ?? undefined,
       metadataJson: params.metadata ? JSON.stringify(params.metadata) : undefined
     }
   });
@@ -432,9 +1220,48 @@ function getSessionToken(req: Request): string | undefined {
   return parseCookies(req)[sessionCookieName];
 }
 
-function isAuthenticated(req: Request): boolean {
+function getSession(req: Request): AdminSession | undefined {
   const token = getSessionToken(req);
-  return Boolean(token && activeSessions.has(token));
+  if (!token) return undefined;
+  return activeSessions.get(token);
+}
+
+/** Platform (app) owner — same identity as full-permission admin login; optional extra list via env. */
+function isPlatformOwnerEmail(email: string | undefined | null): boolean {
+  const normalized = (email ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  const primary = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
+  if (normalized === primary) return true;
+  const extra = (process.env.PLATFORM_OWNER_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return extra.includes(normalized);
+}
+
+function requirePlatformOwner(req: Request, res: Response, next: NextFunction): void {
+  const session = getSession(req);
+  if (!session) {
+    res.redirect("/admin/login");
+    return;
+  }
+  if (!isPlatformOwnerEmail(session.email)) {
+    res
+      .status(403)
+      .type("html")
+      .send(
+        renderLayout(
+          "<h2>Access denied</h2><p>Only the platform owner can create or change room units and physical inventory structure.</p>",
+          true
+        )
+      );
+    return;
+  }
+  next();
+}
+
+function isAuthenticated(req: Request): boolean {
+  return Boolean(getSession(req));
 }
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
@@ -445,12 +1272,81 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
+function hasPermission(
+  permissions: PermissionMatrix,
+  moduleName: PermissionModule,
+  action: PermissionAction
+): boolean {
+  const row = permissions[moduleName];
+  return Boolean(row?.MANAGE || row?.[action]);
+}
+
+function requirePermission(moduleName: PermissionModule, action: PermissionAction) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const session = getSession(req);
+    if (!session) {
+      res.redirect("/admin/login");
+      return;
+    }
+    if (!hasPermission(session.permissions, moduleName, action)) {
+      res
+        .status(403)
+        .type("html")
+        .send(renderLayout("<h2>Access denied</h2><p>You do not have permission to access this module.</p>", true));
+      return;
+    }
+    next();
+  };
+}
+
+function requirePermissionJson(moduleName: PermissionModule, action: PermissionAction) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "unauthorized" });
+      return;
+    }
+    if (!hasPermission(session.permissions, moduleName, action)) {
+      res.status(403).json({ ok: false, error: "forbidden" });
+      return;
+    }
+    next();
+  };
+}
+
+function classifyConversationActivity(
+  state: ConversationState,
+  hasBooking: boolean
+): "booking" | "inquiry" {
+  if (hasBooking) return "booking";
+  if (
+    state === ConversationState.QUALIFYING ||
+    state === ConversationState.QUOTED ||
+    state === ConversationState.PAYMENT_PENDING ||
+    state === ConversationState.CONFIRMED
+  ) {
+    return "booking";
+  }
+  return "inquiry";
+}
+
+adminRouter.use((req, _res, next) => {
+  const session = getSession(req);
+  auditActorContext.run(
+    {
+      staffId: session?.staffId,
+      staffEmail: session?.email ?? process.env.ADMIN_EMAIL ?? "admin@chatastay.local"
+    },
+    () => next()
+  );
+});
+
 adminRouter.get("/", (req, res) => {
   if (!isAuthenticated(req)) {
     res.redirect("/admin/login");
     return;
   }
-  res.redirect("/admin/dashboard");
+  res.redirect("/admin/profile");
 });
 
 adminRouter.get("/login", (req, res) => {
@@ -458,28 +1354,200 @@ adminRouter.get("/login", (req, res) => {
     res.redirect("/admin/dashboard");
     return;
   }
-  res.type("html").send(renderPage("login.html", false));
+  const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
+  const content = resetNotice + readView("login.html");
+  res.type("html").send(renderLayout(content, false));
 });
 
-adminRouter.post("/login", (req, res) => {
-  const email = String(req.body.email ?? "");
+adminRouter.post("/login", async (req, res) => {
+  const email = String(req.body.email ?? "").trim().toLowerCase();
   const password = String(req.body.password ?? "");
 
-  const adminEmail = process.env.ADMIN_EMAIL ?? "admin@chatastay.local";
+  const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD ?? "admin123";
 
-  if (email !== adminEmail || password !== adminPassword) {
-    res.status(401).type("html").send(renderPage("login.html", false));
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (hotel) {
+    const hotelUser = await prisma.hotelUser.findUnique({
+      where: { hotelId_email: { hotelId: hotel.id, email } }
+    });
+    if (hotelUser?.isActive && hotelUser.passwordHash) {
+      if (verifyPassword(password, hotelUser.passwordHash)) {
+        const store = readPermissionStore();
+        const effectivePermissions = store[email] ?? defaultPermissionsForRole(hotelUser.role);
+        const token = crypto.randomUUID();
+        activeSessions.set(token, {
+          staffId: hotelUser.id,
+          email,
+          permissions: effectivePermissions
+        });
+        res.setHeader(
+          "Set-Cookie",
+          `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
+        );
+        res.redirect("/admin/dashboard");
+        return;
+      }
+    }
+  }
+
+  if (email === adminEmail && password === adminPassword) {
+    const token = crypto.randomUUID();
+    activeSessions.set(token, {
+      staffId: "STAFF-SUPERADMIN",
+      email,
+      permissions: getPermissionsForEmail(email)
+    });
+    res.setHeader(
+      "Set-Cookie",
+      `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
+    );
+    res.redirect("/admin/dashboard");
     return;
   }
 
-  const token = crypto.randomUUID();
-  activeSessions.add(token);
-  res.setHeader(
-    "Set-Cookie",
-    `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
-  );
-  res.redirect("/admin/dashboard");
+  res.status(401).type("html").send(renderPage("login.html", false));
+});
+
+adminRouter.get("/forgot-password", (req, res) => {
+  if (isAuthenticated(req)) {
+    res.redirect("/admin/dashboard");
+    return;
+  }
+  const notice = req.query.sent ? '<p class="badge ok">If an account exists for that email, we sent a reset link. Check your inbox and spam folder.</p>' : "";
+  const content = `
+<h2>Forgot Password</h2>
+<p class="muted">Enter the email address for your admin account. We will send a secure reset link (valid for 1 hour).</p>
+${notice}
+<form method="post" action="/admin/forgot-password" style="max-width: 420px">
+  <label for="email">Email</label><br />
+  <input id="email" type="email" name="email" required style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
+  <button type="submit" style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700">Send reset link</button>
+</form>
+<p class="muted" style="margin-top: 12px"><a href="/admin/login">Back to login</a></p>`;
+  res.type("html").send(renderLayout(content, false));
+});
+
+adminRouter.post("/forgot-password", async (req, res) => {
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
+
+  let shouldSend = email === adminEmail;
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (hotel && !shouldSend) {
+    const user = await prisma.hotelUser.findUnique({
+      where: { hotelId_email: { hotelId: hotel.id, email } }
+    });
+    shouldSend = Boolean(user?.isActive);
+  }
+
+  if (shouldSend) {
+    const now = Date.now();
+    for (const [t, data] of passwordResetTokens.entries()) {
+      if (data.expiresAt <= now) passwordResetTokens.delete(t);
+    }
+    const token = crypto.randomBytes(32).toString("hex");
+    passwordResetTokens.set(token, { email, expiresAt: now + passwordResetTtlMs });
+    const baseUrl = (process.env.APP_URL || "").replace(/\/$/, "") || `${req.protocol}://${req.get("host") || "localhost:3000"}`;
+    const resetLink = `${baseUrl}/admin/reset-password?token=${encodeURIComponent(token)}`;
+    await sendPasswordResetEmail(email, resetLink);
+  }
+
+  res.redirect("/admin/forgot-password?sent=1");
+});
+
+adminRouter.get("/reset-password", (req, res) => {
+  if (isAuthenticated(req)) {
+    res.redirect("/admin/dashboard");
+    return;
+  }
+  const token = String(req.query.token ?? "").trim();
+  const challenge = token ? passwordResetTokens.get(token) : undefined;
+  const valid = challenge && challenge.expiresAt > Date.now();
+  if (!valid) {
+    if (token) passwordResetTokens.delete(token);
+    const content = `
+<h2>Reset Password</h2>
+<p class="badge alert">This reset link is invalid or has expired. Request a new one from the <a href="/admin/forgot-password">forgot password</a> page.</p>
+<p class="muted"><a href="/admin/login">Back to login</a></p>`;
+    res.type("html").send(renderLayout(content, false));
+    return;
+  }
+  const content = `
+<h2>Set new password</h2>
+<p class="muted">Choose a new password (at least 8 characters).</p>
+<form method="post" action="/admin/reset-password" style="max-width: 420px">
+  <input type="hidden" name="token" value="${escapeHtml(token)}" />
+  <label for="newPassword">New password</label><br />
+  <input id="newPassword" type="password" name="newPassword" required minlength="8" style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
+  <label for="confirmPassword">Confirm password</label><br />
+  <input id="confirmPassword" type="password" name="confirmPassword" required minlength="8" style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
+  <button type="submit" style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700">Update password</button>
+</form>
+<p class="muted" style="margin-top: 12px"><a href="/admin/login">Back to login</a></p>`;
+  res.type("html").send(renderLayout(content, false));
+});
+
+adminRouter.post("/reset-password", async (req, res) => {
+  const token = String(req.body.token ?? "").trim();
+  const newPassword = String(req.body.newPassword ?? "");
+  const confirmPassword = String(req.body.confirmPassword ?? "");
+  const challenge = token ? passwordResetTokens.get(token) : undefined;
+  const valid = challenge && challenge.expiresAt > Date.now();
+  if (!valid) {
+    if (token) passwordResetTokens.delete(token);
+    res.status(400).type("html").send(
+      renderLayout("<h2>Reset Password</h2><p class=\"badge alert\">This reset link is invalid or has expired.</p><p><a href=\"/admin/forgot-password\">Request a new link</a></p>", false)
+    );
+    return;
+  }
+  if (newPassword.length < 8 || newPassword !== confirmPassword) {
+    const content = `
+<h2>Set new password</h2>
+<p class="badge alert">Passwords must match and be at least 8 characters.</p>
+<form method="post" action="/admin/reset-password" style="max-width: 420px">
+  <input type="hidden" name="token" value="${escapeHtml(token)}" />
+  <label for="newPassword">New password</label><br />
+  <input id="newPassword" type="password" name="newPassword" required minlength="8" style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
+  <label for="confirmPassword">Confirm password</label><br />
+  <input id="confirmPassword" type="password" name="confirmPassword" required minlength="8" style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
+  <button type="submit" style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700">Update password</button>
+</form>`;
+    res.status(400).type("html").send(renderLayout(content, false));
+    return;
+  }
+
+  const email = challenge!.email;
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    passwordResetTokens.delete(token);
+    res.redirect("/admin/login");
+    return;
+  }
+
+  const existing = await prisma.hotelUser.findUnique({
+    where: { hotelId_email: { hotelId: hotel.id, email } }
+  });
+  if (existing) {
+    await prisma.hotelUser.update({
+      where: { hotelId_email: { hotelId: hotel.id, email } },
+      data: { passwordHash: hashPassword(newPassword) }
+    });
+  } else {
+    await prisma.hotelUser.create({
+      data: {
+        hotelId: hotel.id,
+        email,
+        fullName: "Admin",
+        passwordHash: hashPassword(newPassword),
+        role: "MANAGER",
+        isActive: true
+      }
+    });
+  }
+
+  passwordResetTokens.delete(token);
+  res.redirect("/admin/login?reset=1");
 });
 
 adminRouter.post("/logout", (req, res) => {
@@ -492,8 +1560,3889 @@ adminRouter.post("/logout", (req, res) => {
   res.redirect("/admin/login");
 });
 
+function parsePermissionsFromBody(body: Record<string, unknown>): PermissionMatrix {
+  const matrix = buildNoPermissions();
+  for (const moduleName of permissionModules) {
+    for (const action of permissionActions) {
+      const key = `${moduleName}_${action}`;
+      matrix[moduleName][action] = body[key] === "on";
+    }
+  }
+  return matrix;
+}
+
+adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Users</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const users = await prisma.hotelUser.findMany({
+    where: { hotelId: hotel.id },
+    orderBy: { createdAt: "desc" }
+  });
+  const store = readPermissionStore();
+  const created = req.query.created ? '<p class="badge ok">User created with permissions.</p>' : "";
+
+  const rows = users
+    .map((user) => {
+      const perms = store[user.email.toLowerCase()] ?? buildNoPermissions();
+      const modulesSummary = permissionModules
+        .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
+        .join(", ");
+      return `<tr>
+      <td>${escapeHtml(user.fullName)}</td>
+      <td>${escapeHtml(user.email)}</td>
+      <td>${escapeHtml(user.role)}</td>
+      <td>${user.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
+      <td>${escapeHtml(modulesSummary || "No permissions set")}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const modulePermissionBlocks = permissionModules
+    .map(
+      (moduleName) => `<fieldset style="border:1px solid #d8dee6; border-radius:10px; padding:10px">
+  <legend style="padding:0 6px">${moduleName}</legend>
+  <label><input type="checkbox" name="${moduleName}_VIEW" /> View</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_EDIT" /> Edit</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_CREATE" /> Create</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_DELETE" /> Delete</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_MANAGE" /> Manage</label>
+</fieldset>`
+    )
+    .join("");
+
+  const content = `
+<h2>Users & Permissions</h2>
+<p class="muted">Create admin users and assign module permissions.</p>
+${created}
+<div class="actions">
+  <a class="btn-link primary" href="/admin/profile">Back to profile</a>
+</div>
+<section style="margin-top:12px">
+  <h3>Create user</h3>
+  <form method="post" action="/admin/users" style="display:grid; gap:10px">
+    <div class="grid-2">
+      <label>Full name<br /><input type="text" name="fullName" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Email<br /><input type="email" name="email" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Password<br /><input type="password" name="password" minlength="8" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Role
+        <select name="role" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">
+          <option value="MANAGER">MANAGER</option>
+          <option value="STAFF">STAFF</option>
+          <option value="FINANCE">FINANCE</option>
+        </select>
+      </label>
+    </div>
+    <h4 style="margin:6px 0 0">Permissions</h4>
+    <div style="display:grid; gap:8px">${modulePermissionBlocks}</div>
+    <button type="submit" style="padding:10px 14px; border:0; border-radius:10px; background:#0b6e6e; color:#fff; font-weight:700; width:max-content">Create user</button>
+  </form>
+</section>
+<section style="margin-top:14px">
+  <h3>Existing users</h3>
+  <table>
+    <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permission modules</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5">No users yet.</td></tr>'}</tbody>
+  </table>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/users");
+    return;
+  }
+  const fullName = String(req.body.fullName ?? "").trim();
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const password = String(req.body.password ?? "");
+  const role = String(req.body.role ?? "MANAGER");
+  if (!fullName || !email || password.length < 8) {
+    res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>Invalid user input.</p>", true));
+    return;
+  }
+  const allowedRoles = new Set(["MANAGER", "STAFF", "FINANCE"]);
+  const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
+
+  await prisma.hotelUser.upsert({
+    where: { hotelId_email: { hotelId: hotel.id, email } },
+    create: {
+      hotelId: hotel.id,
+      fullName,
+      email,
+      passwordHash: hashPassword(password),
+      role: allowedRoles.has(role) ? (role as "MANAGER" | "STAFF" | "FINANCE") : "MANAGER",
+      isActive: true
+    },
+    update: {
+      fullName,
+      passwordHash: hashPassword(password),
+      role: allowedRoles.has(role) ? (role as "MANAGER" | "STAFF" | "FINANCE") : "MANAGER",
+      isActive: true
+    }
+  });
+
+  const store = readPermissionStore();
+  store[email] = permissions;
+  writePermissionStore(store);
+  res.redirect("/admin/users?created=1");
+});
+
 adminRouter.get("/dashboard", requireAuth, (_req, res) => {
-  res.type("html").send(renderPage("dashboard.html", true));
+  res.redirect("/admin/profile");
+});
+
+adminRouter.get("/profile", requireAuth, async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: {
+      subscriptions: {
+        where: { status: { in: ["ACTIVE", "TRIALING", "PAST_DUE"] } },
+        orderBy: { createdAt: "desc" },
+        include: { plan: true },
+        take: 1
+      },
+      properties: true,
+      roomTypes: true,
+      integrations: { orderBy: { provider: "asc" } },
+      invoices: { orderBy: { createdAt: "desc" }, take: 10 }
+    }
+  });
+
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Hotel Profile</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const config = loadPartnerSetupConfig(hotel.id);
+  const whatsappConfigured = Boolean(config.whatsappPhoneNumberId?.trim());
+  const whatsappStatus = whatsappConfigured ? "Connected" : "Not connected";
+  const whatsappStatusClass = whatsappConfigured ? "ok" : "pending";
+  const whatsappDisplay = hotel.whatsappPhone || config.whatsappPhoneNumberId || "—";
+
+  const sub = hotel.subscriptions[0];
+  const subscriptionStart = sub?.currentPeriodStart ?? sub?.startedAt ?? sub?.createdAt;
+
+  const invoiceRows = hotel.invoices
+    .map(
+      (inv) => `<tr>
+        <td><a class="inline-link" href="/admin/billing">${escapeHtml(inv.id.slice(0, 12))}</a></td>
+        <td>${formatDate(inv.createdAt)}</td>
+        <td>${inv.amountTotal} ${escapeHtml(inv.currency)}</td>
+        <td><span class="badge ${inv.status === "PAID" ? "ok" : "pending"}">${escapeHtml(inv.status)}</span></td>
+      </tr>`
+    )
+    .join("");
+
+  const integrationRows = hotel.integrations
+    .map(
+      (int) => `<tr>
+        <td>${escapeHtml(String(int.provider))}</td>
+        <td><span class="badge ${int.status === "connected" ? "ok" : "pending"}">${escapeHtml(int.status)}</span></td>
+        <td>${int.lastSyncedAt ? formatDateTime(int.lastSyncedAt) : "—"}</td>
+      </tr>`
+    )
+    .join("");
+
+  const now = startOfDay(new Date());
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const dayStart = now;
+  const dayEndExclusive = addDays(dayStart, 1);
+  const profileUnitUpdated = req.query.unitUpdated ? '<p class="badge ok">Room status updated.</p>' : "";
+  const profileDayRange = inventoryDayRangeExclusive(dayStart);
+  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings] = await Promise.all([
+    prisma.booking.count({ where: { hotelId: hotel.id } }),
+    prisma.booking.count({
+      where: { hotelId: hotel.id, createdAt: { gte: monthStart } }
+    }),
+    prisma.booking.count({
+      where: { hotelId: hotel.id, status: "CONFIRMED" }
+    }),
+    prisma.conversation.count({
+      where: { hotelId: hotel.id, createdAt: { gte: monthStart } }
+    }),
+    prisma.inventory.findMany({
+      where: { hotelId: hotel.id, date: { gte: profileDayRange.gte, lt: profileDayRange.lt } },
+      select: { roomTypeId: true, total: true, reserved: true, closedOut: true }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        checkIn: { lt: dayEndExclusive },
+        checkOut: { gt: dayStart },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, roomUnit: true },
+      orderBy: { checkIn: "asc" }
+    })
+  ]);
+
+  await ensureDefaultRoomUnitsForBoard(
+    hotel.id,
+    hotel.roomTypes
+      .filter((rt) => rt.isActive)
+      .map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
+  );
+  await backfillMissingRoomUnitAssignmentsForDate({
+    hotelId: hotel.id,
+    dateStart: dayStart,
+    dateEndExclusive: dayEndExclusive
+  });
+  const roomTypesWithUnits = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: {
+      roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] }
+    }
+  });
+
+  const inventoryByRoomTypeProfile = new Map(todayInventoryRows.map((row) => [row.roomTypeId, row]));
+  const roomStatusCards: Array<{
+    roomTypeId: string;
+    roomTypeName: string;
+    unitId: string | null;
+    unitName: string;
+    status: RoomBoardStatus;
+    guestName: string | null;
+    checkIn: Date | null;
+    checkOut: Date | null;
+    bookingId: string | null;
+  }> = [];
+
+  for (const rt of roomTypesWithUnits) {
+    const inv = inventoryByRoomTypeProfile.get(rt.id);
+    const closedOut = inv?.closedOut ?? false;
+    const bookableTotal = inv?.total ?? rt.totalInventory;
+    const reservedCount = inv?.reserved ?? 0;
+    const aggregateAvailable = closedOut ? 0 : Math.max(0, bookableTotal - reservedCount);
+    const units = rt.roomUnits;
+    const activeUnits = units.filter((u) => u.isActive);
+    const overlapForType = todayBookings.filter((b) => b.roomTypeId === rt.id);
+    const bookingSlotCount = overlapForType.length;
+    const unbookedActiveUnits = activeUnits.filter((u) => !overlapForType.some((b) => b.roomUnitId === u.id));
+    const effectiveReserved = Math.min(reservedCount, bookableTotal);
+    const needInvReserved = Math.max(0, effectiveReserved - bookingSlotCount);
+    const reservedFromInventoryUnitIds = new Set<string>();
+    {
+      let remaining = needInvReserved;
+      for (const u of unbookedActiveUnits) {
+        if (remaining <= 0) break;
+        if (parseManualRoomStatusFromNotes(u.notes)) continue;
+        reservedFromInventoryUnitIds.add(u.id);
+        remaining -= 1;
+      }
+    }
+
+    for (const unit of units) {
+      const bookingsForUnit = todayBookings.filter((b) => b.roomUnitId === unit.id);
+      const firstBooking = bookingsForUnit[0] ?? null;
+      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED");
+      const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
+      const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
+      const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
+      const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
+
+      let status: RoomBoardStatus;
+      if (hasConfirmed) {
+        status = "OCCUPIED";
+      } else if (hasPending) {
+        status = "RESERVED";
+      } else if (closedOut) {
+        status = "MAINTENANCE";
+      } else if (manualStatus) {
+        status = manualStatus;
+      } else if (!unit.isActive) {
+        status = "MAINTENANCE";
+      } else if (beyondInventoryCap) {
+        status = "MAINTENANCE";
+      } else if (reservedFromInventoryUnitIds.has(unit.id)) {
+        status = "RESERVED";
+      } else if (aggregateAvailable <= 0) {
+        status = "RESERVED";
+      } else {
+        status = "AVAILABLE";
+      }
+
+      roomStatusCards.push({
+        roomTypeId: rt.id,
+        roomTypeName: rt.name,
+        unitId: unit.id,
+        unitName: unit.name,
+        status,
+        guestName: firstBooking?.guest.fullName ?? firstBooking?.guest.phoneE164 ?? null,
+        checkIn: firstBooking?.checkIn ?? null,
+        checkOut: firstBooking?.checkOut ?? null,
+        bookingId: firstBooking?.id ?? null
+      });
+    }
+
+    for (const b of overlapForType.filter((x) => !x.roomUnitId)) {
+      const hasConfirmed = b.status === "CONFIRMED";
+      const hasPending = b.status === "PENDING";
+      let status: RoomBoardStatus;
+      if (hasConfirmed) {
+        status = "OCCUPIED";
+      } else if (hasPending) {
+        status = "RESERVED";
+      } else {
+        status = "RESERVED";
+      }
+      roomStatusCards.push({
+        roomTypeId: rt.id,
+        roomTypeName: rt.name,
+        unitId: null,
+        unitName: "Unassigned",
+        status,
+        guestName: b.guest?.fullName ?? b.guest?.phoneE164 ?? null,
+        checkIn: b.checkIn,
+        checkOut: b.checkOut,
+        bookingId: b.id
+      });
+    }
+  }
+  roomStatusCards.sort((a, b) => {
+    const rankDiff = getPreferredUnitSortRank(a.unitName) - getPreferredUnitSortRank(b.unitName);
+    if (rankDiff !== 0) return rankDiff;
+    return a.unitName.localeCompare(b.unitName);
+  });
+  const roomStatusHtml = roomStatusCards
+    .map((card) => {
+      const colorClass =
+        card.status === "AVAILABLE"
+          ? "room-board-green"
+          : card.status === "RESERVED"
+            ? "room-board-blue"
+            : card.status === "OCCUPIED"
+              ? "room-board-red"
+              : card.status === "CLEANING"
+                ? "room-board-yellow"
+                : "room-board-purple";
+      const detailHref = card.unitId
+        ? `/admin/room-board/unit/${encodeURIComponent(card.unitId)}/details?date=${formatDateForInput(dayStart)}`
+        : `/admin/bookings/${encodeURIComponent(card.bookingId ?? "")}`;
+      const statusForm =
+        card.unitId
+          ? `<form method="post" action="/admin/room-board/unit/${encodeURIComponent(card.unitId)}/status" style="display:flex; gap:6px; align-items:center">
+            <input type="hidden" name="date" value="${formatDateForInput(dayStart)}" />
+            <input type="hidden" name="returnTo" value="/admin/profile" />
+            <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
+              <option value="AVAILABLE" ${card.status === "AVAILABLE" ? "selected" : ""}>Available</option>
+              <option value="RESERVED" ${card.status === "RESERVED" ? "selected" : ""}>Reserved</option>
+              <option value="OCCUPIED" ${card.status === "OCCUPIED" ? "selected" : ""}>Occupied</option>
+              <option value="CLEANING" ${card.status === "CLEANING" ? "selected" : ""}>Cleaning</option>
+              <option value="MAINTENANCE" ${card.status === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+            </select>
+            <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Set</button>
+          </form>`
+          : "";
+      return `<div class="room-board-card ${colorClass}">
+        <strong>${escapeHtml(card.unitName)}</strong>${card.unitId ? "" : ' <span class="badge pending" style="font-size:10px">no unit</span>'}
+        <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.roomTypeName)}</div>
+        <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.status)}</div>
+        ${card.guestName ? `<div style="margin-top:6px; font-size:12px">Guest: ${escapeHtml(card.guestName)}</div>` : ""}
+        ${card.checkIn && card.checkOut ? `<div class="muted" style="font-size:11px">${formatDateForInput(card.checkIn)} - ${formatDateForInput(card.checkOut)}</div>` : ""}
+        <div style="margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+          <a class="inline-link" href="${detailHref}">${card.unitId ? "details" : "booking"}</a>
+          ${statusForm}
+        </div>
+      </div>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Hotel Profile</h2>
+<p class="muted">Main overview for ${escapeHtml(hotel.displayName)}.</p>
+<div class="actions">
+  <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
+  <a class="btn-link" href="/admin/rooms">Rooms</a>
+  <a class="btn-link" href="/admin/room-board">Room board</a>
+</div>
+
+<div class="grid-2">
+  <section>
+    <h3>Hotel information</h3>
+    <table>
+      <tbody>
+        <tr><th>Name</th><td>${escapeHtml(hotel.displayName)}</td></tr>
+        <tr><th>Legal name</th><td>${escapeHtml(hotel.legalName)}</td></tr>
+        <tr><th>City</th><td>${escapeHtml(hotel.city ?? "—")}</td></tr>
+        <tr><th>Country</th><td>${escapeHtml(hotel.country)}</td></tr>
+        <tr><th>Currency</th><td>${escapeHtml(hotel.currency)}</td></tr>
+        <tr><th>Timezone</th><td>${escapeHtml(hotel.timezone)}</td></tr>
+        <tr><th>Status</th><td><span class="badge ${hotel.isActive ? "ok" : "pending"}">${hotel.isActive ? "Active" : "Inactive"}</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Subscription plan</h3>
+    <table>
+      <tbody>
+        <tr><th>Plan</th><td>${escapeHtml(sub?.plan.name ?? "No active plan")}</td></tr>
+        <tr><th>Status</th><td><span class="badge ${sub?.status === "ACTIVE" ? "ok" : "pending"}">${escapeHtml(sub?.status ?? "—")}</span></td></tr>
+        <tr><th>Price</th><td>${sub ? `${sub.plan.monthlyPrice} ${escapeHtml(hotel.currency)} / month` : "—"}</td></tr>
+        <tr><th>Subscription start</th><td>${subscriptionStart ? formatDate(subscriptionStart) : "—"}</td></tr>
+        <tr><th>Period end</th><td>${formatDate(sub?.currentPeriodEnd)}</td></tr>
+      </tbody>
+    </table>
+    <p><a class="btn-link" href="/admin/subscription">View plan &amp; limits</a></p>
+  </section>
+</div>
+
+<div class="grid-2">
+  <section>
+    <h3>WhatsApp number status</h3>
+    <table>
+      <tbody>
+        <tr><th>Status</th><td><span class="badge ${whatsappStatusClass}">${escapeHtml(whatsappStatus)}</span></td></tr>
+        <tr><th>Phone / Number ID</th><td>${escapeHtml(whatsappDisplay)}</td></tr>
+      </tbody>
+    </table>
+    <p><a class="btn-link" href="/admin/setup">Configure WhatsApp</a></p>
+  </section>
+  <section>
+    <h3>Booking integration status</h3>
+    <table>
+      <thead><tr><th>Provider</th><th>Status</th><th>Last sync</th></tr></thead>
+      <tbody>${integrationRows || '<tr><td colspan="3">No integrations connected.</td></tr>'}</tbody>
+    </table>
+    <p><a class="btn-link" href="/admin/integrations">Manage integrations</a></p>
+  </section>
+</div>
+
+<section style="margin-top: 14px">
+  <h3>Payment history</h3>
+  <table>
+    <thead><tr><th>Invoice</th><th>Date</th><th>Amount</th><th>Status</th></tr></thead>
+    <tbody>${invoiceRows || '<tr><td colspan="4">No invoices yet.</td></tr>'}</tbody>
+  </table>
+  <p><a class="btn-link" href="/admin/billing">View all billing</a></p>
+</section>
+
+<section style="margin-top: 14px">
+  <h3>Room status board</h3>
+  <p class="muted">Live visual room status for today. Green=available, Blue=reserved, Red=occupied, Yellow=cleaning, Purple=maintenance.</p>
+  ${profileUnitUpdated}
+  <div class="room-board-grid">
+    ${roomStatusHtml || '<p class="muted">No room types found.</p>'}
+  </div>
+  <p style="margin-top:8px"><a class="btn-link" href="/admin/room-board">Open full room board</a></p>
+  <style>
+    .room-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
+    .room-board-card { display:block; text-decoration:none; border-radius:10px; padding:10px; border:1px solid transparent; color:inherit; background:#fff; }
+    .room-board-card:hover { opacity:0.92; }
+    .room-board-green { border-color:#22c55e; background:#dcfce7; color:#166534; }
+    .room-board-blue { border-color:#3b82f6; background:#dbeafe; color:#1e40af; }
+    .room-board-red { border-color:#ef4444; background:#fee2e2; color:#991b1b; }
+    .room-board-yellow { border-color:#eab308; background:#fef9c3; color:#854d0e; }
+    .room-board-purple { border-color:#a855f7; background:#f3e8ff; color:#6b21a8; }
+  </style>
+</section>
+
+<section style="margin-top: 14px">
+  <h3>Operational activity summary</h3>
+  <div class="grid-4">
+    <article class="stat">
+      <h3>Total bookings</h3>
+      <p><a class="stat-link" href="/admin/bookings">${bookingsCount}</a></p>
+    </article>
+    <article class="stat">
+      <h3>Bookings this month</h3>
+      <p><a class="stat-link" href="/admin/bookings">${bookingsThisMonth}</a></p>
+    </article>
+    <article class="stat">
+      <h3>Confirmed</h3>
+      <p><a class="stat-link" href="/admin/bookings?status=CONFIRMED">${confirmedCount}</a></p>
+    </article>
+    <article class="stat">
+      <h3>Conversations this month</h3>
+      <p><a class="stat-link" href="/admin/conversations">${conversationsThisMonth}</a></p>
+    </article>
+  </div>
+  <p class="muted" style="margin-top: 8px">Quick links: <a class="inline-link" href="/admin/room-board">Room board</a> · <a class="inline-link" href="/admin/calendar">Calendar</a> · <a class="inline-link" href="/admin/inventory">Inventory</a> · <a class="inline-link" href="/admin/fb/menu">F&amp;B menu</a> · <a class="inline-link" href="/admin/conversations">Conversations</a></p>
+</section>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+type RoomBoardStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
+
+function getRoomBoardStatusClass(status: RoomBoardStatus): string {
+  switch (status) {
+    case "AVAILABLE": return "room-status-available";
+    case "RESERVED": return "room-status-reserved";
+    case "OCCUPIED": return "room-status-occupied";
+    case "CLEANING": return "room-status-cleaning";
+    case "MAINTENANCE": return "room-status-maintenance";
+    default: return "room-status-available";
+  }
+}
+
+function parseManualRoomStatusFromNotes(notes: string | null | undefined): RoomBoardStatus | null {
+  if (!notes) return null;
+  const match = notes.match(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/);
+  return (match?.[1] as RoomBoardStatus | undefined) ?? null;
+}
+
+function writeManualRoomStatusToNotes(notes: string | null | undefined, status: RoomBoardStatus): string {
+  const cleaned = (notes ?? "").replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/g, "").trim();
+  return `${cleaned ? `${cleaned} ` : ""}[status:${status}]`.trim();
+}
+
+function getPreferredUnitSortRank(unitName: string): number {
+  const normalized = unitName.trim().toUpperCase();
+  const match = normalized.match(/^([NSF])(\d+)$/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const prefix = match[1];
+  const num = Number.parseInt(match[2], 10);
+  if (prefix === "N" && num >= 1 && num <= 12) return num;
+  if (prefix === "S" && num >= 1 && num <= 8) return 100 + num;
+  if (prefix === "F" && num >= 1 && num <= 7) return 200 + num;
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function stripLegacyNationalityFromNotes(notes: string): string {
+  return notes
+    .split("\n")
+    .filter((line) => !/^\s*Nationality:\s*/i.test(line))
+    .join("\n")
+    .trim();
+}
+
+type ManualGuestDetails = {
+  fullName: string;
+  phone: string;
+  email: string;
+  nationality: string;
+  notes: string;
+  adults: number | null;
+  children: number | null;
+  mealPlan: "BREAKFAST" | "HALF_BOARD" | "NONE";
+  idCardPath: string;
+  paymentMethod: string;
+  paymentAmount: number | null;
+  balanceAmount: number | null;
+  transactionNumber: string;
+  bookedBy: string;
+  tourCompany: string;
+  handoverId: string;
+  handoverAt: string;
+  handoverBy: string;
+  handoverSignature: string;
+};
+
+async function getManualGuestDetailsForUnitOnDate(unitId: string, dateKey: string): Promise<ManualGuestDetails | null> {
+  const logs = await prisma.auditLog.findMany({
+    where: { action: "ROOM_UNIT_GUEST_DETAILS", entityType: "RoomUnit", entityId: unitId },
+    orderBy: { createdAt: "desc" },
+    take: 20
+  });
+  for (const log of logs) {
+    const metadata = parseAuditMetadata(log.metadataJson);
+    if (typeof metadata.date !== "string" || metadata.date !== dateKey) continue;
+    return {
+      fullName: typeof metadata.fullName === "string" ? metadata.fullName : "",
+      phone: typeof metadata.phone === "string" ? metadata.phone : "",
+      email: typeof metadata.email === "string" ? metadata.email : "",
+      nationality: typeof metadata.nationality === "string" ? metadata.nationality : "",
+      notes: typeof metadata.notes === "string" ? metadata.notes : "",
+      adults: typeof metadata.adults === "number" ? metadata.adults : null,
+      children: typeof metadata.children === "number" ? metadata.children : null,
+      mealPlan: metadata.mealPlan === "BREAKFAST" || metadata.mealPlan === "HALF_BOARD" ? metadata.mealPlan : "NONE",
+      idCardPath: typeof metadata.idCardPath === "string" ? metadata.idCardPath : "",
+      paymentMethod: typeof metadata.paymentMethod === "string" ? metadata.paymentMethod : "",
+      paymentAmount: typeof metadata.paymentAmount === "number" ? metadata.paymentAmount : null,
+      balanceAmount: typeof metadata.balanceAmount === "number" ? metadata.balanceAmount : null,
+      transactionNumber: typeof metadata.transactionNumber === "string" ? metadata.transactionNumber : "",
+      bookedBy: typeof metadata.bookedBy === "string" ? metadata.bookedBy : "",
+      tourCompany: typeof metadata.tourCompany === "string" ? metadata.tourCompany : "",
+      handoverId: typeof metadata.handoverId === "string" ? metadata.handoverId : "",
+      handoverAt: typeof metadata.handoverAt === "string" ? metadata.handoverAt : "",
+      handoverBy: typeof metadata.handoverBy === "string" ? metadata.handoverBy : "",
+      handoverSignature: typeof metadata.handoverSignature === "string" ? metadata.handoverSignature : ""
+    };
+  }
+  return null;
+}
+
+async function ensureDefaultRoomUnitsForBoard(hotelId: string, roomTypes: Array<{ id: string; code: string; name: string }>): Promise<void> {
+  const templates: Array<{ matcher: (roomType: { code: string; name: string }) => boolean; names: string[] }> = [
+    {
+      matcher: (rt) => {
+        const code = rt.code.toUpperCase();
+        const name = rt.name.toLowerCase();
+        return (
+          code.includes("APART") ||
+          name.includes("apart") ||
+          /\b1\s*bed\b/i.test(rt.name) ||
+          code.includes("1BED") ||
+          code.includes("1-BED")
+        );
+      },
+      names: ["N7", "N8", "N9", "N10", "N11", "N12"]
+    },
+    { matcher: (rt) => rt.code.toUpperCase().includes("STD_EXEC") || rt.name.toLowerCase().includes("executive"), names: ["N1", "N2", "N3", "N4", "N5", "N6"] },
+    { matcher: (rt) => rt.code.toUpperCase().includes("STD_SUPERIOR") || rt.name.toLowerCase().includes("superior"), names: ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"] },
+    { matcher: (rt) => rt.code.toUpperCase().includes("SUITE") || rt.name.toLowerCase().includes("suite"), names: ["F1", "F2", "F3", "F4", "F5", "F6", "F7"] }
+  ];
+
+  for (const roomType of roomTypes) {
+    const template = templates.find((entry) => entry.matcher(roomType));
+    if (!template) continue;
+    const existing = await prisma.roomUnit.findMany({
+      where: { hotelId, roomTypeId: roomType.id },
+      select: { name: true }
+    });
+    const existingSet = new Set(existing.map((row) => row.name.toUpperCase()));
+    const toCreate = template.names
+      .filter((name) => !existingSet.has(name.toUpperCase()))
+      .map((name, index) => ({
+        hotelId,
+        roomTypeId: roomType.id,
+        name,
+        sortOrder: index + 1
+      }));
+    if (toCreate.length) await prisma.roomUnit.createMany({ data: toCreate });
+  }
+}
+
+async function backfillMissingRoomUnitAssignmentsForDate(params: { hotelId: string; dateStart: Date; dateEndExclusive: Date }): Promise<void> {
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: params.hotelId, isActive: true },
+    select: { id: true }
+  });
+  for (const roomType of roomTypes) {
+    const units = await prisma.roomUnit.findMany({
+      where: { hotelId: params.hotelId, roomTypeId: roomType.id, isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: { id: true }
+    });
+    if (!units.length) continue;
+
+    const bookings = await prisma.booking.findMany({
+      where: {
+        hotelId: params.hotelId,
+        roomTypeId: roomType.id,
+        checkIn: { lt: params.dateEndExclusive },
+        checkOut: { gt: params.dateStart },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      select: { id: true, roomUnitId: true, checkIn: true, createdAt: true },
+      orderBy: [{ checkIn: "asc" }, { createdAt: "asc" }]
+    });
+
+    const occupied = new Set<string>(bookings.map((b) => b.roomUnitId).filter((id): id is string => Boolean(id)));
+    for (const booking of bookings) {
+      if (booking.roomUnitId) continue;
+      const candidate = units.find((u) => !occupied.has(u.id));
+      if (!candidate) continue;
+      await prisma.booking.update({
+        where: { id: booking.id },
+        data: { roomUnitId: candidate.id }
+      });
+      occupied.add(candidate.id);
+      await logAudit({
+        hotelId: params.hotelId,
+        action: "BOOKING_UNIT_AUTO_ASSIGNED_BACKFILL",
+        entityType: "Booking",
+        entityId: booking.id,
+        metadata: { roomUnitId: candidate.id, date: formatDateForInput(params.dateStart) }
+      });
+    }
+  }
+}
+
+adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/room-board");
+    return;
+  }
+  const unitId = String(req.params.unitId ?? "");
+  const statusInput = String(req.body.status ?? "").trim().toUpperCase();
+  const returnTo = String(req.body.returnTo ?? "").trim();
+  const validStatuses: RoomBoardStatus[] = ["AVAILABLE", "RESERVED", "OCCUPIED", "CLEANING", "MAINTENANCE"];
+  const status = validStatuses.includes(statusInput as RoomBoardStatus) ? (statusInput as RoomBoardStatus) : "AVAILABLE";
+  const boardDate = parseDateInput(req.body.date, startOfDay(new Date()));
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: unitId, hotelId: hotel.id },
+    select: { id: true, notes: true }
+  });
+  if (!unit) {
+    const fallback = `/admin/room-board?date=${formatDateForInput(boardDate)}`;
+    res.redirect(returnTo === "/admin/profile" ? "/admin/profile" : fallback);
+    return;
+  }
+  await prisma.roomUnit.update({
+    where: { id: unit.id },
+    data: { notes: writeManualRoomStatusToNotes(unit.notes, status) }
+  });
+  if (returnTo === "/admin/profile") {
+    res.redirect("/admin/profile?unitUpdated=1");
+    return;
+  }
+  res.redirect(`/admin/room-board?date=${formatDateForInput(boardDate)}&unitUpdated=1`);
+});
+
+adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: {
+      roomTypes: { where: { isActive: true }, orderBy: { name: "asc" }, include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } } }
+    }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Room Status Board</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const now = startOfDay(new Date());
+  const boardDate = parseDateInput(req.query.date, now);
+  const filterRoomTypeId = typeof req.query.roomTypeId === "string" ? req.query.roomTypeId.trim() : "";
+  const filterUnitId = typeof req.query.unitId === "string" ? req.query.unitId.trim() : "";
+  const filterStatus = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
+
+  const buildRoomBoardQuery = (day: Date): string => {
+    const p = new URLSearchParams();
+    p.set("date", formatDateForInput(day));
+    if (filterRoomTypeId) p.set("roomTypeId", filterRoomTypeId);
+    if (filterUnitId) p.set("unitId", filterUnitId);
+    if (filterStatus) p.set("status", filterStatus);
+    return p.toString();
+  };
+  const prevRoomBoardHref = `/admin/room-board?${buildRoomBoardQuery(addDays(boardDate, -1))}`;
+  const nextRoomBoardHref = `/admin/room-board?${buildRoomBoardQuery(addDays(boardDate, 1))}`;
+
+  const dateStart = boardDate;
+  const dateEndExclusive = addDays(boardDate, 1);
+  const updatedNotice = req.query.unitUpdated ? '<p class="badge ok">Room status updated.</p>' : "";
+  const manualCheckInNotice = req.query.manualCheckIn ? '<p class="badge ok">Manual check-in saved. Booking created and room board updated.</p>' : "";
+  const manualCheckOutNotice = req.query.manualCheckOut ? '<p class="badge ok">Room marked for housekeeping (cleaning).</p>' : "";
+  const invoiceSentFromCheckIn = req.query.invoiceSent ? '<p class="badge ok">Invoice PDF was sent to the guest on WhatsApp.</p>' : "";
+  const invoiceErrFromCheckIn =
+    typeof req.query.invoiceError === "string" && req.query.invoiceError.trim()
+      ? `<p class="badge alert">${escapeHtml(req.query.invoiceError.trim().slice(0, 600))}</p>`
+      : "";
+  const printBookingIdRaw = typeof req.query.printBookingId === "string" ? req.query.printBookingId.trim() : "";
+  const printInvoiceScript = printBookingIdRaw
+    ? `<script>(function(){var u=${JSON.stringify(`/admin/bookings/${encodeURIComponent(printBookingIdRaw)}/invoice-print`)};window.open(u,"_blank","noopener");})();</script>`
+    : "";
+
+  await ensureDefaultRoomUnitsForBoard(
+    hotel.id,
+    hotel.roomTypes.map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
+  );
+  await backfillMissingRoomUnitAssignmentsForDate({
+    hotelId: hotel.id,
+    dateStart,
+    dateEndExclusive
+  });
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+  });
+
+  const boardDayRange = inventoryDayRangeExclusive(dateStart);
+  const [inventoryRows, overlappingBookings] = await Promise.all([
+    prisma.inventory.findMany({
+      where: { hotelId: hotel.id, date: { gte: boardDayRange.gte, lt: boardDayRange.lt } },
+      select: { roomTypeId: true, total: true, reserved: true, closedOut: true }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: dateStart },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, roomType: true, roomUnit: true },
+      orderBy: { checkIn: "asc" }
+    })
+  ]);
+
+  const inventoryByRoomType = new Map(inventoryRows.map((r) => [r.roomTypeId, r]));
+
+  interface RoomCard {
+    unitId: string | null;
+    unitName: string;
+    roomTypeId: string;
+    name: string;
+    status: RoomBoardStatus;
+    guestName: string | null;
+    checkIn: Date | null;
+    checkOut: Date | null;
+    bookingId: string | null;
+    isUnassignedBooking: boolean;
+  }
+
+  const cards: RoomCard[] = [];
+  const statusCounts = { AVAILABLE: 0, RESERVED: 0, OCCUPIED: 0, CLEANING: 0, MAINTENANCE: 0 };
+
+  for (const roomType of roomTypes) {
+    const inv = inventoryByRoomType.get(roomType.id);
+    const closedOut = inv?.closedOut ?? false;
+    const bookableTotal = inv?.total ?? roomType.totalInventory;
+    const reservedCount = inv?.reserved ?? 0;
+    const aggregateAvailable = closedOut ? 0 : Math.max(0, bookableTotal - reservedCount);
+    const units = roomType.roomUnits;
+    const activeUnits = units.filter((u) => u.isActive);
+    const overlapForType = overlappingBookings.filter((b) => b.roomTypeId === roomType.id);
+    const bookingSlotCount = overlapForType.length;
+    const unbookedActiveUnits = activeUnits.filter((u) => !overlapForType.some((b) => b.roomUnitId === u.id));
+    const effectiveReserved = Math.min(reservedCount, bookableTotal);
+    const needInvReserved = Math.max(0, effectiveReserved - bookingSlotCount);
+    const reservedFromInventoryUnitIds = new Set<string>();
+    {
+      let remaining = needInvReserved;
+      for (const u of unbookedActiveUnits) {
+        if (remaining <= 0) break;
+        if (parseManualRoomStatusFromNotes(u.notes)) continue;
+        reservedFromInventoryUnitIds.add(u.id);
+        remaining -= 1;
+      }
+    }
+
+    for (const unit of units) {
+      const bookingsForUnit = overlappingBookings.filter((b) => b.roomUnitId === unit.id);
+      const firstBooking = bookingsForUnit[0] ?? null;
+      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED");
+      const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
+      const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
+      const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
+      const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
+
+      // Bookings are the source of truth. Staff manual status (dropdown / notes) overrides only when
+      // there is no overlapping booking — otherwise inventory/inactive rules would ignore the form.
+      let status: RoomBoardStatus;
+      if (hasConfirmed) {
+        status = "OCCUPIED";
+      } else if (hasPending) {
+        status = "RESERVED";
+      } else if (closedOut) {
+        status = "MAINTENANCE";
+      } else if (manualStatus) {
+        status = manualStatus;
+      } else if (!unit.isActive) {
+        status = "MAINTENANCE";
+      } else if (beyondInventoryCap) {
+        status = "MAINTENANCE";
+      } else if (reservedFromInventoryUnitIds.has(unit.id)) {
+        status = "RESERVED";
+      } else if (aggregateAvailable <= 0) {
+        status = "RESERVED";
+      } else {
+        status = "AVAILABLE";
+      }
+      statusCounts[status] += 1;
+
+      cards.push({
+        unitId: unit.id,
+        unitName: unit.name,
+        roomTypeId: roomType.id,
+        name: roomType.name,
+        status,
+        guestName: firstBooking?.guest?.fullName ?? firstBooking?.guest?.phoneE164 ?? null,
+        checkIn: firstBooking?.checkIn ?? null,
+        checkOut: firstBooking?.checkOut ?? null,
+        bookingId: firstBooking?.id ?? null,
+        isUnassignedBooking: false
+      });
+    }
+
+    const unassignedForType = overlappingBookings.filter(
+      (b) => b.roomTypeId === roomType.id && !b.roomUnitId
+    );
+    for (const b of unassignedForType) {
+      const hasConfirmed = b.status === "CONFIRMED";
+      const hasPending = b.status === "PENDING";
+      let status: RoomBoardStatus;
+      if (hasConfirmed) {
+        status = "OCCUPIED";
+      } else if (hasPending) {
+        status = "RESERVED";
+      } else {
+        status = "RESERVED";
+      }
+      statusCounts[status] += 1;
+      cards.push({
+        unitId: null,
+        unitName: "Unassigned",
+        roomTypeId: roomType.id,
+        name: roomType.name,
+        status,
+        guestName: b.guest?.fullName ?? b.guest?.phoneE164 ?? null,
+        checkIn: b.checkIn,
+        checkOut: b.checkOut,
+        bookingId: b.id,
+        isUnassignedBooking: true
+      });
+    }
+  }
+
+  let filteredCards = cards;
+  if (filterRoomTypeId) filteredCards = filteredCards.filter((c) => c.roomTypeId === filterRoomTypeId);
+  if (filterUnitId) filteredCards = filteredCards.filter((c) => c.unitId === filterUnitId);
+  if (filterStatus) filteredCards = filteredCards.filter((c) => c.status === filterStatus);
+
+  const totalRooms = cards.length;
+
+  const roomTypeOptions = roomTypes
+    .map((rt) => `<option value="${escapeHtml(rt.id)}" ${rt.id === filterRoomTypeId ? "selected" : ""}>${escapeHtml(rt.name)}</option>`)
+    .join("");
+  const unitOptions = cards
+    .filter((c) => c.unitId)
+    .map(
+      (c) =>
+        `<option value="${escapeHtml(c.unitId!)}" ${c.unitId === filterUnitId ? "selected" : ""}>${escapeHtml(c.unitName)} (${escapeHtml(c.name)})</option>`
+    )
+    .join("");
+
+  const roomCardsHtml = filteredCards
+    .map(
+      (c) => {
+        const statusClass = getRoomBoardStatusClass(c.status);
+        const detailUrl = c.unitId
+          ? `/admin/room-board/unit/${encodeURIComponent(c.unitId)}/details?date=${formatDateForInput(boardDate)}`
+          : `/admin/bookings/${encodeURIComponent(c.bookingId ?? "")}`;
+        const statusForm =
+          c.unitId && !c.isUnassignedBooking
+            ? `<form method="post" action="/admin/room-board/unit/${encodeURIComponent(c.unitId)}/status" style="display:flex; gap:6px; align-items:center">
+      <input type="hidden" name="date" value="${formatDateForInput(boardDate)}" />
+      <select name="status" style="padding:4px 6px; border:1px solid #d8dee6; border-radius:8px; font-size:12px">
+        <option value="AVAILABLE" ${c.status === "AVAILABLE" ? "selected" : ""}>Available</option>
+        <option value="RESERVED" ${c.status === "RESERVED" ? "selected" : ""}>Reserved</option>
+        <option value="OCCUPIED" ${c.status === "OCCUPIED" ? "selected" : ""}>Occupied</option>
+        <option value="CLEANING" ${c.status === "CLEANING" ? "selected" : ""}>Cleaning</option>
+        <option value="MAINTENANCE" ${c.status === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+      </select>
+      <button type="submit" style="padding:4px 8px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; font-size:12px">Set</button>
+    </form>`
+            : "";
+        return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px;">
+  <div style="font-weight:700; font-size:0.92rem; margin-bottom:2px;">${escapeHtml(c.unitName)}${c.isUnassignedBooking ? ' <span class="badge pending" style="font-size:10px">no unit</span>' : ""}</div>
+  <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">${escapeHtml(c.name)}</div>
+  <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
+  ${c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
+  ${c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
+  <div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+    <a class="inline-link" href="${detailUrl}">${c.isUnassignedBooking ? "booking" : "details"}</a>
+    ${statusForm}
+  </div>
+</div>`;
+      }
+    )
+    .join("");
+
+  const content = `
+<h2>Room Status Board</h2>
+<p class="muted">Front-desk view of room status for the selected date. Click a room for details.</p>
+${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCheckIn}${invoiceErrFromCheckIn}${printInvoiceScript}
+<div class="actions" style="margin-bottom:14px; display:flex; flex-wrap:wrap; gap:8px; align-items:center">
+  <a class="btn-link primary" href="/admin/calendar?start=${formatDateForInput(boardDate)}&days=7">Calendar</a>
+  <a class="btn-link" href="/admin/front-desk/check-in?date=${formatDateForInput(boardDate)}" target="_blank" rel="noopener noreferrer">Manual check-in</a>
+  <a class="btn-link" href="/admin/bookings/search" target="_blank" rel="noopener noreferrer">Find booking</a>
+  <a class="btn-link" href="/admin/front-desk/check-out?date=${formatDateForInput(boardDate)}" target="_blank" rel="noopener noreferrer">Manual check-out</a>
+</div>
+<form method="get" action="/admin/room-board" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px">
+  <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+    <span style="font-size:14px; font-weight:600; color:var(--muted)">Date</span>
+    <a class="room-board-date-arrow" href="${escapeHtml(prevRoomBoardHref)}" title="Previous day" aria-label="Previous day">&#8249;</a>
+    <input type="date" name="date" value="${formatDateForInput(boardDate)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    <a class="room-board-date-arrow" href="${escapeHtml(nextRoomBoardHref)}" title="Next day" aria-label="Next day">&#8250;</a>
+  </div>
+  <label>Room type <select name="roomTypeId" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+    <option value="">All</option>${roomTypeOptions}
+  </select></label>
+  <label>Room unit <select name="unitId" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+    <option value="">All</option>${unitOptions}
+  </select></label>
+  <label>Status <select name="status" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+    <option value="" ${filterStatus === "" ? "selected" : ""}>All</option>
+    <option value="AVAILABLE" ${filterStatus === "AVAILABLE" ? "selected" : ""}>Available</option>
+    <option value="RESERVED" ${filterStatus === "RESERVED" ? "selected" : ""}>Reserved</option>
+    <option value="OCCUPIED" ${filterStatus === "OCCUPIED" ? "selected" : ""}>Occupied</option>
+    <option value="CLEANING" ${filterStatus === "CLEANING" ? "selected" : ""}>Cleaning</option>
+    <option value="MAINTENANCE" ${filterStatus === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+  </select></label>
+  <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
+</form>
+<div class="room-board-summary" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:10px; margin-bottom:18px;">
+  <article class="stat" style="border-left-color:#64748b"><h3>Total rooms</h3><p>${totalRooms}</p></article>
+  <article class="stat" style="border-left-color:#22c55e"><h3>Available</h3><p>${statusCounts.AVAILABLE}</p></article>
+  <article class="stat" style="border-left-color:#3b82f6"><h3>Reserved</h3><p>${statusCounts.RESERVED}</p></article>
+  <article class="stat" style="border-left-color:#ef4444"><h3>Occupied</h3><p>${statusCounts.OCCUPIED}</p></article>
+  <article class="stat" style="border-left-color:#eab308"><h3>Cleaning</h3><p>${statusCounts.CLEANING}</p></article>
+  <article class="stat" style="border-left-color:#a855f7"><h3>Maintenance</h3><p>${statusCounts.MAINTENANCE}</p></article>
+</div>
+<p class="muted" style="margin-bottom:8px">Legend: <span class="room-board-badge room-status-available">Available</span> <span class="room-board-badge room-status-reserved">Reserved</span> <span class="room-board-badge room-status-occupied">Occupied</span> <span class="room-board-badge room-status-cleaning">Cleaning</span> <span class="room-board-badge room-status-maintenance">Maintenance</span></p>
+<div class="room-board-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:8px;">
+  ${roomCardsHtml || '<p class="muted">No rooms match the filter.</p>'}
+</div>
+<style>
+  .room-board-date-arrow {
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-width:36px;
+    min-height:36px;
+    border:1px solid #d8dee6;
+    border-radius:8px;
+    background:#f8fafc;
+    color:#0f172a;
+    font-size:1.35rem;
+    font-weight:700;
+    text-decoration:none;
+    line-height:1;
+    flex-shrink:0;
+  }
+  .room-board-date-arrow:hover { background:#e2e8f0; color:#075e54; }
+  .room-board-card:hover { opacity:0.92; }
+  .room-board-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; }
+  .room-status-available { background:#dcfce7; color:#166534; border-color:#22c55e; }
+  .room-status-reserved { background:#dbeafe; color:#1e40af; border-color:#3b82f6; }
+  .room-status-occupied { background:#fee2e2; color:#991b1b; border-color:#ef4444; }
+  .room-status-cleaning { background:#fef9c3; color:#854d0e; border-color:#eab308; }
+  .room-status-maintenance { background:#f3e8ff; color:#6b21a8; border-color:#a855f7; }
+  @media (max-width: 900px) { .room-board-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); } }
+  @media (max-width: 640px) {
+    .room-board-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap:6px; }
+    .room-board-summary { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 420px) {
+    .room-board-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .room-board-card { padding:7px !important; }
+  }
+</style>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+async function respondManualCheckInValidationError(
+  res: Response,
+  req: Request,
+  hotel: { id: string; displayName: string; currency: string },
+  errorMsg: string
+): Promise<void> {
+  const form = manualCheckInFormFromBody(req);
+  const defaultDay = form.checkIn.trim()
+    ? startOfDay(parseDateInput(form.checkIn, startOfDay(new Date())))
+    : startOfDay(new Date());
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: { roomUnits: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+  });
+  const fdPricing = loadFrontDeskPricing();
+  const content = buildManualCheckInPageHtml(
+    { formatMoney, formatDateForInput, parseDateInput, addDays },
+    hotel,
+    roomTypes,
+    fdPricing,
+    { defaultDay, errorMsg, form }
+  );
+  res.status(200).type("html").send(renderLayout(content, true));
+}
+
+adminRouter.get("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Manual check-in</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const defaultDay = parseDateInput(req.query.date, startOfDay(new Date()));
+  const errRaw = typeof req.query.error === "string" ? req.query.error : "";
+  const errorMsg = errRaw ? errRaw.slice(0, 500) : "";
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: { roomUnits: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+  });
+  const fdPricing = loadFrontDeskPricing();
+  const content = buildManualCheckInPageHtml(
+    { formatMoney, formatDateForInput, parseDateInput, addDays },
+    hotel,
+    roomTypes,
+    fdPricing,
+    { defaultDay, errorMsg: errorMsg || undefined }
+  );
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.redirect("/admin/room-board");
+    return;
+  }
+  const guestFullName = String(req.body.guestFullName ?? "").trim();
+  const guestPhoneRaw = String(req.body.guestPhone ?? "").trim();
+  const guestEmail = String(req.body.guestEmail ?? "").trim();
+  const nationality = String(req.body.nationality ?? "").trim();
+  const idNumber = String(req.body.idNumber ?? "").trim();
+  const internalNotes = String(req.body.internalNotes ?? "").trim();
+  const roomUnitId = String(req.body.roomUnitId ?? "").trim();
+  const returnBoardDate = String(req.body.returnBoardDate ?? "").trim();
+  const checkIn = startOfDay(parseDateInput(req.body.checkIn, startOfDay(new Date())));
+  const checkOut = startOfDay(parseDateInput(req.body.checkOut, addDays(checkIn, 1)));
+  const adults = clamp(parseIntegerInput(req.body.adults, 2), 1, 12);
+  const children = clamp(parseIntegerInput(req.body.children, 0), 0, 8);
+  const mealPlanRaw = String(req.body.mealPlan ?? "NONE").toUpperCase();
+  const mealPlan = mealPlanRaw === "BREAKFAST" || mealPlanRaw === "HALF_BOARD" ? mealPlanRaw : "NONE";
+  const paymentStatusRaw = String(req.body.paymentStatus ?? "PENDING").toUpperCase();
+  const manualPaymentMap: Record<string, PaymentStatus> = {
+    PENDING: PaymentStatus.PENDING,
+    REQUIRES_ACTION: PaymentStatus.REQUIRES_ACTION,
+    LPO: PaymentStatus.LPO,
+    FRIENDS_TRANSFER: PaymentStatus.FRIENDS_TRANSFER,
+    SUCCEEDED: PaymentStatus.SUCCEEDED,
+    FAILED: PaymentStatus.FAILED,
+    REFUNDED: PaymentStatus.REFUNDED
+  };
+  const paymentStatus = manualPaymentMap[paymentStatusRaw] ?? PaymentStatus.PENDING;
+  const paymentMethod = String(req.body.paymentMethod ?? "").trim();
+  const extraIdsRaw = req.body.extraIds;
+  const extraIdsList = Array.isArray(extraIdsRaw) ? extraIdsRaw.map(String) : extraIdsRaw ? [String(extraIdsRaw)] : [];
+  const allowedExtras = new Set(loadFrontDeskPricing().extras.map((x) => x.id));
+  const selectedExtraIds = extraIdsList.filter((id) => allowedExtras.has(id));
+  const extraHoursById: Record<string, number> = {};
+  for (const ex of loadFrontDeskPricing().extras) {
+    if (!ex.applyPerHour || !selectedExtraIds.includes(ex.id)) continue;
+    const raw = req.body[`extraHour_${ex.id}`];
+    const h = parseFloat(typeof raw === "string" || typeof raw === "number" ? String(raw) : "1");
+    extraHoursById[ex.id] = Number.isFinite(h) && h >= 0.25 ? Math.min(168, h) : 1;
+  }
+  const adjustmentAmount = parseNumberInput(req.body.adjustmentAmount, 0);
+  const sendInvoiceWhatsApp = req.body.sendInvoiceWhatsApp === "1" || req.body.sendInvoiceWhatsApp === "on";
+  const openInvoicePrint = req.body.openInvoicePrint === "1" || req.body.openInvoicePrint === "on";
+
+  const fail = async (msg: string) => {
+    await respondManualCheckInValidationError(res, req, hotel, msg);
+  };
+
+  if (!guestFullName) {
+    await fail("Guest full name is required.");
+    return;
+  }
+  const phoneE164 = normalizeGuestPhoneE164(guestPhoneRaw);
+  if (!phoneE164 || phoneE164.length < 8) {
+    await fail("Enter a valid phone number.");
+    return;
+  }
+  if (checkOut.getTime() <= checkIn.getTime()) {
+    await fail("Check-out must be after check-in.");
+    return;
+  }
+  const nights = Math.round((checkOut.getTime() - checkIn.getTime()) / 86400000);
+  if (nights < 1) {
+    await fail("Stay must be at least one night.");
+    return;
+  }
+  if (!roomUnitId) {
+    await fail("Select a room unit.");
+    return;
+  }
+
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: roomUnitId, hotelId: hotel.id, isActive: true },
+    include: { roomType: true }
+  });
+  if (!unit) {
+    await fail("Room unit not found.");
+    return;
+  }
+  const rt = unit.roomType;
+  if (!rt.isActive) {
+    await fail("Room type is inactive.");
+    return;
+  }
+  const knownOccupancyCodes = new Set(["STD_SUPERIOR", "STD_EXEC", "SUITE", "APARTMENT"]);
+  if (knownOccupancyCodes.has(rt.code)) {
+    const occ = roomTypeAllowsOccupancy(rt.code, adults, children);
+    if (!occ.ok) {
+      await fail(occ.message);
+      return;
+    }
+  } else if (adults + children > rt.capacity) {
+    await fail(`Guest count exceeds room capacity (${rt.capacity}).`);
+    return;
+  }
+
+  const priced = computeManualCheckInTotal({
+    baseNightlyRate: rt.baseNightlyRate,
+    nights,
+    mealPlan: mealPlan as MealPlanCode,
+    adults,
+    children,
+    selectedExtraIds,
+    extraHoursById
+  });
+  const totalAmount = Number((priced.total + adjustmentAmount).toFixed(2));
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    await fail("Total amount must be greater than zero. Check dates, room, meal plan, extras, and adjustment.");
+    return;
+  }
+
+  const bookingChannelRaw = String(req.body.bookingChannel ?? "DIRECT").toUpperCase();
+  const bookingSourceChannel: ChannelProvider =
+    bookingChannelRaw === "PHONE"
+      ? ChannelProvider.PHONE
+      : bookingChannelRaw === "CORPORATE"
+        ? ChannelProvider.CORPORATE
+        : bookingChannelRaw === "REFERRAL"
+          ? ChannelProvider.REFERRAL
+          : ChannelProvider.DIRECT;
+
+  try {
+    const bookingId = buildBookingId();
+    await prisma.$transaction(async (tx) => {
+      const overlap = await tx.booking.count({
+        where: {
+          hotelId: hotel.id,
+          roomUnitId: unit.id,
+          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+          checkIn: { lt: checkOut },
+          checkOut: { gt: checkIn }
+        }
+      });
+      if (overlap > 0) throw new Error("This room is already booked for overlapping dates.");
+
+      await assertInventoryCanReserveTx(tx, {
+        hotelId: hotel.id,
+        roomTypeId: rt.id,
+        checkIn,
+        checkOut,
+        rooms: 1
+      });
+
+      const guest = await tx.guest.upsert({
+        where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164 } },
+        create: {
+          hotelId: hotel.id,
+          phoneE164,
+          fullName: guestFullName,
+          email: guestEmail || null,
+          ...(nationality ? { nationality } : {})
+        },
+        update: {
+          fullName: guestFullName,
+          ...(guestEmail ? { email: guestEmail } : {}),
+          ...(nationality ? { nationality } : {})
+        }
+      });
+
+      const referenceCode = await allocateBookingReferenceCode(tx, {
+        hotelId: hotel.id,
+        source: bookingSourceChannel,
+        refDate: new Date()
+      });
+
+      await tx.booking.create({
+        data: {
+          id: bookingId,
+          hotelId: hotel.id,
+          propertyId: rt.propertyId,
+          roomTypeId: rt.id,
+          roomUnitId: unit.id,
+          guestId: guest.id,
+          conversationId: null,
+          checkIn,
+          checkOut,
+          nights,
+          adults,
+          children,
+          totalAmount,
+          currency: hotel.currency,
+          status: BookingStatus.CONFIRMED,
+          source: bookingSourceChannel,
+          referenceCode,
+          paymentStatus
+        }
+      });
+
+      await recordBookingStatusChange(tx, {
+        hotelId: hotel.id,
+        bookingId,
+        fromStatus: null,
+        toStatus: BookingStatus.CONFIRMED,
+        source: "MANUAL_CHECK_IN"
+      });
+
+      await ensureActiveFolio(tx, {
+        hotelId: hotel.id,
+        bookingId,
+        guestId: guest.id,
+        roomUnitId: unit.id,
+        currency: hotel.currency,
+        staffId: null
+      });
+
+      await reserveInventoryForBooking({
+        tx,
+        hotelId: hotel.id,
+        roomTypeId: rt.id,
+        propertyId: rt.propertyId,
+        checkIn,
+        checkOut,
+        rooms: 1
+      });
+    });
+
+    const dateKey = formatDateForInput(checkIn);
+    await logAudit({
+      hotelId: hotel.id,
+      action: "MANUAL_FRONT_DESK_CHECK_IN",
+      entityType: "Booking",
+      entityId: bookingId,
+      bookingId,
+      metadata: {
+        roomUnitId: unit.id,
+        guestPhone: phoneE164,
+        checkIn: dateKey,
+        checkOut: formatDateForInput(checkOut),
+        nights,
+        totalAmount,
+        paymentStatus: paymentStatusRaw,
+        mealPlan,
+        rackNightlyRate: rt.baseNightlyRate,
+        roomSubtotal: priced.roomSubtotal,
+        mealSubtotal: priced.mealSubtotal,
+        extrasSubtotal: priced.extrasSubtotal,
+        adjustmentAmount,
+        extraIds: selectedExtraIds,
+        extraHoursById
+      }
+    });
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "ROOM_UNIT_GUEST_DETAILS",
+      entityType: "RoomUnit",
+      entityId: unit.id,
+      metadata: {
+        date: dateKey,
+        fullName: guestFullName,
+        phone: phoneE164,
+        email: guestEmail,
+        nationality: nationality || undefined,
+        idNumber: idNumber || undefined,
+        notes: internalNotes,
+        adults,
+        children,
+        mealPlan,
+        idCardPath: "",
+        paymentMethod,
+        paymentAmount: paymentStatus === PaymentStatus.SUCCEEDED ? totalAmount : null,
+        balanceAmount: paymentStatus === PaymentStatus.SUCCEEDED ? 0 : totalAmount
+      }
+    });
+
+    let invoiceSendError: string | undefined;
+    if (sendInvoiceWhatsApp) {
+      const inv = await sendInvoicePdfForBooking({
+        hotelId: hotel.id,
+        bookingId,
+        trigger: "MANUAL_CHECK_IN_FORM",
+        force: true
+      });
+      if (inv.error) invoiceSendError = inv.error;
+    }
+
+    const boardDate = formatDateForInput(checkIn);
+    const qs = new URLSearchParams();
+    qs.set("date", boardDate);
+    qs.set("manualCheckIn", "1");
+    if (sendInvoiceWhatsApp) {
+      if (invoiceSendError) qs.set("invoiceError", invoiceSendError.slice(0, 500));
+      else qs.set("invoiceSent", "1");
+    }
+    if (openInvoicePrint) qs.set("printBookingId", bookingId);
+    res.redirect(`/admin/room-board?${qs.toString()}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Check-in could not be completed.";
+    await fail(msg);
+  }
+});
+
+adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Manual check-out</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const boardDay = parseDateInput(req.query.date, startOfDay(new Date()));
+  const boardDateStr = formatDateForInput(boardDay);
+  const errRaw = typeof req.query.error === "string" ? req.query.error : "";
+  const errorMsg = errRaw ? errRaw.slice(0, 500) : "";
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: { roomUnits: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+  });
+  const unitOptions = roomTypes
+    .flatMap((rt) => rt.roomUnits.map((u) => ({ rt, u })))
+    .map(({ rt, u }) => `<option value="${escapeHtml(u.id)}">${escapeHtml(u.name)} — ${escapeHtml(rt.name)}</option>`)
+    .join("");
+
+  const content = `
+<h2>Manual check-out</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Record departure: shortens an active stay (releases future nights in inventory), updates the room charge (prorated minus any staff discount), and marks the room for housekeeping. The action is logged with your staff account.</p>
+${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px">${escapeHtml(errorMsg)}</p>` : ""}
+<form method="post" action="/admin/front-desk/check-out" style="max-width:640px;display:grid;gap:12px">
+  <label>Room unit <span style="color:#b91c1c">*</span>
+    <select name="roomUnitId" required style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">
+      <option value="">Select…</option>${unitOptions}
+    </select>
+  </label>
+  <label>Departure date (checkout day) <span style="color:#b91c1c">*</span>
+    <input type="date" name="departureDate" value="${escapeHtml(boardDateStr)}" required style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+  </label>
+  <label>Departure time (optional)
+    <input type="time" name="departureTime" style="width:100%;max-width:200px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+  </label>
+  <p class="muted" style="margin:0;font-size:12px">You can check out on the <strong>same calendar day as check-in</strong> (0 nights stay). Pick that day above and add the time if useful. For early checkout before the scheduled end date, room revenue is prorated by nights; then apply an optional discount (e.g. short stay).</p>
+  <label>Room discount (${escapeHtml(hotel.currency)}) — optional
+    <input type="number" name="discountAmount" min="0" step="0.001" placeholder="0" style="width:100%;max-width:200px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+  </label>
+  <p class="muted" style="margin:0;font-size:12px">Applied after prorating the accommodation total to actual nights (cannot exceed the prorated room amount).</p>
+  <label>Reason / notes (optional)
+    <textarea name="departureReason" rows="3" maxlength="2000" placeholder="e.g. Guest left after a few hours, early flight…" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px;resize:vertical"></textarea>
+  </label>
+  <div class="actions" style="display:flex;gap:10px;flex-wrap:wrap">
+    <button type="submit" style="padding:10px 18px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Confirm check-out</button>
+    <a class="btn-link" href="/admin/room-board?date=${escapeHtml(boardDateStr)}">Back to room board</a>
+  </div>
+</form>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true }
+  });
+  if (!hotel) {
+    res.redirect("/admin/room-board");
+    return;
+  }
+  const roomUnitId = String(req.body.roomUnitId ?? "").trim();
+  const departureDate = startOfDay(parseDateInput(req.body.departureDate, startOfDay(new Date())));
+  const departureTimeRaw = String(req.body.departureTime ?? "").trim();
+  const departureReason = String(req.body.departureReason ?? "").trim().slice(0, 2000);
+  const discountParsed = parseFloat(String(req.body.discountAmount ?? ""));
+  const discountRequested = Number.isFinite(discountParsed) && discountParsed > 0 ? discountParsed : 0;
+
+  const errRedirect = (msg: string) => {
+    res.redirect(`/admin/front-desk/check-out?date=${encodeURIComponent(formatDateForInput(departureDate))}&error=${encodeURIComponent(msg)}`);
+  };
+
+  if (!roomUnitId) {
+    errRedirect("Select a room unit.");
+    return;
+  }
+
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: roomUnitId, hotelId: hotel.id },
+    select: { id: true, notes: true }
+  });
+  if (!unit) {
+    errRedirect("Room not found.");
+    return;
+  }
+
+  const staffSession = getSession(req);
+  const executedByEmail = staffSession?.email ?? "unknown";
+
+  try {
+    let auditBookingId: string | undefined;
+    let auditMetadata: Record<string, unknown> = {
+      roomUnitId: unit.id,
+      departureDate: formatDateForInput(departureDate),
+      departureTime: departureTimeRaw || undefined,
+      departureReason: departureReason || undefined,
+      discountRequested,
+      executedByEmail
+    };
+
+    await prisma.$transaction(async (tx) => {
+      const booking = await tx.booking.findFirst({
+        where: {
+          hotelId: hotel.id,
+          roomUnitId: unit.id,
+          status: BookingStatus.CONFIRMED,
+          checkIn: { lte: departureDate },
+          checkOut: { gt: departureDate }
+        },
+        orderBy: { checkIn: "asc" }
+      });
+
+      if (booking) {
+        const checkInDay = startOfDay(booking.checkIn);
+        const oldCheckOut = startOfDay(booking.checkOut);
+        const newCheckOut = departureDate;
+        if (newCheckOut.getTime() < checkInDay.getTime()) {
+          throw new Error("Departure cannot be before check-in.");
+        }
+        if (newCheckOut.getTime() >= oldCheckOut.getTime()) {
+          throw new Error("Departure must be before the scheduled checkout date (pick an earlier day).");
+        }
+        const priorNights = Math.round((oldCheckOut.getTime() - checkInDay.getTime()) / 86400000);
+        if (priorNights < 1) {
+          throw new Error("Could not determine stay length from this booking.");
+        }
+        const newNights = Math.round((newCheckOut.getTime() - checkInDay.getTime()) / 86400000);
+        if (newNights < 0) throw new Error("Invalid stay length after checkout.");
+
+        const proRated = Math.round(((booking.totalAmount * newNights) / priorNights) * 1000) / 1000;
+        const cappedDiscount = Math.min(discountRequested, proRated);
+        const newTotal = Math.max(0, Math.round((proRated - cappedDiscount) * 1000) / 1000);
+
+        await tx.booking.update({
+          where: { id: booking.id },
+          data: {
+            checkOut: newCheckOut,
+            nights: newNights,
+            totalAmount: newTotal
+          }
+        });
+
+        await releaseInventoryForStayRange({
+          tx,
+          roomTypeId: booking.roomTypeId,
+          start: newCheckOut,
+          endExclusive: oldCheckOut,
+          rooms: 1
+        });
+
+        auditBookingId = booking.id;
+        auditMetadata = {
+          ...auditMetadata,
+          bookingId: booking.id,
+          previousCheckOut: formatDateForInput(oldCheckOut),
+          newCheckOut: formatDateForInput(newCheckOut),
+          previousNights: priorNights,
+          newNights,
+          previousTotalAmount: booking.totalAmount,
+          proRatedRoomTotal: proRated,
+          discountApplied: cappedDiscount,
+          newTotalAmount: newTotal
+        };
+      } else {
+        auditMetadata = {
+          ...auditMetadata,
+          noActiveBooking: true
+        };
+      }
+
+      const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
+      await tx.roomUnit.update({
+        where: { id: unit.id },
+        data: { notes: writeManualRoomStatusToNotes(fresh?.notes, "CLEANING") }
+      });
+    });
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "MANUAL_FRONT_DESK_CHECK_OUT",
+      entityType: auditBookingId ? "Booking" : "RoomUnit",
+      entityId: auditBookingId ?? unit.id,
+      metadata: auditMetadata
+    });
+
+    res.redirect(`/admin/room-board?date=${encodeURIComponent(formatDateForInput(departureDate))}&manualCheckOut=1`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Check-out could not be completed.";
+    errRedirect(msg);
+  }
+});
+
+adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true, currency: true } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Handover Sheet</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const selectedDate = parseDateInput(req.query.date, startOfDay(new Date()));
+  const dayStart = selectedDate;
+  const dayEnd = addDays(dayStart, 1);
+  const shiftInput = typeof req.query.shift === "string" ? req.query.shift.toUpperCase() : "MORNING";
+  type ShiftKey = "MORNING" | "EVENING" | "NIGHT" | "FULL_DAY";
+  const selectedShift: ShiftKey =
+    shiftInput === "EVENING" || shiftInput === "NIGHT" || shiftInput === "FULL_DAY" ? shiftInput : "MORNING";
+  const shiftRanges: Record<ShiftKey, { label: string; startHour: number; startMinute: number; endHour: number; endMinute: number }> = {
+    MORNING: { label: "Morning", startHour: 7, startMinute: 0, endHour: 14, endMinute: 0 },
+    EVENING: { label: "Evening", startHour: 14, startMinute: 0, endHour: 22, endMinute: 0 },
+    NIGHT: { label: "Night", startHour: 22, startMinute: 0, endHour: 23, endMinute: 59 },
+    FULL_DAY: { label: "Full day", startHour: 0, startMinute: 0, endHour: 23, endMinute: 59 }
+  };
+  const activeShift = shiftRanges[selectedShift];
+  const windowStart = new Date(dayStart);
+  windowStart.setHours(activeShift.startHour, activeShift.startMinute, 0, 0);
+  const shiftEnd = new Date(dayStart);
+  shiftEnd.setHours(activeShift.endHour, activeShift.endMinute, 59, 999);
+  const uptoRaw = typeof req.query.upto === "string" ? req.query.upto : "";
+  let uptoTime = new Date(Math.min(Date.now(), shiftEnd.getTime()));
+  if (uptoRaw) {
+    const parsed = new Date(uptoRaw);
+    if (!Number.isNaN(parsed.getTime())) uptoTime = parsed;
+  }
+  if (uptoTime < windowStart) uptoTime = windowStart;
+  if (uptoTime > shiftEnd) uptoTime = shiftEnd;
+  if (uptoTime > dayEnd) uptoTime = dayEnd;
+  const uptoValue = `${formatDateForInput(dayStart)}T${String(uptoTime.getHours()).padStart(2, "0")}:${String(uptoTime.getMinutes()).padStart(2, "0")}`;
+  const shiftWindowLabel = `${activeShift.label} (${String(activeShift.startHour).padStart(2, "0")}:${String(activeShift.startMinute).padStart(2, "0")} - ${String(activeShift.endHour).padStart(2, "0")}:${String(activeShift.endMinute).padStart(2, "0")})`;
+  const selectedStaffId = typeof req.query.staffId === "string" ? req.query.staffId.trim() : "";
+
+  const [bookingActivities, paymentActivities, guestUpdates] = await Promise.all([
+    prisma.booking.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: windowStart, lte: uptoTime } },
+      include: { guest: true, roomType: true, roomUnit: true },
+      orderBy: { createdAt: "desc" },
+      take: 300
+    }),
+    prisma.paymentIntent.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: windowStart, lte: uptoTime } },
+      include: { booking: { include: { guest: true, roomUnit: true, roomType: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 300
+    }),
+    prisma.auditLog.findMany({
+      where: {
+        hotelId: hotel.id,
+        action: "ROOM_UNIT_GUEST_DETAILS",
+        createdAt: { gte: windowStart, lte: uptoTime }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 300
+    })
+  ]);
+  const bookingIds = bookingActivities.map((b) => b.id);
+  const bookingActorLogs = bookingIds.length
+    ? await prisma.auditLog.findMany({
+        where: {
+          hotelId: hotel.id,
+          entityType: "Booking",
+          entityId: { in: bookingIds },
+          createdAt: { gte: windowStart, lte: uptoTime }
+        },
+        orderBy: { createdAt: "desc" }
+      })
+    : [];
+  const bookingActorById = new Map<string, { staffId: string; staffEmail: string }>();
+  for (const log of bookingActorLogs) {
+    if (!log.entityId || bookingActorById.has(log.entityId)) continue;
+    bookingActorById.set(log.entityId, {
+      staffId: log.actorUserId || "SYSTEM",
+      staffEmail: log.actorEmail || "system@chatastay.local"
+    });
+  }
+  const staffIdOptionsSet = new Set<string>([
+    ...Array.from(bookingActorById.values()).map((v) => v.staffId),
+    ...guestUpdates.map((g) => g.actorUserId || "SYSTEM")
+  ]);
+  if (selectedStaffId) staffIdOptionsSet.add(selectedStaffId);
+  const staffIdOptions = Array.from(staffIdOptionsSet)
+    .sort((a, b) => a.localeCompare(b))
+    .map((staffId) => `<option value="${escapeHtml(staffId)}" ${staffId === selectedStaffId ? "selected" : ""}>${escapeHtml(staffId)}</option>`)
+    .join("");
+
+  const filteredBookingActivities = selectedStaffId
+    ? bookingActivities.filter((b) => (bookingActorById.get(b.id)?.staffId || "SYSTEM") === selectedStaffId)
+    : bookingActivities;
+  const filteredPaymentActivities = selectedStaffId
+    ? paymentActivities.filter((p) => ((p.booking?.id ? bookingActorById.get(p.booking.id)?.staffId : undefined) || "SYSTEM") === selectedStaffId)
+    : paymentActivities;
+  const filteredGuestUpdates = selectedStaffId ? guestUpdates.filter((g) => (g.actorUserId || "SYSTEM") === selectedStaffId) : guestUpdates;
+
+  const statusCounts = {
+    PENDING: filteredBookingActivities.filter((b) => b.status === "PENDING").length,
+    CONFIRMED: filteredBookingActivities.filter((b) => b.status === "CONFIRMED").length,
+    CANCELLED: filteredBookingActivities.filter((b) => b.status === "CANCELLED").length
+  };
+  const paymentsSucceeded = filteredPaymentActivities.filter((p) => p.status === "SUCCEEDED");
+  const paymentTotal = paymentsSucceeded.reduce((sum, p) => sum + p.amount, 0);
+  const uniqueUnitsTouched = new Set(
+    filteredBookingActivities
+      .map((b) => b.roomUnit?.name)
+      .filter((name): name is string => Boolean(name))
+  ).size;
+  const uniqueStaffTouched = new Set([
+    ...filteredBookingActivities.map((b) => bookingActorById.get(b.id)?.staffId || "SYSTEM"),
+    ...filteredGuestUpdates.map((g) => g.actorUserId || "SYSTEM")
+  ]).size;
+
+  const bookingActivityRows = filteredBookingActivities
+    .map(
+      (b) => `<tr>
+        <td>${formatDateTime(b.createdAt)}</td>
+        <td>${escapeHtml(b.status)}</td>
+        <td>${escapeHtml(b.guest?.fullName || b.guest?.phoneE164 || "—")}</td>
+        <td>${escapeHtml(b.roomUnit?.name || "Pending assignment")}</td>
+        <td>${escapeHtml(b.roomType?.name || "—")}</td>
+        <td>${escapeHtml(bookingActorById.get(b.id)?.staffId || "SYSTEM")}</td>
+        <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(b.id)}</a></td>
+      </tr>`
+    )
+    .join("");
+  const paymentActivityRows = filteredPaymentActivities
+    .map(
+      (p) => `<tr>
+        <td>${formatDateTime(p.createdAt)}</td>
+        <td>${escapeHtml(p.status)}</td>
+        <td>${escapeHtml(p.kind || "—")}</td>
+        <td>${formatMoney(p.amount, p.currency || hotel.currency)}</td>
+        <td>${escapeHtml(p.booking?.guest?.fullName || p.booking?.guest?.phoneE164 || "—")}</td>
+        <td>${escapeHtml(p.booking?.roomUnit?.name || "—")}</td>
+        <td>${escapeHtml((p.booking?.id ? bookingActorById.get(p.booking.id)?.staffId : undefined) || "SYSTEM")}</td>
+      </tr>`
+    )
+    .join("");
+  const guestUpdateRows = filteredGuestUpdates
+    .map((log) => {
+      const metadata = parseAuditMetadata(log.metadataJson);
+      const guestName = typeof metadata.fullName === "string" ? metadata.fullName : "—";
+      const unitName = typeof metadata.unitName === "string" ? metadata.unitName : log.entityId ?? "—";
+      return `<tr>
+        <td>${formatDateTime(log.createdAt)}</td>
+        <td>${escapeHtml(unitName)}</td>
+        <td>${escapeHtml(guestName || "—")}</td>
+        <td>${escapeHtml(log.action)}</td>
+        <td>${escapeHtml(log.actorUserId || "SYSTEM")}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Handover Sheet</h2>
+<p class="muted">Shift summary of reservation operations up to selected time for one day.</p>
+<div class="actions" style="margin-bottom:14px">
+  <button type="button" class="btn-link" onclick="window.print()">Print handover sheet</button>
+</div>
+<form method="get" action="/admin/handover-sheet" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px">
+  <label>Date <input type="date" name="date" value="${formatDateForInput(dayStart)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>Shift
+    <select name="shift" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="MORNING" ${selectedShift === "MORNING" ? "selected" : ""}>Morning (07:00-14:00)</option>
+      <option value="EVENING" ${selectedShift === "EVENING" ? "selected" : ""}>Evening (14:00-22:00)</option>
+      <option value="NIGHT" ${selectedShift === "NIGHT" ? "selected" : ""}>Night (22:00-23:59)</option>
+      <option value="FULL_DAY" ${selectedShift === "FULL_DAY" ? "selected" : ""}>Full day (00:00-23:59)</option>
+    </select>
+  </label>
+  <label>Staff ID
+    <select name="staffId" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="">All staff</option>${staffIdOptions}
+    </select>
+  </label>
+  <label>Up to time <input type="datetime-local" name="upto" value="${uptoValue}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
+</form>
+<p class="muted" style="margin-top:-6px; margin-bottom:10px">Window: ${escapeHtml(shiftWindowLabel)} · showing activity from ${formatDateTime(windowStart)} to ${formatDateTime(uptoTime)}</p>
+<div class="grid-4" style="margin-bottom:12px">
+  <article class="stat"><h3>New reservations</h3><p>${statusCounts.PENDING + statusCounts.CONFIRMED}</p></article>
+  <article class="stat"><h3>Confirmed</h3><p>${statusCounts.CONFIRMED}</p></article>
+  <article class="stat"><h3>Pending</h3><p>${statusCounts.PENDING}</p></article>
+  <article class="stat"><h3>Cancelled</h3><p>${statusCounts.CANCELLED}</p></article>
+  <article class="stat"><h3>Payments captured</h3><p>${paymentsSucceeded.length}</p></article>
+  <article class="stat"><h3>Payment value</h3><p>${formatMoney(paymentTotal, hotel.currency)}</p></article>
+  <article class="stat"><h3>Units touched</h3><p>${uniqueUnitsTouched}</p></article>
+  <article class="stat"><h3>Staff touched</h3><p>${uniqueStaffTouched}</p></article>
+  <article class="stat"><h3>Guest updates</h3><p>${filteredGuestUpdates.length}</p></article>
+</div>
+<section style="margin-top:12px">
+  <h3>Reservation activity log</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Status</th><th>Guest</th><th>Unit</th><th>Room type</th><th>Staff ID</th><th>Booking</th></tr></thead>
+    <tbody>${bookingActivityRows || '<tr><td colspan="7">No reservation activity in this time window.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin-top:12px">
+  <h3>Payment activity log</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Status</th><th>Method</th><th>Amount</th><th>Guest</th><th>Unit</th><th>Staff ID</th></tr></thead>
+    <tbody>${paymentActivityRows || '<tr><td colspan="7">No payment activity in this time window.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin-top:12px">
+  <h3>Guest-details update log</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Unit</th><th>Guest</th><th>Action</th><th>Staff ID</th></tr></thead>
+    <tbody>${guestUpdateRows || '<tr><td colspan="5">No guest-detail updates in this time window.</td></tr>'}</tbody>
+  </table>
+</section>
+<style>
+  @media print {
+    .sidebar, .section-tabs, nav, .actions, form button { display:none !important; }
+    body { background:#fff; }
+  }
+</style>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/room-board/detail/:roomTypeId", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: { roomTypes: { where: { isActive: true }, include: { property: true } } }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Room detail</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const roomTypeId = String(req.params.roomTypeId ?? "");
+  const roomType = hotel.roomTypes.find((r) => r.id === roomTypeId);
+  if (!roomType) {
+    res.redirect("/admin/room-board");
+    return;
+  }
+  const now = startOfDay(new Date());
+  const boardDate = parseDateInput(req.query.date, now);
+  const dateEndExclusive = addDays(boardDate, 1);
+  const detailDayRange = inventoryDayRangeExclusive(boardDate);
+  const [inv, bookings] = await Promise.all([
+    prisma.inventory.findFirst({
+      where: { hotelId: hotel.id, roomTypeId, date: { gte: detailDayRange.gte, lt: detailDayRange.lt } }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, roomUnit: true },
+      orderBy: { checkIn: "asc" }
+    })
+  ]);
+  const total = inv?.total ?? roomType.totalInventory;
+  const reserved = inv?.reserved ?? 0;
+  const closedOut = inv?.closedOut ?? false;
+  const available = closedOut ? 0 : Math.max(0, total - reserved);
+  const bookingRows = bookings
+    .map(
+      (b) => `<tr>
+        <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(b.id.slice(0, 8))}</a></td>
+        <td>${escapeHtml(b.guest.fullName ?? b.guest.phoneE164)}</td>
+        <td>${formatDateForInput(b.checkIn)} – ${formatDateForInput(b.checkOut)}</td>
+        <td>${b.roomUnit?.name ? escapeHtml(b.roomUnit.name) : '<span class="badge pending">Not assigned</span>'}</td>
+        <td><span class="badge ${b.status === "CONFIRMED" ? "ok" : "pending"}">${escapeHtml(b.status)}</span></td>
+      </tr>`
+    )
+    .join("");
+  const content = `
+<h2>${escapeHtml(roomType.name)}</h2>
+<p class="muted">Room type: ${escapeHtml(roomType.code)} · ${escapeHtml(roomType.property.name)}</p>
+<div class="actions" style="margin-bottom:14px">
+  <a class="btn-link" href="/admin/room-board?date=${formatDateForInput(boardDate)}">Back to board</a>
+  <a class="btn-link primary" href="/admin/calendar?start=${formatDateForInput(boardDate)}&days=7">Calendar</a>
+  <a class="btn-link" href="/admin/rooms">Edit room</a>
+</div>
+<div class="grid-2">
+  <section>
+    <h3>Status for ${formatDateForInput(boardDate)}</h3>
+    <table><tbody>
+      <tr><th>Total units</th><td>${total}</td></tr>
+      <tr><th>Reserved</th><td>${reserved}</td></tr>
+      <tr><th>Available</th><td>${available}</td></tr>
+      <tr><th>Closed out</th><td>${closedOut ? "Yes" : "No"}</td></tr>
+    </tbody></table>
+  </section>
+  <section>
+    <h3>Bookings overlapping this date</h3>
+    <table>
+      <thead><tr><th>Booking</th><th>Guest</th><th>Stay</th><th>Unit</th><th>Status</th></tr></thead>
+      <tbody>${bookingRows || "<tr><td colspan=\"5\">None</td></tr>"}</tbody>
+    </table>
+  </section>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Room unit details</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const unitId = String(req.params.unitId ?? "");
+  const boardDate = parseDateInput(req.query.date, startOfDay(new Date()));
+  const editMode = req.query.edit === "1";
+  const dateKey = formatDateForInput(boardDate);
+  const dateEndExclusive = addDays(boardDate, 1);
+  const unitDetailDayRange = inventoryDayRangeExclusive(boardDate);
+  const savedNotice = req.query.saved ? '<p class="badge ok">Room &amp; guest details saved.</p>' : "";
+
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: unitId, hotelId: hotel.id },
+    include: { roomType: { include: { property: true } } }
+  });
+  if (!unit) {
+    res.redirect(`/admin/room-board?date=${dateKey}`);
+    return;
+  }
+
+  const [inventoryRow, booking, manualDetails, activeSiblings, typeOverlappingBookings] = await Promise.all([
+    prisma.inventory.findFirst({
+      where: { hotelId: hotel.id, roomTypeId: unit.roomTypeId, date: { gte: unitDetailDayRange.gte, lt: unitDetailDayRange.lt } },
+      select: { closedOut: true, total: true, reserved: true }
+    }),
+    prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId: unit.roomTypeId,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } },
+      orderBy: { checkIn: "asc" }
+    }),
+    getManualGuestDetailsForUnitOnDate(unit.id, dateKey),
+    prisma.roomUnit.findMany({
+      where: { hotelId: hotel.id, roomTypeId: unit.roomTypeId, isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: { id: true, notes: true }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId: unit.roomTypeId,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      select: { roomUnitId: true }
+    })
+  ]);
+
+  const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
+  const hasConfirmed = Boolean(booking && booking.status === "CONFIRMED");
+  const hasPending = Boolean(booking && booking.status === "PENDING");
+  const closedOut = inventoryRow?.closedOut ?? false;
+  const bookableTotal = inventoryRow?.total ?? unit.roomType.totalInventory;
+  const reservedCount = inventoryRow?.reserved ?? 0;
+  const aggregateAvailable = closedOut ? 0 : Math.max(0, bookableTotal - reservedCount);
+  const activeIndex = activeSiblings.findIndex((u) => u.id === unit.id);
+  const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
+  const bookingSlotCount = typeOverlappingBookings.length;
+  const unbookedActiveForInv = activeSiblings.filter(
+    (u) => !typeOverlappingBookings.some((b) => b.roomUnitId === u.id)
+  );
+  const effectiveReserved = Math.min(reservedCount, bookableTotal);
+  const needInvReserved = Math.max(0, effectiveReserved - bookingSlotCount);
+  const reservedFromInventoryUnitIds = new Set<string>();
+  {
+    let remaining = needInvReserved;
+    for (const u of unbookedActiveForInv) {
+      if (remaining <= 0) break;
+      if (parseManualRoomStatusFromNotes(u.notes)) continue;
+      reservedFromInventoryUnitIds.add(u.id);
+      remaining -= 1;
+    }
+  }
+
+  let status: RoomBoardStatus;
+  if (hasConfirmed) {
+    status = "OCCUPIED";
+  } else if (hasPending) {
+    status = "RESERVED";
+  } else if (closedOut) {
+    status = "MAINTENANCE";
+  } else if (manualStatus) {
+    status = manualStatus;
+  } else if (!unit.isActive) {
+    status = "MAINTENANCE";
+  } else if (beyondInventoryCap) {
+    status = "MAINTENANCE";
+  } else if (reservedFromInventoryUnitIds.has(unit.id)) {
+    status = "RESERVED";
+  } else if (aggregateAvailable <= 0) {
+    status = "RESERVED";
+  } else {
+    status = "AVAILABLE";
+  }
+  const statusClass = getRoomBoardStatusClass(status);
+
+  const effectiveFullName = booking?.guest.fullName ?? manualDetails?.fullName ?? "";
+  const effectivePhone = booking?.guest.phoneE164 ?? manualDetails?.phone ?? "";
+  const effectiveEmail = booking?.guest.email ?? manualDetails?.email ?? "";
+  const effectiveNationality =
+    (booking?.guest.nationality ?? "").trim() || (manualDetails?.nationality ?? "").trim() || "";
+  const effectiveNotes = stripLegacyNationalityFromNotes(manualDetails?.notes ?? "");
+  const effectiveAdults = manualDetails?.adults ?? (booking ? booking.adults : null);
+  const effectiveChildren = manualDetails?.children ?? (booking ? booking.children : null);
+  const effectiveMealPlan = manualDetails?.mealPlan ?? "NONE";
+  const effectiveIdCardPath = manualDetails?.idCardPath ?? "";
+  const paidAmount = booking
+    ? booking.paymentIntents
+        .filter((p) => p.status === PaymentStatus.SUCCEEDED)
+        .reduce((sum, p) => sum + p.amount, 0)
+    : 0;
+  const bookingBalance = booking ? Math.max(0, booking.totalAmount - paidAmount) : 0;
+  const latestPaymentIntent = booking?.paymentIntents[0];
+  const effectivePaymentMethod = manualDetails?.paymentMethod || latestPaymentIntent?.kind || "";
+  const effectivePaymentAmount = manualDetails?.paymentAmount ?? (booking ? paidAmount : null);
+  const effectiveBalanceAmount = manualDetails?.balanceAmount ?? (booking ? bookingBalance : null);
+  const effectiveTransactionNumber = manualDetails?.transactionNumber || latestPaymentIntent?.id || "";
+  const effectiveBookedBy = manualDetails?.bookedBy || (booking?.source ? String(booking.source) : "");
+  const effectiveTourCompany = manualDetails?.tourCompany || "";
+  const sourceNote = booking
+    ? `From booking ${displayBookingReference(booking)} (${booking.status}). Internal notes below are staff-only.`
+    : "No linked booking on this date. Use the form to enter guest details manually.";
+
+  const cur = booking?.currency ?? hotel.currency;
+  const [folioRows, menuItemsFolio, folioSummary] = await Promise.all([
+    booking
+      ? prisma.folioTransaction.findMany({
+          where: { hotelId: hotel.id, bookingId: booking.id },
+          orderBy: { chargeDate: "desc" },
+          include: {
+            createdBy: { select: { fullName: true, email: true } },
+            voidedBy: { select: { fullName: true, email: true } }
+          }
+        })
+      : Promise.resolve([]),
+    prisma.menuItem.findMany({
+      where: { hotelId: hotel.id, isActive: true },
+      orderBy: [{ name: "asc" }],
+      select: { id: true, name: true, unitPrice: true, outletType: true, description: true }
+    }),
+    computeRoomUnitFolioSummary({
+      hotelId: hotel.id,
+      currency: cur,
+      booking: booking ? { id: booking.id, totalAmount: booking.totalAmount } : null,
+      paymentIntentsSucceededTotal: paidAmount
+    })
+  ]);
+
+  const now = new Date();
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  const chargeDateInputDefault = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}T${p2(now.getHours())}:${p2(now.getMinutes())}`;
+
+  const rudLedgerFilter = (r: (typeof folioRows)[number]): string => {
+    if (r.transactionType === FolioTransactionType.PAYMENT) return "payment";
+    if (r.transactionType === FolioTransactionType.REFUND) return "payment";
+    if (r.transactionType === FolioTransactionType.ADJUSTMENT) return "adjustment";
+    if (r.transactionType === FolioTransactionType.DISCOUNT) return "adjustment";
+    if (r.transactionType === FolioTransactionType.ACTIVITY_CHARGE) return "activity";
+    return "fnb";
+  };
+  const rudTypeLabel = (t: FolioTransactionType): string => {
+    switch (t) {
+      case FolioTransactionType.PAYMENT:
+        return "Payment";
+      case FolioTransactionType.REFUND:
+        return "Refund";
+      case FolioTransactionType.ADJUSTMENT:
+        return "Adjustment";
+      case FolioTransactionType.DISCOUNT:
+        return "Discount";
+      case FolioTransactionType.ACTIVITY_CHARGE:
+        return "Activity";
+      case FolioTransactionType.FNB_CHARGE:
+        return "F&B";
+      case FolioTransactionType.OTHER_SERVICE_CHARGE:
+        return "Service";
+      default:
+        return String(t);
+    }
+  };
+  const rudPayBadge = (voided: boolean, status: FolioTxnPaymentStatus): string => {
+    if (voided) return `<span class="rud-badge rud-badge-voided">Voided</span>`;
+    if (status === FolioTxnPaymentStatus.PAID) return `<span class="rud-badge rud-badge-paid">Paid</span>`;
+    if (status === FolioTxnPaymentStatus.UNPAID)
+      return `<span class="rud-badge rud-badge-unpaid" title="Posted to guest folio, not yet settled">Unpaid</span>`;
+    if (status === FolioTxnPaymentStatus.REFUNDED)
+      return `<span class="rud-badge rud-badge-refunded">Refunded</span>`;
+    if (status === FolioTxnPaymentStatus.PENDING)
+      return `<span class="rud-badge rud-badge-neutral">Pending</span>`;
+    if (status === FolioTxnPaymentStatus.PARTIALLY_PAID)
+      return `<span class="rud-badge rud-badge-neutral">Partial</span>`;
+    return `<span class="rud-badge rud-badge-neutral">${escapeHtml(status)}</span>`;
+  };
+  const outletLabel = (o: string) =>
+    o === "RESTAURANT"
+      ? "Restaurant"
+      : o === "CAFE"
+        ? "Café"
+        : o === "ACTIVITY"
+          ? "Activity"
+          : o === "ROOM_SERVICE"
+            ? "Room service"
+            : "Other";
+
+  const roomLedgerSearch = booking
+    ? `room accommodation booking ${displayBookingReference(booking)} ${booking.id} ${unit.name}`.toLowerCase()
+    : "";
+  const roomLedgerRow = booking
+    ? `<tr class="rud-ledger-row" data-ledger-kind="room" data-ledger-search="${escapeHtml(roomLedgerSearch)}">
+        <td>${escapeHtml(formatDate(booking.checkIn))} → ${escapeHtml(formatDate(booking.checkOut))}</td>
+        <td><span class="rud-badge rud-badge-room">Room</span></td>
+        <td>—</td>
+        <td><strong>Accommodation</strong> <span class="muted">· ${booking.nights} night${booking.nights === 1 ? "" : "s"} · ref ${escapeHtml(displayBookingReference(booking))}</span></td>
+        <td style="text-align:right">1</td>
+        <td style="text-align:right">—</td>
+        <td style="text-align:right;font-weight:700">${formatMoney(booking.totalAmount, cur)}</td>
+        <td><span class="rud-badge rud-badge-neutral">On folio</span></td>
+        <td>${escapeHtml(displayBookingReference(booking))}</td>
+        <td class="muted">—</td>
+        <td class="muted">—</td>
+      </tr>`
+    : "";
+
+  const folioActivityRows =
+    roomLedgerRow +
+    folioRows
+      .map((r) => {
+        const voided = Boolean(r.voidedAt);
+        const staff = r.createdBy?.fullName ?? r.createdBy?.email ?? "—";
+        const kind = rudLedgerFilter(r);
+        const lineTotal =
+          r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
+            ? r.grossAmount
+            : r.netAmount;
+        const search = [
+          r.itemName,
+          r.description,
+          r.outletCategory,
+          rudTypeLabel(r.transactionType),
+          staff,
+          r.referenceNumber
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        const voidBtn =
+          !voided && booking
+            ? `<button type="button" class="btn-link rud-void-btn" data-txn-id="${escapeHtml(r.id)}">Void transaction</button>`
+            : voided
+              ? `<span class="muted" title="${escapeHtml(r.voidReason ?? "")}">—</span>`
+              : "—";
+        const postHuman =
+          r.postingTarget === "GUEST_FOLIO"
+            ? "Guest folio"
+            : r.postingTarget === "ROOM_ACCOUNT"
+              ? "Room account"
+              : "Booking folio";
+        return `<tr class="rud-ledger-row${voided ? " rud-ledger-voided" : ""}" data-ledger-kind="${escapeHtml(kind)}" data-ledger-search="${escapeHtml(search)}">
+        <td>${formatDateTime(r.chargeDate)}</td>
+        <td><span class="rud-badge rud-badge-type">${escapeHtml(rudTypeLabel(r.transactionType))}</span></td>
+        <td>${escapeHtml(outletLabel(r.outletCategory))}</td>
+        <td><strong>${escapeHtml(r.itemName)}</strong>${r.description ? `<br/><span class="muted" style="font-size:12px">${escapeHtml(r.description)}</span>` : ""}</td>
+        <td style="text-align:right">${r.quantity}</td>
+        <td style="text-align:right">${formatMoney(r.unitPrice, cur)}</td>
+        <td style="text-align:right;font-weight:700">${formatMoney(lineTotal, cur)}</td>
+        <td>${rudPayBadge(voided, r.folioPaymentStatus)}</td>
+        <td>${escapeHtml(postHuman)}</td>
+        <td>${escapeHtml(staff)}</td>
+        <td>${voidBtn}</td>
+      </tr>`;
+      })
+      .join("");
+
+  const recentLines = folioRows.filter((r) => !r.voidedAt).slice(0, 3);
+  const recentSnapshotHtml =
+    recentLines.length === 0 && !booking
+      ? `<p class="muted" style="margin:0;font-size:13px">No recent folio lines yet.</p>`
+      : `<ul class="rud-recent-list">
+      ${
+        booking
+          ? `<li><span class="rud-recent-amt">${formatMoney(booking.totalAmount, cur)}</span> <span class="rud-recent-meta">Room · Accommodation</span></li>`
+          : ""
+      }
+      ${recentLines
+        .map((r) => {
+          const amt =
+            r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
+              ? r.grossAmount
+              : r.netAmount;
+          return `<li><span class="rud-recent-amt">${formatMoney(amt, cur)}</span> <span class="rud-recent-meta">${escapeHtml(rudTypeLabel(r.transactionType))} · ${escapeHtml(r.itemName)}</span></li>`;
+        })
+        .join("")}
+    </ul>`;
+
+  const folioMenuJson = JSON.stringify(
+    menuItemsFolio.map((m) => ({
+      id: m.id,
+      name: m.name,
+      unitPrice: m.unitPrice,
+      outletType: m.outletType,
+      description: m.description ?? ""
+    }))
+  );
+  const canPostFolio = Boolean(booking);
+
+  const bookingRefShort = booking ? escapeHtml(displayBookingReference(booking)) : "—";
+  const stayCheck = booking
+    ? `${escapeHtml(formatDate(booking.checkIn))} → ${escapeHtml(formatDate(booking.checkOut))}`
+    : "—";
+  const stayNights = booking ? String(booking.nights) : "—";
+  const ledgerTbodyEmpty = !booking && folioRows.length === 0;
+
+  const content = `
+<div class="rud-page">
+  <header class="rud-page-head">
+    <div>
+      <h2 class="rud-title">Room unit &amp; guest</h2>
+      <p class="rud-sub muted">${escapeHtml(unit.name)} · ${escapeHtml(unit.roomType.name)} · Board date <strong>${escapeHtml(dateKey)}</strong></p>
+    </div>
+  </header>
+  ${savedNotice}
+  <div id="folio-toast" class="rud-toast" role="status" aria-live="polite"></div>
+
+  <nav class="rud-toolbar" aria-label="Page actions">
+    <div class="rud-toolbar-row rud-toolbar-secondary">
+      <a class="btn-link" href="/admin/profile">Back to Hotel Profile</a>
+      <a class="btn-link primary" href="/admin/room-board?date=${dateKey}">Back to Room Board</a>
+      <a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/invoice?date=${dateKey}">Open guest invoice</a>
+      <form method="post" action="/admin/room-board/unit/${encodeURIComponent(unit.id)}/send-whatsapp" style="display:inline-flex;margin:0">
+        <input type="hidden" name="date" value="${dateKey}" />
+        <button type="submit" class="btn-link">Send invoice via WhatsApp</button>
+      </form>
+      ${
+        editMode
+          ? `<a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/details?date=${dateKey}">Cancel edit</a>`
+          : `<a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/details?date=${dateKey}&edit=1">Edit</a>`
+      }
+    </div>
+    <div class="rud-toolbar-row rud-toolbar-primary">
+      <button type="button" class="rud-btn rud-btn-charge folio-open-charge" ${canPostFolio ? "" : "disabled"}>Post charge</button>
+      <button type="button" class="rud-btn rud-btn-pay folio-open-payment" ${canPostFolio ? "" : "disabled"}>Add payment</button>
+    </div>
+  </nav>
+  ${canPostFolio ? "" : `<p class="rud-banner-warn"><strong>No folio link.</strong> There is no active booking on <strong>${escapeHtml(dateKey)}</strong> for this unit. Post charge and Add payment stay disabled until a booking covers this night.</p>`}
+
+  <div class="rud-layout">
+    <div class="rud-main">
+      <div class="rud-card-grid">
+        <article class="rud-card rud-card-stay">
+          <h3 class="rud-card-title">Stay summary</h3>
+          <dl class="rud-dl">
+            <div><dt>Unit</dt><dd>${escapeHtml(unit.name)}</dd></div>
+            <div><dt>Room type</dt><dd>${escapeHtml(unit.roomType.name)}</dd></div>
+            <div><dt>Property</dt><dd>${escapeHtml(unit.roomType.property.name)}</dd></div>
+            <div><dt>Board date</dt><dd>${escapeHtml(dateKey)}</dd></div>
+            <div><dt>Stay status</dt><dd><span class="room-board-badge ${statusClass}">${escapeHtml(status)}</span></dd></div>
+            <div><dt>Booking reference</dt><dd><code class="rud-code">${bookingRefShort}</code></dd></div>
+            <div><dt>Check-in / check-out</dt><dd>${stayCheck}</dd></div>
+            <div><dt>Nights</dt><dd>${stayNights}</dd></div>
+          </dl>
+        </article>
+        <article class="rud-card rud-card-guest">
+          <h3 class="rud-card-title">Guest profile</h3>
+          <dl class="rud-dl">
+            <div><dt>Full name</dt><dd>${escapeHtml(effectiveFullName) || "—"}</dd></div>
+            <div><dt>Phone</dt><dd>${escapeHtml(effectivePhone) || "—"}</dd></div>
+            <div><dt>Email</dt><dd>${escapeHtml(effectiveEmail) || "—"}</dd></div>
+            <div><dt>Booked by</dt><dd>${escapeHtml(effectiveBookedBy) || "—"}</dd></div>
+            <div><dt>Tour company</dt><dd>${escapeHtml(effectiveTourCompany) || "—"}</dd></div>
+            <div><dt>Adults / children</dt><dd>${effectiveAdults ?? "—"} / ${effectiveChildren ?? "—"}</dd></div>
+            <div><dt>Nationality</dt><dd>${escapeHtml(effectiveNationality) || "—"}</dd></div>
+            <div><dt>Meal plan</dt><dd>${escapeHtml(effectiveMealPlan === "NONE" ? "Room only" : effectiveMealPlan === "BREAKFAST" ? "Breakfast" : "Half board")}</dd></div>
+          </dl>
+          <p class="muted rud-card-foot">${escapeHtml(sourceNote)}</p>
+        </article>
+      </div>
+
+      <article class="rud-card rud-card-form">
+        <h3 class="rud-card-title">Registration &amp; on-file billing</h3>
+        <p class="muted" style="margin-top:0;font-size:13px">Used for handover, invoices, and front-desk records. ${editMode ? "You are in edit mode." : "Select Edit to change."}</p>
+        <form method="post" action="/admin/room-board/unit/${encodeURIComponent(unit.id)}/details" enctype="multipart/form-data" class="rud-form">
+      <input type="hidden" name="date" value="${dateKey}" />
+      <input type="hidden" name="existingIdCardPath" value="${escapeHtml(effectiveIdCardPath)}" />
+      <label>Guest full name
+        <input name="fullName" value="${escapeHtml(effectiveFullName)}" ${editMode ? "" : "readonly"} />
+      </label>
+      <label>Phone
+        <input name="phone" value="${escapeHtml(effectivePhone)}" ${editMode ? "" : "readonly"} />
+      </label>
+      <label>Email
+        <input name="email" value="${escapeHtml(effectiveEmail)}" ${editMode ? "" : "readonly"} />
+      </label>
+      <label>Nationality
+        <input name="nationality" value="${escapeHtml(effectiveNationality)}" ${editMode ? "" : "readonly"} placeholder="As on passport" autocomplete="country-name" />
+      </label>
+      <div class="grid-2">
+        <label>Booked by
+          <select name="bookedBy" ${editMode ? "" : "disabled"}>
+            <option value="WHATSAPP" ${effectiveBookedBy.toUpperCase() === "WHATSAPP" ? "selected" : ""}>WhatsApp</option>
+            <option value="PHONE" ${effectiveBookedBy.toUpperCase() === "PHONE" ? "selected" : ""}>Phone</option>
+            <option value="OTAS" ${effectiveBookedBy.toUpperCase() === "OTAS" ? "selected" : ""}>OTAs</option>
+            <option value="WALK_IN" ${effectiveBookedBy.toUpperCase() === "WALK_IN" ? "selected" : ""}>Walk in</option>
+            <option value="FRIEND_GIFT" ${effectiveBookedBy.toUpperCase() === "FRIEND_GIFT" ? "selected" : ""}>Friend gift</option>
+            <option value="TOUR_COMPANY" ${effectiveBookedBy.toUpperCase() === "TOUR_COMPANY" ? "selected" : ""}>Tour company</option>
+            ${
+              effectiveBookedBy &&
+              !["WHATSAPP", "PHONE", "OTAS", "WALK_IN", "FRIEND_GIFT", "TOUR_COMPANY"].includes(effectiveBookedBy.toUpperCase())
+                ? `<option value="${escapeHtml(effectiveBookedBy)}" selected>${escapeHtml(effectiveBookedBy)}</option>`
+                : ""
+            }
+          </select>
+        </label>
+        <label>Tour company
+          <input name="tourCompany" value="${escapeHtml(effectiveTourCompany)}" ${editMode ? "" : "readonly"} />
+        </label>
+      </div>
+      <div class="grid-2">
+        <label>Adults
+          <input type="number" min="0" name="adults" value="${effectiveAdults ?? ""}" ${editMode ? "" : "readonly"} />
+        </label>
+        <label>Children
+          <input type="number" min="0" name="children" value="${effectiveChildren ?? ""}" ${editMode ? "" : "readonly"} />
+        </label>
+      </div>
+      <label>Meal plan
+        <select name="mealPlan" ${editMode ? "" : "disabled"}>
+          <option value="NONE" ${effectiveMealPlan === "NONE" ? "selected" : ""}>None</option>
+          <option value="BREAKFAST" ${effectiveMealPlan === "BREAKFAST" ? "selected" : ""}>Breakfast</option>
+          <option value="HALF_BOARD" ${effectiveMealPlan === "HALF_BOARD" ? "selected" : ""}>Half board</option>
+        </select>
+      </label>
+      <div class="grid-2">
+        <label>Payment method
+          <select name="paymentMethod" ${editMode ? "" : "disabled"}>
+            <option value="CASH" ${effectivePaymentMethod.toUpperCase() === "CASH" ? "selected" : ""}>Cash</option>
+            <option value="CARD" ${effectivePaymentMethod.toUpperCase() === "CARD" ? "selected" : ""}>Card</option>
+            <option value="MBANKING" ${effectivePaymentMethod.toUpperCase() === "MBANKING" ? "selected" : ""}>mBanking</option>
+            <option value="TRANSFER" ${effectivePaymentMethod.toUpperCase() === "TRANSFER" ? "selected" : ""}>Transfer</option>
+            <option value="CREDIT" ${effectivePaymentMethod.toUpperCase() === "CREDIT" ? "selected" : ""}>Credit</option>
+            <option value="LPO" ${effectivePaymentMethod.toUpperCase() === "LPO" ? "selected" : ""}>LPO</option>
+            ${
+              effectivePaymentMethod &&
+              !["CASH", "CARD", "MBANKING", "TRANSFER", "CREDIT", "LPO"].includes(effectivePaymentMethod.toUpperCase())
+                ? `<option value="${escapeHtml(effectivePaymentMethod)}" selected>${escapeHtml(effectivePaymentMethod)}</option>`
+                : ""
+            }
+          </select>
+        </label>
+        <label>Transaction number
+          <input name="transactionNumber" value="${escapeHtml(effectiveTransactionNumber)}" ${editMode ? "" : "readonly"} />
+        </label>
+      </div>
+      <div class="grid-2">
+        <label>Amount paid (${booking?.currency ?? "OMR"})
+          <input type="number" step="0.001" min="0" name="paymentAmount" value="${effectivePaymentAmount ?? ""}" ${editMode ? "" : "readonly"} />
+        </label>
+        <label>Balance (${booking?.currency ?? "OMR"})
+          <input type="number" step="0.001" min="0" name="balanceAmount" value="${effectiveBalanceAmount ?? ""}" ${editMode ? "" : "readonly"} />
+        </label>
+      </div>
+      <label>ID card copy ${editMode ? '(upload)' : "(saved file)"}
+        <input type="file" name="idCard" accept=".jpg,.jpeg,.png,.pdf,.webp" ${editMode ? "" : "disabled"} />
+      </label>
+      ${
+        effectiveIdCardPath
+          ? `<p class="muted" style="margin:0">Current ID copy: <a class="inline-link" target="_blank" href="${escapeHtml(effectiveIdCardPath)}">Open file</a></p>`
+          : '<p class="muted" style="margin:0">No ID copy uploaded yet.</p>'
+      }
+      <label>Internal notes
+        <textarea name="notes" rows="4" ${editMode ? "" : "readonly"}>${escapeHtml(effectiveNotes)}</textarea>
+      </label>
+      ${
+        editMode
+          ? '<button type="submit" class="rud-btn rud-btn-save">Save guest details</button>'
+          : '<p class="muted" style="margin:0">Read-only — click <strong>Edit</strong> in the toolbar to change.</p>'
+      }
+    </form>
+      </article>
+
+      <section class="rud-ledger">
+        <div class="rud-ledger-head">
+          <div>
+            <h3 class="rud-ledger-title">Guest ledger</h3>
+            <p class="muted rud-ledger-desc">Posted charges, adjustments, and folio payments. Voided lines stay visible for audit and are excluded from balances.</p>
+          </div>
+        </div>
+        <div class="rud-recent">
+          <span class="rud-recent-label">Recent snapshot</span>
+          ${recentSnapshotHtml}
+        </div>
+        <div class="rud-filter-bar">
+          <span class="muted" style="font-size:12px;font-weight:600;margin-right:8px">Show:</span>
+          <button type="button" class="rud-filter-chip active" data-filter="all">All</button>
+          <button type="button" class="rud-filter-chip" data-filter="room">Room charges</button>
+          <button type="button" class="rud-filter-chip" data-filter="fnb">F&amp;B</button>
+          <button type="button" class="rud-filter-chip" data-filter="activity">Activities</button>
+          <button type="button" class="rud-filter-chip" data-filter="payment">Payments</button>
+          <button type="button" class="rud-filter-chip" data-filter="adjustment">Adjustments</button>
+        </div>
+        <label class="rud-search-wrap">Search ledger
+          <input type="search" id="rud-ledger-search" class="rud-search-input" placeholder="Filter by item, staff, reference…" autocomplete="off" />
+        </label>
+        <div class="rud-table-wrap">
+          <table class="rud-ledger-table">
+            <thead>
+              <tr>
+                <th>Date / time</th>
+                <th>Type</th>
+                <th>Outlet</th>
+                <th>Description</th>
+                <th class="num">Qty</th>
+                <th class="num">Unit price</th>
+                <th class="num">Amount</th>
+                <th>Status</th>
+                <th>Posted to</th>
+                <th>Posted by</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>${
+              ledgerTbodyEmpty
+                ? `<tr><td colspan="11" class="rud-table-empty">No ledger lines yet. Use <strong>Post charge</strong> or <strong>Add payment</strong> when a booking is linked.</td></tr>`
+                : folioActivityRows
+            }</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <aside class="rud-sidebar">
+      <div class="rud-card rud-card-fin">
+        <h3 class="rud-card-title">Financial summary</h3>
+        <p class="muted" style="margin-top:0;font-size:12px">Folio view for this booking. Menu F&amp;B: <a class="inline-link" href="/admin/fb/menu?bookingId=${booking ? escapeHtml(booking.id) : ""}">Open F&amp;B menu</a></p>
+        <ul class="rud-fin-lines">
+          <li><span>Room charges</span><strong>${formatMoney(folioSummary.roomCharges, cur)}</strong></li>
+          <li><span>F&amp;B / extras</span><strong>${formatMoney(folioSummary.fnbExtrasTotal, cur)}</strong></li>
+          <li class="muted" style="font-size:12px;padding-left:0;border:0"><span>· Menu posted</span><span>${formatMoney(folioSummary.fbMenuSubtotal, cur)}</span></li>
+          <li class="muted" style="font-size:12px;padding-left:0;border:0"><span>· Folio lines</span><span>${formatMoney(folioSummary.folioChargesSubtotal, cur)}</span></li>
+          <li><span>Discounts / adjustments</span><strong class="${folioSummary.folioAdjustmentsSubtotal < 0 ? "rud-neg" : ""}">${formatMoney(folioSummary.folioAdjustmentsSubtotal, cur)}</strong></li>
+          <li class="rud-fin-total"><span>Total charges</span><strong>${formatMoney(folioSummary.totalCharges, cur)}</strong></li>
+          <li><span>Amount paid</span><strong>${formatMoney(folioSummary.totalPaid, cur)}</strong></li>
+          <li class="muted" style="font-size:12px;padding-left:0;border:0"><span>· On booking</span><span>${formatMoney(folioSummary.amountPaidBooking, cur)}</span></li>
+          <li class="muted" style="font-size:12px;padding-left:0;border:0"><span>· Folio payments</span><span>${formatMoney(folioSummary.amountPaidFolio, cur)}</span></li>
+        </ul>
+        <div class="rud-outstanding">
+          <div class="rud-outstanding-label">Outstanding balance</div>
+          <div class="rud-outstanding-value">${formatMoney(folioSummary.outstandingBalance, cur)}</div>
+          <p class="muted" style="margin:8px 0 0;font-size:11px">Charge to room items are unpaid until settled or recorded via <strong>Add payment</strong>.</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div id="folio-modal-backdrop" class="rud-drawer-backdrop" style="display:none" aria-hidden="true"></div>
+<div id="folio-charge-modal" class="rud-drawer" style="display:none" role="dialog" aria-modal="true" aria-labelledby="folio-charge-title" aria-hidden="true">
+  <div class="rud-drawer-sheet">
+    <div class="rud-drawer-head">
+      <div>
+        <p class="rud-drawer-kicker muted">Guest ledger</p>
+        <h3 id="folio-charge-title" class="rud-drawer-title">Post charge</h3>
+      </div>
+      <button type="button" class="rud-drawer-close" data-close-charge aria-label="Close">&times;</button>
+    </div>
+    <form id="folio-charge-form" class="rud-drawer-body">
+      <input type="hidden" name="date" value="${dateKey}" />
+      <select id="folio-charge-category" name="chargeCategory" class="rud-sr-only" tabindex="-1" aria-hidden="true">
+        <option value="RESTAURANT">Restaurant</option>
+        <option value="CAFE">Café</option>
+        <option value="ACTIVITY">Activity</option>
+        <option value="ROOM_SERVICE">Room service</option>
+        <option value="OTHER_SERVICE">Other</option>
+        <option value="CUSTOM">Custom</option>
+      </select>
+      <div class="rud-field">
+        <span class="rud-field-label">Outlet</span>
+        <div class="rud-outlet-chips" role="group" aria-label="Outlet">
+          <button type="button" class="rud-outlet-chip active" data-category="RESTAURANT">Restaurant</button>
+          <button type="button" class="rud-outlet-chip" data-category="CAFE">Café</button>
+          <button type="button" class="rud-outlet-chip" data-category="ACTIVITY">Activity</button>
+          <button type="button" class="rud-outlet-chip" data-category="ROOM_SERVICE">Room service</button>
+          <button type="button" class="rud-outlet-chip" data-category="OTHER_SERVICE">Other</button>
+        </div>
+      </div>
+      <fieldset class="rud-fieldset">
+        <legend class="rud-field-label">Line source</legend>
+        <div class="rud-seg">
+          <label class="rud-seg-item"><input type="radio" name="folioMode" value="catalog" checked /> Menu item</label>
+          <label class="rud-seg-item"><input type="radio" name="folioMode" value="custom" /> Custom</label>
+        </div>
+      </fieldset>
+      <div id="folio-catalog-block">
+        <label class="rud-field">Search item
+          <input type="text" id="folio-catalog-search" class="rud-input" list="folio-menu-datalist" placeholder="Type to filter menu…" autocomplete="off" />
+          <datalist id="folio-menu-datalist">${menuItemsFolio.map((m) => `<option value="${escapeHtml(m.name)}"></option>`).join("")}</datalist>
+        </label>
+        <input type="hidden" id="folio-menu-item-id" value="" />
+        <p class="muted rud-hint">Match a catalog line for instant price, or switch to Custom.</p>
+      </div>
+      <div id="folio-custom-block" class="rud-hidden">
+        <label class="rud-field">Item name <span class="rud-req">*</span>
+          <input type="text" id="folio-custom-name" class="rud-input" />
+        </label>
+        <label class="rud-field">Description
+          <input type="text" id="folio-custom-desc" class="rud-input" />
+        </label>
+        <label class="rud-field">Unit price (${escapeHtml(cur)}) <span class="rud-req">*</span>
+          <input type="number" id="folio-custom-price" class="rud-input" min="0" step="0.01" />
+        </label>
+      </div>
+      <div class="rud-field">
+        <span class="rud-field-label">Quantity</span>
+        <div class="rud-stepper">
+          <button type="button" class="rud-stepper-btn" id="folio-qty-minus" aria-label="Decrease quantity">−</button>
+          <input type="number" id="folio-qty" name="quantity" class="rud-stepper-input" min="1" max="999" value="1" />
+          <button type="button" class="rud-stepper-btn" id="folio-qty-plus" aria-label="Increase quantity">+</button>
+        </div>
+      </div>
+      <div class="rud-line-total">
+        <span>Line total</span>
+        <strong id="folio-line-total">0.00 ${escapeHtml(cur)}</strong>
+      </div>
+      <label class="rud-field">Charge date / time
+        <input type="datetime-local" id="folio-charge-when" class="rud-input" value="${chargeDateInputDefault}" />
+      </label>
+      <label class="rud-field">Posting target
+        <select id="folio-post-target" class="rud-input">
+          <option value="BOOKING_ACCOUNT" selected>Guest folio (booking)</option>
+          <option value="GUEST_FOLIO">Guest folio</option>
+          <option value="ROOM_ACCOUNT">Room account</option>
+        </select>
+      </label>
+      <div class="rud-field">
+        <span class="rud-field-label">Payment status</span>
+        <div class="rud-pay-chips" role="group" aria-label="Payment status">
+          <button type="button" class="rud-pay-chip active" data-paid="0">Charge to room</button>
+          <button type="button" class="rud-pay-chip" data-paid="1">Paid</button>
+        </div>
+        <input type="checkbox" id="folio-paid-now" class="rud-sr-only" tabindex="-1" />
+      </div>
+      <div id="folio-paid-fields" class="rud-hidden">
+        <label class="rud-field">Payment method
+          <select id="folio-pay-method" class="rud-input">
+            <option value="CASH">Cash</option>
+            <option value="CARD">Card</option>
+            <option value="BANK_TRANSFER">Bank transfer</option>
+            <option value="MIXED">Mixed</option>
+          </select>
+        </label>
+      </div>
+      <label class="rud-field">Reference (optional)
+        <input type="text" id="folio-ref" class="rud-input" maxlength="120" />
+      </label>
+      <label class="rud-field">Notes
+        <textarea id="folio-notes" class="rud-input rud-textarea" rows="2"></textarea>
+      </label>
+      <p id="folio-charge-err" class="rud-form-err badge alert" style="display:none"></p>
+      <div class="rud-drawer-actions">
+        <button type="button" class="btn-link" data-close-charge>Cancel</button>
+        <button type="submit" class="rud-drawer-submit rud-drawer-submit-charge">Post charge</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="folio-payment-modal" class="rud-drawer rud-drawer-pay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="folio-pay-title" aria-hidden="true">
+  <div class="rud-drawer-sheet">
+    <div class="rud-drawer-head">
+      <div>
+        <p class="rud-drawer-kicker muted">Guest ledger</p>
+        <h3 id="folio-pay-title" class="rud-drawer-title">Add payment</h3>
+      </div>
+      <button type="button" class="rud-drawer-close" data-close-payment aria-label="Close">&times;</button>
+    </div>
+    <form id="folio-payment-form" class="rud-drawer-body">
+      <input type="hidden" name="date" value="${dateKey}" />
+      <label class="rud-field">Amount (${escapeHtml(cur)}) <span class="rud-req">*</span>
+        <input type="number" id="folio-pay-amount" class="rud-input" min="0.01" step="0.01" required />
+      </label>
+      <label class="rud-field">Payment method
+        <select id="folio-pay-method2" class="rud-input">
+          <option value="CASH">Cash</option>
+          <option value="CARD">Card</option>
+          <option value="BANK_TRANSFER">Bank transfer</option>
+        </select>
+      </label>
+      <label class="rud-field">Applies to
+        <select id="folio-pay-post-target" class="rud-input">
+          <option value="BOOKING_ACCOUNT" selected>Guest folio (booking)</option>
+          <option value="GUEST_FOLIO">Guest folio</option>
+          <option value="ROOM_ACCOUNT">Room account</option>
+        </select>
+      </label>
+      <label class="rud-field">Date / time
+        <input type="datetime-local" id="folio-pay-when" class="rud-input" value="${chargeDateInputDefault}" />
+      </label>
+      <label class="rud-field">Reference (optional)
+        <input type="text" id="folio-pay-ref" class="rud-input" maxlength="120" />
+      </label>
+      <label class="rud-field">Notes
+        <textarea id="folio-pay-notes" class="rud-input rud-textarea" rows="2"></textarea>
+      </label>
+      <p id="folio-pay-err" class="rud-form-err badge alert" style="display:none"></p>
+      <div class="rud-drawer-actions">
+        <button type="button" class="btn-link" data-close-payment>Cancel</button>
+        <button type="submit" class="rud-drawer-submit rud-drawer-submit-pay">Add payment</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+(function () {
+  var unitId = ${JSON.stringify(unit.id)};
+  var dateKey = ${JSON.stringify(dateKey)};
+  var currency = ${JSON.stringify(cur)};
+  var canPost = ${canPostFolio ? "true" : "false"};
+  var menuCatalog = ${folioMenuJson};
+  var currentLedgerFilter = "all";
+  function showToast(msg, isWarn) {
+    var el = document.getElementById("folio-toast");
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle("rud-toast-warn", !!isWarn);
+    el.classList.add("rud-toast-visible");
+    el.style.display = "block";
+    setTimeout(function () {
+      el.classList.remove("rud-toast-visible", "rud-toast-warn");
+      el.style.display = "none";
+    }, isWarn ? 9000 : 4000);
+  }
+  function openBackdrop(on) {
+    var b = document.getElementById("folio-modal-backdrop");
+    if (b) {
+      b.style.display = on ? "block" : "none";
+      b.setAttribute("aria-hidden", on ? "false" : "true");
+    }
+    document.body.classList.toggle("rud-drawer-open", !!on);
+  }
+  function closeAllDrawers() {
+    var ch = document.getElementById("folio-charge-modal");
+    var pay = document.getElementById("folio-payment-modal");
+    if (ch) { ch.style.display = "none"; ch.setAttribute("aria-hidden", "true"); }
+    if (pay) { pay.style.display = "none"; pay.setAttribute("aria-hidden", "true"); }
+    openBackdrop(false);
+  }
+  function openChargeDrawer() {
+    closeAllDrawers();
+    openBackdrop(true);
+    var m = document.getElementById("folio-charge-modal");
+    if (m) { m.style.display = "block"; m.setAttribute("aria-hidden", "false"); }
+  }
+  function openPaymentDrawer() {
+    closeAllDrawers();
+    openBackdrop(true);
+    var m = document.getElementById("folio-payment-modal");
+    if (m) { m.style.display = "block"; m.setAttribute("aria-hidden", "false"); }
+  }
+  document.querySelectorAll(".folio-open-charge").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      if (!canPost) return;
+      openChargeDrawer();
+    });
+  });
+  document.querySelectorAll(".folio-open-payment").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      if (!canPost) return;
+      openPaymentDrawer();
+    });
+  });
+  document.querySelectorAll("[data-close-charge]").forEach(function (btn) {
+    btn.addEventListener("click", function () { closeAllDrawers(); });
+  });
+  document.querySelectorAll("[data-close-payment]").forEach(function (btn) {
+    btn.addEventListener("click", function () { closeAllDrawers(); });
+  });
+  var backdrop = document.getElementById("folio-modal-backdrop");
+  if (backdrop) {
+    backdrop.addEventListener("click", function () { closeAllDrawers(); });
+  }
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") closeAllDrawers();
+  });
+  var catSel = document.getElementById("folio-charge-category");
+  document.querySelectorAll(".rud-outlet-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      document.querySelectorAll(".rud-outlet-chip").forEach(function (c) { c.classList.remove("active"); });
+      chip.classList.add("active");
+      var v = chip.getAttribute("data-category");
+      if (catSel && v) catSel.value = v;
+    });
+  });
+  function syncPaidUi() {
+    var paidCb = document.getElementById("folio-paid-now");
+    var pf = document.getElementById("folio-paid-fields");
+    var on = paidCb && paidCb.checked;
+    if (pf) pf.classList.toggle("rud-hidden", !on);
+    document.querySelectorAll(".rud-pay-chip").forEach(function (c) {
+      var want = c.getAttribute("data-paid") === "1";
+      c.classList.toggle("active", want === !!on);
+    });
+  }
+  document.querySelectorAll(".rud-pay-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      var paid = chip.getAttribute("data-paid") === "1";
+      var paidCb = document.getElementById("folio-paid-now");
+      if (paidCb) paidCb.checked = paid;
+      syncPaidUi();
+    });
+  });
+  var paidCb = document.getElementById("folio-paid-now");
+  if (paidCb) paidCb.addEventListener("change", syncPaidUi);
+  syncPaidUi();
+  function syncMode() {
+    var mode = (document.querySelector('input[name="folioMode"]:checked') || {}).value || "catalog";
+    var cat = document.getElementById("folio-catalog-block");
+    var cust = document.getElementById("folio-custom-block");
+    if (cat) cat.classList.toggle("rud-hidden", mode !== "catalog");
+    if (cust) cust.classList.toggle("rud-hidden", mode !== "custom");
+    recalcLine();
+  }
+  document.querySelectorAll('input[name="folioMode"]').forEach(function (r) {
+    r.addEventListener("change", syncMode);
+  });
+  function findMenuByName(name) {
+    var n = (name || "").trim().toLowerCase();
+    if (!n) return null;
+    for (var i = 0; i < menuCatalog.length; i++) {
+      if (menuCatalog[i].name.toLowerCase() === n) return menuCatalog[i];
+    }
+    return null;
+  }
+  var catSearch = document.getElementById("folio-catalog-search");
+  var menuIdEl = document.getElementById("folio-menu-item-id");
+  if (catSearch) {
+    catSearch.addEventListener("input", function () {
+      var m = findMenuByName(catSearch.value);
+      if (menuIdEl) menuIdEl.value = m ? m.id : "";
+      recalcLine();
+    });
+    catSearch.addEventListener("change", function () {
+      var m = findMenuByName(catSearch.value);
+      if (menuIdEl) menuIdEl.value = m ? m.id : "";
+      recalcLine();
+    });
+  }
+  var qtyEl = document.getElementById("folio-qty");
+  function bumpQty(delta) {
+    if (!qtyEl) return;
+    var q = parseInt(qtyEl.value, 10);
+    if (!isFinite(q)) q = 1;
+    q = Math.min(999, Math.max(1, q + delta));
+    qtyEl.value = String(q);
+    recalcLine();
+  }
+  var qm = document.getElementById("folio-qty-minus");
+  var qp = document.getElementById("folio-qty-plus");
+  if (qm) qm.addEventListener("click", function () { bumpQty(-1); });
+  if (qp) qp.addEventListener("click", function () { bumpQty(1); });
+  ["folio-qty", "folio-custom-price"].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener("input", recalcLine);
+  });
+  function recalcLine() {
+    var mode = (document.querySelector('input[name="folioMode"]:checked') || {}).value || "catalog";
+    var qty = parseFloat(qtyEl && qtyEl.value, 10);
+    if (!isFinite(qty) || qty < 1) qty = 1;
+    var unit = 0;
+    if (mode === "catalog") {
+      var m = findMenuByName(catSearch && catSearch.value);
+      unit = m ? Number(m.unitPrice) : 0;
+    } else {
+      unit = parseFloat(document.getElementById("folio-custom-price") && document.getElementById("folio-custom-price").value, 10);
+      if (!isFinite(unit)) unit = 0;
+    }
+    var total = Math.round(qty * unit * 100) / 100;
+    var out = document.getElementById("folio-line-total");
+    if (out) out.textContent = total.toFixed(2) + " " + currency;
+  }
+  syncMode();
+  recalcLine();
+  var chargeForm = document.getElementById("folio-charge-form");
+  if (chargeForm) {
+    chargeForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var err = document.getElementById("folio-charge-err");
+      if (err) { err.style.display = "none"; err.textContent = ""; }
+      var mode = (document.querySelector('input[name="folioMode"]:checked') || {}).value || "catalog";
+      var body = {
+        date: dateKey,
+        chargeCategory: document.getElementById("folio-charge-category") && document.getElementById("folio-charge-category").value,
+        mode: mode,
+        menuItemId: menuIdEl && menuIdEl.value ? menuIdEl.value : undefined,
+        itemName: document.getElementById("folio-custom-name") && document.getElementById("folio-custom-name").value,
+        description: document.getElementById("folio-custom-desc") && document.getElementById("folio-custom-desc").value,
+        unitPrice: document.getElementById("folio-custom-price") && document.getElementById("folio-custom-price").value,
+        quantity: document.getElementById("folio-qty") && document.getElementById("folio-qty").value,
+        chargeDate: document.getElementById("folio-charge-when") && document.getElementById("folio-charge-when").value,
+        postingTarget: document.getElementById("folio-post-target") && document.getElementById("folio-post-target").value,
+        paidNow: document.getElementById("folio-paid-now") && document.getElementById("folio-paid-now").checked,
+        folioPaymentMethod: document.getElementById("folio-pay-method") && document.getElementById("folio-pay-method").value,
+        referenceNumber: document.getElementById("folio-ref") && document.getElementById("folio-ref").value,
+        notes: document.getElementById("folio-notes") && document.getElementById("folio-notes").value
+      };
+      if (mode === "catalog") {
+        body.itemName = catSearch ? catSearch.value : "";
+        delete body.unitPrice;
+      }
+      fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/charge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j.ok) {
+          var msg = "Posted to guest ledger.";
+          if (j.outletNotifyWarning) msg += " " + j.outletNotifyWarning;
+          showToast(msg, !!j.outletNotifyWarning);
+          window.location.reload();
+        } else {
+          if (err) { err.textContent = j.error || "Failed"; err.style.display = "block"; }
+        }
+      }).catch(function () {
+        if (err) { err.textContent = "Network error"; err.style.display = "block"; }
+      });
+    });
+  }
+  var payForm = document.getElementById("folio-payment-form");
+  if (payForm) {
+    payForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var err = document.getElementById("folio-pay-err");
+      if (err) { err.style.display = "none"; }
+      var pt = document.getElementById("folio-pay-post-target");
+      var body = {
+        date: dateKey,
+        amount: document.getElementById("folio-pay-amount") && document.getElementById("folio-pay-amount").value,
+        folioPaymentMethod: document.getElementById("folio-pay-method2") && document.getElementById("folio-pay-method2").value,
+        chargeDate: document.getElementById("folio-pay-when") && document.getElementById("folio-pay-when").value,
+        referenceNumber: document.getElementById("folio-pay-ref") && document.getElementById("folio-pay-ref").value,
+        notes: document.getElementById("folio-pay-notes") && document.getElementById("folio-pay-notes").value,
+        postingTarget: pt && pt.value ? pt.value : "BOOKING_ACCOUNT"
+      };
+      fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j.ok) {
+          showToast("Payment added — balance updated.");
+          window.location.reload();
+        } else {
+          if (err) { err.textContent = j.error || "Failed"; err.style.display = "block"; }
+        }
+      }).catch(function () {
+        if (err) { err.textContent = "Network error"; err.style.display = "block"; }
+      });
+    });
+  }
+  function applyLedgerFilter() {
+    var inp = document.getElementById("rud-ledger-search");
+    var q = ((inp && inp.value) || "").toLowerCase().trim();
+    document.querySelectorAll("tr.rud-ledger-row").forEach(function (tr) {
+      var kind = tr.getAttribute("data-ledger-kind") || "";
+      var search = (tr.getAttribute("data-ledger-search") || "").toLowerCase();
+      var okKind = currentLedgerFilter === "all" || kind === currentLedgerFilter;
+      var okSearch = !q || search.indexOf(q) !== -1;
+      tr.style.display = okKind && okSearch ? "" : "none";
+    });
+  }
+  document.querySelectorAll(".rud-filter-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      document.querySelectorAll(".rud-filter-chip").forEach(function (c) { c.classList.remove("active"); });
+      chip.classList.add("active");
+      currentLedgerFilter = chip.getAttribute("data-filter") || "all";
+      applyLedgerFilter();
+    });
+  });
+  var ledgerSearch = document.getElementById("rud-ledger-search");
+  if (ledgerSearch) {
+    ledgerSearch.addEventListener("input", applyLedgerFilter);
+  }
+  document.querySelectorAll(".rud-void-btn, .folio-void-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var id = btn.getAttribute("data-txn-id");
+      if (!id) return;
+      var reason = window.prompt("Reason to void this transaction? (required for audit)");
+      if (!reason || !reason.trim()) return;
+      fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/" + encodeURIComponent(id) + "/void", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: dateKey, reason: reason.trim() })
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j.ok) {
+          showToast("Transaction voided.");
+          window.location.reload();
+        } else {
+          window.alert(j.error || "Void failed");
+        }
+      });
+    });
+  });
+})();
+</script>
+
+<style>
+  .room-board-badge { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .room-status-available { background:#dcfce7; color:#166534; border-color:#22c55e; }
+  .room-status-reserved { background:#dbeafe; color:#1e40af; border-color:#3b82f6; }
+  .room-status-occupied { background:#fee2e2; color:#991b1b; border-color:#ef4444; }
+  .room-status-cleaning { background:#fef9c3; color:#854d0e; border-color:#eab308; }
+  .room-status-maintenance { background:#f3e8ff; color:#6b21a8; border-color:#a855f7; }
+  body.rud-drawer-open { overflow:hidden; }
+  .rud-page { max-width:1280px; margin:0 auto; padding-bottom:48px; }
+  .rud-page-head { margin-bottom:8px; }
+  .rud-title { margin:0; font-size:1.5rem; font-weight:800; letter-spacing:-0.02em; color:#0f172a; }
+  .rud-sub { margin:6px 0 0; font-size:14px; }
+  #folio-toast.rud-toast { display:none; position:fixed; bottom:24px; right:24px; z-index:10050; background:#0f766e; color:#fff; padding:14px 20px; border-radius:10px; font-weight:600; box-shadow:0 12px 32px rgba(15,23,42,.25); max-width:420px; white-space:pre-wrap; }
+  #folio-toast.rud-toast.rud-toast-warn { background:#b45309; }
+  #folio-toast.rud-toast-visible { animation:rud-toast-in .25s ease; }
+  @keyframes rud-toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  .rud-banner-warn { margin:12px 0 0; padding:12px 16px; border-radius:10px; background:#fffbeb; border:1px solid #fcd34d; color:#78350f; font-size:14px; }
+  .rud-toolbar { display:flex; flex-direction:column; gap:10px; margin:16px 0 24px; }
+  .rud-toolbar-row { display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; }
+  .rud-toolbar-secondary { padding-bottom:10px; border-bottom:1px solid #e2e8f0; }
+  .rud-toolbar-primary { gap:12px; }
+  .rud-btn { padding:10px 18px; border-radius:10px; border:0; font-weight:700; font-size:14px; cursor:pointer; transition:transform .08s ease, box-shadow .15s ease; }
+  .rud-btn:disabled { opacity:.45; cursor:not-allowed; }
+  .rud-btn-charge { background:linear-gradient(180deg,#0d9488,#0f766e); color:#fff; box-shadow:0 4px 14px rgba(15,118,110,.35); }
+  .rud-btn-charge:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 6px 18px rgba(15,118,110,.4); }
+  .rud-btn-pay { background:linear-gradient(180deg,#0284c7,#0369a1); color:#fff; box-shadow:0 4px 14px rgba(3,105,161,.35); }
+  .rud-btn-pay:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 6px 18px rgba(3,105,161,.4); }
+  .rud-btn-save { padding:9px 16px; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; width:max-content; border:0; cursor:pointer; }
+  .rud-layout { display:grid; grid-template-columns:1fr min(320px,34%); gap:28px; align-items:start; }
+  @media (max-width:960px) { .rud-layout { grid-template-columns:1fr; } .rud-sidebar { order:-1; } }
+  .rud-main { min-width:0; }
+  .rud-card-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin-bottom:20px; }
+  @media (max-width:720px) { .rud-card-grid { grid-template-columns:1fr; } }
+  .rud-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:18px 20px; box-shadow:0 1px 2px rgba(15,23,42,.04); }
+  .rud-card-title { margin:0 0 14px; font-size:15px; font-weight:800; color:#0f172a; letter-spacing:-0.01em; }
+  .rud-card-foot { margin:14px 0 0; font-size:13px; }
+  .rud-dl { margin:0; display:grid; gap:10px 20px; }
+  .rud-dl > div { display:grid; grid-template-columns:minmax(100px,38%) 1fr; gap:10px; font-size:14px; border-bottom:1px solid #f1f5f9; padding-bottom:10px; }
+  .rud-dl > div:last-child { border-bottom:0; padding-bottom:0; }
+  .rud-dl dt { margin:0; color:#64748b; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .rud-dl dd { margin:0; font-weight:600; color:#1e293b; }
+  .rud-code { font-size:12px; background:#f1f5f9; padding:2px 8px; border-radius:6px; }
+  .rud-card-form { margin-bottom:24px; }
+  .rud-form .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:640px) { .rud-form .grid-2 { grid-template-columns:1fr; } }
+  .rud-form label { display:grid; gap:6px; font-size:13px; font-weight:600; color:#334155; margin-bottom:14px; }
+  .rud-form input:not([type=file]), .rud-form select, .rud-form textarea { width:100%; padding:10px 12px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px; box-sizing:border-box; }
+  .rud-form input[type=file] { padding:8px; border:1px dashed #cbd5e1; border-radius:8px; }
+  .rud-ledger { margin-top:8px; }
+  .rud-ledger-head { margin-bottom:12px; }
+  .rud-ledger-title { margin:0; font-size:1.1rem; font-weight:800; color:#0f172a; }
+  .rud-ledger-desc { margin:6px 0 0; font-size:13px; }
+  .rud-recent { background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:12px 16px; margin-bottom:16px; }
+  .rud-recent-label { display:block; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; color:#64748b; margin-bottom:8px; }
+  .rud-recent-list { margin:0; padding:0; list-style:none; display:grid; gap:8px; }
+  .rud-recent-list li { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; font-size:13px; }
+  .rud-recent-amt { font-weight:800; color:#0f172a; }
+  .rud-recent-meta { color:#64748b; }
+  .rud-filter-bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  .rud-filter-chip { padding:6px 12px; border-radius:999px; border:1px solid #cbd5e1; background:#fff; font-size:12px; font-weight:700; color:#475569; cursor:pointer; transition:background .15s,border-color .15s,color .15s; }
+  .rud-filter-chip:hover { border-color:#94a3b8; color:#0f172a; }
+  .rud-filter-chip.active { background:#0f172a; border-color:#0f172a; color:#fff; }
+  .rud-search-wrap { display:grid; gap:6px; font-size:12px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:.04em; margin-bottom:12px; }
+  .rud-search-input { padding:10px 14px; border:1px solid #cbd5e1; border-radius:10px; font-size:14px; width:100%; max-width:420px; box-sizing:border-box; }
+  .rud-table-wrap { overflow-x:auto; border:1px solid #e2e8f0; border-radius:12px; background:#fff; }
+  .rud-ledger-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .rud-ledger-table thead th { text-align:left; padding:12px 14px; background:#f8fafc; border-bottom:1px solid #e2e8f0; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; color:#64748b; white-space:nowrap; }
+  .rud-ledger-table th.num, .rud-ledger-table td:nth-child(5), .rud-ledger-table td:nth-child(6), .rud-ledger-table td:nth-child(7) { text-align:right; }
+  .rud-ledger-table tbody td { padding:12px 14px; border-bottom:1px solid #f1f5f9; vertical-align:top; color:#334155; }
+  .rud-ledger-table tbody tr:last-child td { border-bottom:0; }
+  .rud-table-empty { padding:28px 16px !important; text-align:center; color:#64748b; }
+  .rud-ledger-voided { opacity:.55; }
+  .rud-badge { display:inline-block; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:700; white-space:nowrap; }
+  .rud-badge-unpaid { background:#fef3c7; color:#92400e; }
+  .rud-badge-paid { background:#d1fae5; color:#065f46; }
+  .rud-badge-voided { background:#f1f5f9; color:#64748b; }
+  .rud-badge-refunded { background:#e0e7ff; color:#3730a3; }
+  .rud-badge-neutral { background:#f1f5f9; color:#475569; }
+  .rud-badge-room { background:#dbeafe; color:#1e40af; }
+  .rud-badge-type { background:#ecfeff; color:#0e7490; }
+  .rud-sidebar { position:sticky; top:16px; }
+  .rud-card-fin { border-color:#cbd5e1; box-shadow:0 4px 20px rgba(15,23,42,.06); }
+  .rud-fin-lines { list-style:none; margin:0; padding:0; }
+  .rud-fin-lines li { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:10px 0; border-bottom:1px solid #f1f5f9; font-size:14px; }
+  .rud-fin-lines li span:first-child { color:#64748b; }
+  .rud-fin-total { font-weight:800; padding-top:12px !important; border-bottom:0 !important; font-size:15px; color:#0f172a; }
+  .rud-fin-total strong { font-size:1.05rem; }
+  .rud-neg { color:#b45309; }
+  .rud-outstanding { margin-top:18px; padding:16px; border-radius:12px; background:linear-gradient(135deg,#fffbeb 0%,#fef3c7 100%); border:1px solid #fbbf24; }
+  .rud-outstanding-label { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#92400e; }
+  .rud-outstanding-value { font-size:1.75rem; font-weight:900; color:#78350f; letter-spacing:-0.02em; margin-top:4px; }
+  .rud-drawer-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.5); z-index:10040; }
+  .rud-drawer { position:fixed; top:0; right:0; bottom:0; z-index:10045; width:min(440px,100%); max-width:100%; pointer-events:none; }
+  .rud-drawer > .rud-drawer-sheet { pointer-events:auto; }
+  .rud-drawer-sheet { height:100%; background:#fff; box-shadow:-12px 0 40px rgba(15,23,42,.18); display:flex; flex-direction:column; border-left:1px solid #e2e8f0; animation:rud-drawer-slide .22s ease; }
+  @keyframes rud-drawer-slide { from { transform:translateX(12px); opacity:.92; } to { transform:translateX(0); opacity:1; } }
+  .rud-drawer-head { flex-shrink:0; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:18px 20px; border-bottom:1px solid #e2e8f0; background:linear-gradient(180deg,#fafafa,#fff); }
+  .rud-drawer-kicker { margin:0 0 4px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
+  .rud-drawer-title { margin:0; font-size:1.15rem; font-weight:800; color:#0f172a; }
+  .rud-drawer-close { border:0; background:#f1f5f9; width:36px; height:36px; border-radius:10px; font-size:1.35rem; line-height:1; cursor:pointer; color:#64748b; flex-shrink:0; }
+  .rud-drawer-close:hover { background:#e2e8f0; color:#0f172a; }
+  .rud-drawer-body { flex:1; overflow-y:auto; padding:18px 20px 24px; display:flex; flex-direction:column; gap:14px; }
+  .rud-field { display:grid; gap:6px; margin:0; }
+  .rud-field-label { font-size:12px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:.04em; }
+  .rud-fieldset { border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; margin:0; }
+  .rud-fieldset .rud-field-label { padding:0 4px; }
+  .rud-seg { display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; }
+  .rud-seg-item { font-size:13px; font-weight:600; color:#334155; display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .rud-outlet-chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .rud-outlet-chip { padding:8px 12px; border-radius:8px; border:1px solid #cbd5e1; background:#fff; font-size:12px; font-weight:700; color:#475569; cursor:pointer; transition:all .12s ease; }
+  .rud-outlet-chip:hover { border-color:#0d9488; color:#0f766e; }
+  .rud-outlet-chip.active { background:#0f766e; border-color:#0f766e; color:#fff; }
+  .rud-stepper { display:flex; align-items:center; gap:0; max-width:200px; border:1px solid #cbd5e1; border-radius:10px; overflow:hidden; background:#fff; }
+  .rud-stepper-btn { width:44px; height:44px; border:0; background:#f8fafc; font-size:1.25rem; font-weight:700; color:#334155; cursor:pointer; }
+  .rud-stepper-btn:hover { background:#e2e8f0; }
+  .rud-stepper-input { width:56px; border:0; text-align:center; font-size:16px; font-weight:700; padding:8px; }
+  .rud-line-total { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-radius:10px; background:#f0fdfa; border:1px solid #99f6e4; font-size:14px; color:#134e4a; }
+  .rud-line-total strong { font-size:1.1rem; }
+  .rud-pay-chips { display:flex; gap:8px; flex-wrap:wrap; }
+  .rud-pay-chip { padding:8px 14px; border-radius:8px; border:1px solid #cbd5e1; background:#fff; font-size:13px; font-weight:700; color:#475569; cursor:pointer; }
+  .rud-pay-chip.active { background:#0f172a; border-color:#0f172a; color:#fff; }
+  .rud-input, .rud-textarea { width:100%; padding:10px 12px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px; box-sizing:border-box; }
+  .rud-textarea { resize:vertical; min-height:64px; }
+  .rud-hint { margin:4px 0 0; font-size:12px; }
+  .rud-req { color:#b91c1c; }
+  .rud-form-err { margin:0; }
+  .rud-drawer-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:auto; padding-top:12px; flex-wrap:wrap; border-top:1px solid #f1f5f9; }
+  .rud-drawer-submit { padding:11px 20px; border:0; border-radius:10px; font-weight:800; font-size:14px; cursor:pointer; }
+  .rud-drawer-submit-charge { background:#0f766e; color:#fff; }
+  .rud-drawer-submit-pay { background:#0369a1; color:#fff; }
+  .rud-hidden { display:none !important; }
+  .rud-sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  tr.folio-row-voided { opacity:0.55; }
+</style>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const unitId = String(req.params.unitId ?? "");
+    const body = req.body as Record<string, unknown>;
+    const dateKey = String(body.date ?? "").trim();
+    const boardDate = parseDateInput(dateKey, startOfDay(new Date()));
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: unitId, hotelId: hotel.id },
+      select: { id: true, roomTypeId: true }
+    });
+    if (!unit) {
+      res.status(404).json({ ok: false, error: "Unit not found" });
+      return;
+    }
+    const dateEndExclusive = addDays(boardDate, 1);
+    const booking = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId: unit.roomTypeId,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      }
+    });
+    if (!booking) {
+      res.status(400).json({
+        ok: false,
+        error: "No active booking on this unit for the selected date. Link a booking before posting folio charges."
+      });
+      return;
+    }
+    const mode = String(body.mode ?? "custom") === "catalog" ? "catalog" : "custom";
+    let itemName = String(body.itemName ?? "").trim();
+    let description: string | null = String(body.description ?? "").trim() || null;
+    let unitPrice =
+      typeof body.unitPrice === "number" ? body.unitPrice : parseFloat(String(body.unitPrice ?? "NaN"));
+    const qty = Math.min(999, Math.max(1, parseIntegerInput(body.quantity, 1)));
+    let menuItemId: string | null = null;
+    let outletCategory: FolioOutletCategory;
+    let transactionType: FolioTransactionType;
+    const categoryRaw = String(body.chargeCategory ?? "RESTAURANT").toUpperCase();
+    const mapped = mapChargeCategoryToFolio(categoryRaw);
+    outletCategory = mapped.outletCategory;
+    transactionType = mapped.transactionType;
+    if (mode === "catalog" && body.menuItemId) {
+      const mid = String(body.menuItemId).trim();
+      const mi = await prisma.menuItem.findFirst({
+        where: { id: mid, hotelId: hotel.id, isActive: true }
+      });
+      if (mi) {
+        menuItemId = mi.id;
+        itemName = mi.name;
+        unitPrice = mi.unitPrice;
+        if (!description && mi.description) description = mi.description;
+        outletCategory =
+          mi.outletType === FbOutletType.COFFEE_SHOP ? FolioOutletCategory.CAFE : FolioOutletCategory.RESTAURANT;
+        transactionType = FolioTransactionType.FNB_CHARGE;
+      }
+    }
+    if (!itemName || !Number.isFinite(unitPrice) || unitPrice < 0) {
+      res.status(400).json({ ok: false, error: "Item name and a valid unit price are required." });
+      return;
+    }
+    const gross = round2(qty * unitPrice);
+    const tax = 0;
+    const paidNow = body.paidNow === true || body.paidNow === "1";
+    const folioPaymentMethod = paidNow
+      ? String(body.folioPaymentMethod ?? "CASH").trim().slice(0, 48) || "CASH"
+      : null;
+    const folioPaymentStatus = paidNow ? FolioTxnPaymentStatus.PAID : FolioTxnPaymentStatus.UNPAID;
+    const chargeDateRaw = body.chargeDate ? new Date(String(body.chargeDate)) : new Date();
+    const chargeDate = Number.isNaN(chargeDateRaw.getTime()) ? new Date() : chargeDateRaw;
+    const postingTarget = parsePostingTarget(String(body.postingTarget ?? "BOOKING_ACCOUNT"));
+    const folioNotes = String(body.notes ?? "").trim().slice(0, 2000) || null;
+    const txn = await postChargeToFolio(prisma, {
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      guestId: booking.guestId,
+      roomUnitId: unit.id,
+      roomTypeId: unit.roomTypeId,
+      currency: booking.currency,
+      staffId: session.staffId,
+      outletCategory,
+      transactionType,
+      menuItemId,
+      itemName,
+      description,
+      quantity: qty,
+      unitPrice,
+      taxAmount: tax,
+      postingTarget,
+      folioPaymentStatus,
+      folioPaymentMethod,
+      referenceNumber: String(body.referenceNumber ?? "").trim().slice(0, 120) || null,
+      chargeDate,
+      notes: folioNotes
+    });
+    if (folioChargeQualifiesForOutletTicket(transactionType, outletCategory)) {
+      try {
+        await createOutletTicketForFolioCharge(prisma, {
+          hotelId: hotel.id,
+          bookingId: booking.id,
+          guestId: booking.guestId,
+          folioTransactionId: txn.id,
+          outletCategory,
+          notes: folioNotes
+        });
+      } catch (ticketErr) {
+        console.error("[admin] outlet order ticket (folio)", ticketErr);
+      }
+    }
+    await logAudit({
+      hotelId: hotel.id,
+      action: "FOLIO_CHARGE_POSTED",
+      entityType: "FolioTransaction",
+      entityId: txn.id,
+      metadata: { bookingId: booking.id, roomUnitId: unit.id, gross }
+    });
+    const outletNotifyWarning = await notifyOutletForFolioCharge({
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      transactionType,
+      outletCategory,
+      itemName,
+      quantity: qty,
+      unitPrice,
+      lineTotal: gross,
+      currency: booking.currency,
+      notes: folioNotes,
+      chargeTime: chargeDate,
+      folioTransactionId: txn.id
+    });
+    res.json({ ok: true, id: txn.id, outletNotifyWarning: outletNotifyWarning ?? undefined });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed to post charge" });
+  }
+});
+
+adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const unitId = String(req.params.unitId ?? "");
+    const body = req.body as Record<string, unknown>;
+    const dateKey = String(body.date ?? "").trim();
+    const boardDate = parseDateInput(dateKey, startOfDay(new Date()));
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: unitId, hotelId: hotel.id },
+      select: { id: true, roomTypeId: true }
+    });
+    if (!unit) {
+      res.status(404).json({ ok: false, error: "Unit not found" });
+      return;
+    }
+    const dateEndExclusive = addDays(boardDate, 1);
+    const booking = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId: unit.roomTypeId,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      }
+    });
+    if (!booking) {
+      res.status(400).json({ ok: false, error: "No active booking for this unit on the selected date." });
+      return;
+    }
+    const amount =
+      typeof body.amount === "number" ? body.amount : parseFloat(String(body.amount ?? "NaN"));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      res.status(400).json({ ok: false, error: "Enter a valid payment amount." });
+      return;
+    }
+    const gross = round2(amount);
+    const chargeDateRaw = body.chargeDate ? new Date(String(body.chargeDate)) : new Date();
+    const chargeDate = Number.isNaN(chargeDateRaw.getTime()) ? new Date() : chargeDateRaw;
+    const txn = await postPaymentToFolio(prisma, {
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      guestId: booking.guestId,
+      roomUnitId: unit.id,
+      roomTypeId: unit.roomTypeId,
+      currency: booking.currency,
+      staffId: session.staffId,
+      amount: gross,
+      folioPaymentMethod: String(body.folioPaymentMethod ?? "CASH").trim().slice(0, 48) || "CASH",
+      postingTarget: parsePostingTarget(String(body.postingTarget ?? "BOOKING_ACCOUNT")),
+      chargeDate,
+      referenceNumber: String(body.referenceNumber ?? "").trim().slice(0, 120) || null,
+      notes: String(body.notes ?? "").trim().slice(0, 2000) || null,
+      allocateFifo: body.allocateFifo === true || body.allocateFifo === "1"
+    });
+    await logAudit({
+      hotelId: hotel.id,
+      action: "FOLIO_PAYMENT_POSTED",
+      entityType: "FolioTransaction",
+      entityId: txn.id,
+      metadata: { bookingId: booking.id, amount: gross }
+    });
+    res.json({ ok: true, id: txn.id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed to record payment" });
+  }
+});
+
+adminRouter.post("/room-board/unit/:unitId/folio/:txnId/void", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const unitId = String(req.params.unitId ?? "");
+    const txnId = String(req.params.txnId ?? "");
+    const body = req.body as Record<string, unknown>;
+    const dateKey = String(body.date ?? "").trim();
+    const boardDate = parseDateInput(dateKey, startOfDay(new Date()));
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: unitId, hotelId: hotel.id },
+      select: { id: true, roomTypeId: true }
+    });
+    if (!unit) {
+      res.status(404).json({ ok: false, error: "Unit not found" });
+      return;
+    }
+    const dateEndExclusive = addDays(boardDate, 1);
+    const booking = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId: unit.roomTypeId,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      }
+    });
+    if (!booking) {
+      res.status(400).json({ ok: false, error: "No active booking for this unit." });
+      return;
+    }
+    const txn = await prisma.folioTransaction.findFirst({
+      where: { id: txnId, hotelId: hotel.id, bookingId: booking.id }
+    });
+    if (!txn) {
+      res.status(404).json({ ok: false, error: "Transaction not found on this folio." });
+      return;
+    }
+    if (txn.voidedAt) {
+      res.status(400).json({ ok: false, error: "Already voided." });
+      return;
+    }
+    const reason = String(body.reason ?? "").trim().slice(0, 500) || "Voided";
+    await voidFolioTransaction(prisma, {
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      transactionId: txnId,
+      staffId: session.staffId,
+      reason
+    });
+    try {
+      await cancelOutletTicketForFolioTransaction(prisma, {
+        hotelId: hotel.id,
+        folioTransactionId: txnId
+      });
+    } catch (e) {
+      console.error("[admin] cancel outlet ticket on void", e);
+    }
+    await logAudit({
+      hotelId: hotel.id,
+      action: "FOLIO_TXN_VOIDED",
+      entityType: "FolioTransaction",
+      entityId: txnId,
+      metadata: { bookingId: booking.id, reason }
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Void failed" });
+  }
+});
+
+adminRouter.get("/api/bookings/:bookingId/folio", requirePermissionJson("BOOKINGS", "VIEW"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const bookingId = String(req.params.bookingId ?? "");
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id },
+      select: { id: true }
+    });
+    if (!booking) {
+      res.status(404).json({ ok: false, error: "Booking not found" });
+      return;
+    }
+    const folio = await getFolioByBookingId(hotel.id, bookingId);
+    res.json({ ok: true, folio });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed" });
+  }
+});
+
+adminRouter.get("/api/bookings/:bookingId/folio/summary", requirePermissionJson("BOOKINGS", "VIEW"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const bookingId = String(req.params.bookingId ?? "");
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id },
+      include: { paymentIntents: { orderBy: { createdAt: "desc" } } }
+    });
+    if (!booking) {
+      res.status(404).json({ ok: false, error: "Booking not found" });
+      return;
+    }
+    const paidAmount = booking.paymentIntents
+      .filter((p) => p.status === PaymentStatus.SUCCEEDED)
+      .reduce((sum, p) => sum + p.amount, 0);
+    const summary = await getFolioSummary({
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      bookingTotalAmount: booking.totalAmount,
+      currency: booking.currency,
+      paymentIntentsSucceededTotal: paidAmount
+    });
+    res.json({ ok: true, summary });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed" });
+  }
+});
+
+adminRouter.get("/api/bookings/:bookingId/folio/transactions", requirePermissionJson("BOOKINGS", "VIEW"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const bookingId = String(req.params.bookingId ?? "");
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id },
+      select: { id: true }
+    });
+    if (!booking) {
+      res.status(404).json({ ok: false, error: "Booking not found" });
+      return;
+    }
+    const includeVoided = req.query.includeVoided === "1" || req.query.includeVoided === "true";
+    const rows = await listFolioTransactions({
+      hotelId: hotel.id,
+      bookingId,
+      includeVoided,
+      take: Math.min(500, Math.max(1, parseInt(String(req.query.take ?? "200"), 10) || 200))
+    });
+    res.json({ ok: true, transactions: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed" });
+  }
+});
+
+adminRouter.post("/api/bookings/:bookingId/folio/refund", requirePermissionJson("BILLING", "EDIT"), async (req, res) => {
+  try {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "Unauthorized" });
+      return;
+    }
+    const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const bookingId = String(req.params.bookingId ?? "");
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id },
+      select: { id: true, guestId: true, roomUnitId: true, roomTypeId: true, currency: true }
+    });
+    if (!booking) {
+      res.status(404).json({ ok: false, error: "Booking not found" });
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const amount =
+      typeof body.amount === "number" ? body.amount : parseFloat(String(body.amount ?? "NaN"));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      res.status(400).json({ ok: false, error: "Valid refund amount required." });
+      return;
+    }
+    const parentId = String(body.parentTransactionId ?? "").trim();
+    if (!parentId) {
+      res.status(400).json({ ok: false, error: "parentTransactionId required." });
+      return;
+    }
+    const chargeDateRaw = body.chargeDate ? new Date(String(body.chargeDate)) : new Date();
+    const chargeDate = Number.isNaN(chargeDateRaw.getTime()) ? new Date() : chargeDateRaw;
+    const txn = await postRefundToFolio(prisma, {
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      guestId: booking.guestId,
+      roomUnitId: booking.roomUnitId,
+      roomTypeId: booking.roomTypeId,
+      currency: booking.currency,
+      staffId: session.staffId,
+      amount,
+      parentTransactionId: parentId,
+      folioPaymentMethod: String(body.folioPaymentMethod ?? "CASH"),
+      chargeDate,
+      referenceNumber: String(body.referenceNumber ?? "").trim().slice(0, 120) || null,
+      notes: String(body.notes ?? "").trim().slice(0, 2000) || null
+    });
+    await logAudit({
+      hotelId: hotel.id,
+      action: "FOLIO_REFUND_POSTED",
+      entityType: "FolioTransaction",
+      entityId: txn.id,
+      metadata: { bookingId: booking.id, parentTransactionId: parentId, amount }
+    });
+    res.json({ ok: true, id: txn.id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Refund failed" });
+  }
+});
+
+adminRouter.post("/room-board/unit/:unitId/details", requirePermission("ROOMS", "EDIT"), idCardUpload.single("idCard"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/room-board");
+    return;
+  }
+  const unitId = String(req.params.unitId ?? "");
+  const boardDate = parseDateInput(req.body.date, startOfDay(new Date()));
+  const dateKey = formatDateForInput(boardDate);
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: unitId, hotelId: hotel.id },
+    select: { id: true }
+  });
+  if (!unit) {
+    res.redirect(`/admin/room-board?date=${dateKey}`);
+    return;
+  }
+
+  const fullName = String(req.body.fullName ?? "").trim();
+  const phone = String(req.body.phone ?? "").trim();
+  const email = String(req.body.email ?? "").trim();
+  const nationality = String(req.body.nationality ?? "").trim();
+  const notes = String(req.body.notes ?? "").trim();
+  const paymentMethod = String(req.body.paymentMethod ?? "").trim();
+  const transactionNumber = String(req.body.transactionNumber ?? "").trim();
+  const bookedBy = String(req.body.bookedBy ?? "").trim();
+  const tourCompany = String(req.body.tourCompany ?? "").trim();
+  const adultsRaw = String(req.body.adults ?? "").trim();
+  const childrenRaw = String(req.body.children ?? "").trim();
+  const paymentAmountRaw = String(req.body.paymentAmount ?? "").trim();
+  const balanceAmountRaw = String(req.body.balanceAmount ?? "").trim();
+  const adults = adultsRaw ? Math.max(0, parseIntegerInput(adultsRaw, 0)) : null;
+  const children = childrenRaw ? Math.max(0, parseIntegerInput(childrenRaw, 0)) : null;
+  const paymentAmount = paymentAmountRaw ? Math.max(0, parseNumberInput(paymentAmountRaw, 0)) : null;
+  const balanceAmount = balanceAmountRaw ? Math.max(0, parseNumberInput(balanceAmountRaw, 0)) : null;
+  const mealPlanRaw = String(req.body.mealPlan ?? "NONE").toUpperCase();
+  const mealPlan = mealPlanRaw === "BREAKFAST" || mealPlanRaw === "HALF_BOARD" ? mealPlanRaw : "NONE";
+  const uploadedPath = req.file ? `/static/uploads/id-cards/${req.file.filename}` : "";
+  const existingIdCardPath = String(req.body.existingIdCardPath ?? "").trim();
+  const idCardPath = uploadedPath || existingIdCardPath;
+
+  const dateEndExclusive = addDays(boardDate, 1);
+  const linkedBooking = await prisma.booking.findFirst({
+    where: {
+      hotelId: hotel.id,
+      roomUnitId: unit.id,
+      checkIn: { lt: dateEndExclusive },
+      checkOut: { gt: boardDate },
+      status: { in: ["CONFIRMED", "PENDING"] }
+    },
+    select: { id: true, guestId: true }
+  });
+  if (linkedBooking) {
+    await prisma.guest.update({
+      where: { id: linkedBooking.guestId },
+      data: { nationality: nationality || null }
+    });
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "ROOM_UNIT_GUEST_DETAILS",
+    entityType: "RoomUnit",
+    entityId: unit.id,
+    metadata: {
+      date: dateKey,
+      fullName,
+      phone,
+      email,
+      nationality: nationality || undefined,
+      notes,
+      adults,
+      children,
+      mealPlan,
+      idCardPath,
+      paymentMethod,
+      paymentAmount,
+      balanceAmount,
+      transactionNumber,
+      bookedBy,
+      tourCompany
+    }
+  });
+
+  res.redirect(`/admin/room-board/unit/${encodeURIComponent(unit.id)}/details?date=${dateKey}&saved=1`);
+});
+
+adminRouter.get("/room-board/unit/:unitId/invoice", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true, currency: true } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Guest Invoice</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const unitId = String(req.params.unitId ?? "");
+  const boardDate = parseDateInput(req.query.date, startOfDay(new Date()));
+  const dateKey = formatDateForInput(boardDate);
+  const dateEndExclusive = addDays(boardDate, 1);
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: unitId, hotelId: hotel.id },
+    include: { roomType: true }
+  });
+  if (!unit) {
+    res.redirect(`/admin/room-board?date=${dateKey}`);
+    return;
+  }
+  const [booking, manualDetails] = await Promise.all([
+    prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } },
+      orderBy: { checkIn: "asc" }
+    }),
+    getManualGuestDetailsForUnitOnDate(unit.id, dateKey)
+  ]);
+
+  const whatsappSent = req.query.whatsappSent === "1";
+  const whatsappError =
+    typeof req.query.whatsappError === "string" && req.query.whatsappError.trim().length > 0 ? req.query.whatsappError.trim() : undefined;
+  const invoiceNotice =
+    typeof req.query.invoiceNotice === "string" && req.query.invoiceNotice.trim().length > 0 ? req.query.invoiceNotice.trim() : undefined;
+
+  const paidSucceeded = booking
+    ? booking.paymentIntents.filter((p) => p.status === PaymentStatus.SUCCEEDED).reduce((sum, p) => sum + p.amount, 0)
+    : 0;
+  const folioSummary = booking
+    ? await computeRoomUnitFolioSummary({
+        hotelId: hotel.id,
+        currency: booking.currency,
+        booking: { id: booking.id, totalAmount: booking.totalAmount },
+        paymentIntentsSucceededTotal: paidSucceeded
+      })
+    : null;
+
+  const currency = booking?.currency ?? hotel.currency;
+  const manualPaid = manualDetails?.paymentAmount ?? 0;
+  const manualBalance = manualDetails?.balanceAmount ?? 0;
+  const transactionNumber = manualDetails?.transactionNumber || booking?.paymentIntents[0]?.id || "—";
+  const paymentMethod = manualDetails?.paymentMethod || booking?.paymentIntents[0]?.kind || "—";
+  const invoiceNumber = booking ? `INV-${booking.id}` : `INV-MANUAL-${unit.name}-${dateKey}`;
+
+  const financialRows =
+    folioSummary != null
+      ? `
+      <tr><th>Room charges</th><td>${formatMoney(folioSummary.roomCharges, currency)}</td></tr>
+      <tr><th>F&amp;B / extras</th><td>${formatMoney(folioSummary.fnbExtrasTotal, currency)}</td></tr>
+      <tr><th>Discounts / adjustments</th><td>${formatMoney(folioSummary.folioAdjustmentsSubtotal, currency)}</td></tr>
+      <tr><th>Total charges</th><td><strong>${formatMoney(folioSummary.totalCharges, currency)}</strong></td></tr>
+      <tr><th>Amount paid</th><td>${formatMoney(folioSummary.totalPaid, currency)}</td></tr>
+      <tr><td colspan="2" class="muted" style="font-size:13px;padding-top:0">On booking: ${formatMoney(folioSummary.amountPaidBooking, currency)} · Folio payments: ${formatMoney(folioSummary.amountPaidFolio, currency)}</td></tr>
+      <tr><th>Outstanding balance</th><td><strong>${formatMoney(folioSummary.outstandingBalance, currency)}</strong></td></tr>`
+      : `
+      <tr><th>Total (manual)</th><td>${formatMoney(manualPaid + manualBalance, currency)}</td></tr>
+      <tr><th>Amount paid</th><td>${formatMoney(manualPaid, currency)}</td></tr>
+      <tr><th>Outstanding balance</th><td>${formatMoney(manualBalance, currency)}</td></tr>`;
+
+  const successBanner = whatsappSent
+    ? `<p class="invoice-banner invoice-banner-success" role="status"><strong>WhatsApp sent.</strong> The invoice summary message was delivered.${invoiceNotice ? ` ${escapeHtml(invoiceNotice)}` : ""}</p>`
+    : "";
+  const errorBanner = whatsappError
+    ? `<p class="invoice-banner invoice-banner-error" role="alert">${escapeHtml(whatsappError)}</p>`
+    : "";
+
+  const content = `
+<h2>Guest invoice</h2>
+<p class="muted">Same folio totals as <strong>Room unit &amp; guest</strong> for this board date. Print or send via WhatsApp below.</p>
+${successBanner}
+${errorBanner}
+<div class="actions" style="margin-bottom:14px">
+  <a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/details?date=${dateKey}">Back to room &amp; guest details</a>
+  <button type="button" class="btn-link" onclick="window.print()">Print</button>
+  <form method="post" action="/admin/room-board/unit/${encodeURIComponent(unit.id)}/send-whatsapp" style="display:inline-flex; margin:0">
+    <input type="hidden" name="date" value="${dateKey}" />
+    <button type="submit" class="btn-link">Send invoice via WhatsApp</button>
+  </form>
+</div>
+<section class="invoice-sheet" style="max-width:900px; border:1px solid #d8dee6; border-radius:12px; padding:14px; background:#fff">
+  <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:10px">
+    <div>
+      <h3 style="margin-bottom:6px">${escapeHtml(hotel.displayName)}</h3>
+      <p class="muted" style="margin:0">Unit ${escapeHtml(unit.name)} · ${escapeHtml(unit.roomType.name)}</p>
+    </div>
+    <div style="text-align:right">
+      <p style="margin:0"><strong>Invoice #:</strong> ${escapeHtml(invoiceNumber)}</p>
+      <p style="margin:0"><strong>Date:</strong> ${dateKey}</p>
+      <p style="margin:0"><strong>Status:</strong> ${escapeHtml(booking?.status || "MANUAL")}</p>
+    </div>
+  </div>
+  <table>
+    <tbody>
+      <tr><th>Guest</th><td>${escapeHtml(booking?.guest.fullName || manualDetails?.fullName || "—")}</td></tr>
+      <tr><th>Phone</th><td>${escapeHtml(booking?.guest.phoneE164 || manualDetails?.phone || "—")}</td></tr>
+      <tr><th>Email</th><td>${escapeHtml(manualDetails?.email || "—")}</td></tr>
+      <tr><th>Check-in / Check-out</th><td>${booking ? `${formatDateForInput(booking.checkIn)} - ${formatDateForInput(booking.checkOut)}` : dateKey}</td></tr>
+      <tr><th>Booked by</th><td>${escapeHtml(manualDetails?.bookedBy || String(booking?.source ?? "DIRECT"))}</td></tr>
+      <tr><th>Payment method</th><td>${escapeHtml(paymentMethod)}</td></tr>
+      <tr><th>Transaction #</th><td>${escapeHtml(transactionNumber)}</td></tr>
+      ${financialRows}
+    </tbody>
+  </table>
+</section>
+<style>
+  .invoice-banner { margin: 0 0 14px; padding: 12px 16px; border-radius: 10px; font-size: 14px; max-width: 900px; }
+  .invoice-banner-success { background: #ecfdf5; border: 1px solid #6ee7b7; color: #065f46; }
+  .invoice-banner-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+  @media print {
+    .sidebar, .section-tabs, nav, .actions { display:none !important; }
+    body { background:#fff; }
+    .invoice-sheet { border-color:#888 !important; }
+    .invoice-banner { display: none !important; }
+  }
+</style>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/room-board/unit/:unitId/send-whatsapp", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.redirect("/admin/room-board");
+    return;
+  }
+  const unitId = String(req.params.unitId ?? "");
+  const boardDate = parseDateInput(req.body.date, startOfDay(new Date()));
+  const dateKey = formatDateForInput(boardDate);
+  const dateEndExclusive = addDays(boardDate, 1);
+  const unit = await prisma.roomUnit.findFirst({
+    where: { id: unitId, hotelId: hotel.id },
+    include: { roomType: true }
+  });
+  if (!unit) {
+    res.redirect(`/admin/room-board?date=${dateKey}`);
+    return;
+  }
+  const [booking, manualDetails] = await Promise.all([
+    prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } },
+      orderBy: { checkIn: "asc" }
+    }),
+    getManualGuestDetailsForUnitOnDate(unit.id, dateKey)
+  ]);
+
+  const redirectInvoice = (extra: Record<string, string>) => {
+    const q = new URLSearchParams({ date: dateKey, ...extra });
+    res.redirect(`/admin/room-board/unit/${encodeURIComponent(unit.id)}/invoice?${q.toString()}`);
+  };
+
+  const toPhoneRaw = booking?.guest.phoneE164 || manualDetails?.phone || "";
+  const toPhone = normalizePhoneForWhatsApp(toPhoneRaw);
+  if (!toPhone) {
+    redirectInvoice({ whatsappError: "Guest phone number is missing or invalid. Add a phone number on room & guest details, then try again." });
+    return;
+  }
+
+  const paidSucceeded = booking
+    ? booking.paymentIntents.filter((p) => p.status === PaymentStatus.SUCCEEDED).reduce((sum, p) => sum + p.amount, 0)
+    : 0;
+  const folioSummary = booking
+    ? await computeRoomUnitFolioSummary({
+        hotelId: hotel.id,
+        currency: booking.currency,
+        booking: { id: booking.id, totalAmount: booking.totalAmount },
+        paymentIntentsSucceededTotal: paidSucceeded
+      })
+    : null;
+
+  const cur = booking?.currency ?? hotel.currency;
+  const transactionNumber = manualDetails?.transactionNumber || booking?.paymentIntents[0]?.id || "—";
+  const paymentMethod = manualDetails?.paymentMethod || booking?.paymentIntents[0]?.kind || "—";
+
+  const msgLines = folioSummary
+    ? [
+        `Dear guest, your invoice summary for ${hotel.displayName}:`,
+        `Unit: ${unit.name} (${unit.roomType.name})`,
+        `Board date: ${dateKey}`,
+        `Guest: ${booking?.guest.fullName || manualDetails?.fullName || "—"}`,
+        `Room charges: ${formatMoney(folioSummary.roomCharges, cur)}`,
+        `F&B / extras: ${formatMoney(folioSummary.fnbExtrasTotal, cur)}`,
+        `Discounts / adjustments: ${formatMoney(folioSummary.folioAdjustmentsSubtotal, cur)}`,
+        `Total charges: ${formatMoney(folioSummary.totalCharges, cur)}`,
+        `Amount paid: ${formatMoney(folioSummary.totalPaid, cur)} (on booking ${formatMoney(folioSummary.amountPaidBooking, cur)}, folio ${formatMoney(folioSummary.amountPaidFolio, cur)})`,
+        `Outstanding balance: ${formatMoney(folioSummary.outstandingBalance, cur)}`,
+        `Payment method: ${paymentMethod}`,
+        `Transaction #: ${transactionNumber}`
+      ]
+    : [
+        `Dear guest, your invoice summary for ${hotel.displayName}:`,
+        `Unit: ${unit.name} (${unit.roomType.name})`,
+        `Date: ${dateKey}`,
+        `Guest: ${manualDetails?.fullName || "—"}`,
+        `Adults/Children: ${manualDetails?.adults ?? 0}/${manualDetails?.children ?? 0}`,
+        `Meal: ${manualDetails?.mealPlan ?? "NONE"}`,
+        `Payment method: ${paymentMethod}`,
+        `Amount paid: ${formatMoney(manualDetails?.paymentAmount ?? 0, cur)}`,
+        `Outstanding balance: ${formatMoney(manualDetails?.balanceAmount ?? 0, cur)}`,
+        `Transaction #: ${transactionNumber}`
+      ];
+
+  const config = loadPartnerSetupConfig(hotel.id);
+  const sendResult = await trySendWhatsAppText({
+    to: toPhone,
+    body: msgLines.join("\n"),
+    phoneNumberId: config.whatsappPhoneNumberId || undefined,
+    conversationId: booking?.conversationId ?? undefined
+  });
+
+  if (!sendResult.ok) {
+    redirectInvoice({ whatsappError: sendResult.errorMessage });
+    return;
+  }
+
+  let invoiceNotice: string | undefined;
+  if (booking) {
+    const pdfResult = await sendInvoicePdfForBooking({
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      trigger: "ROOM_UNIT_INVOICE_SEND",
+      force: true
+    });
+    if (pdfResult.error) {
+      invoiceNotice = `Invoice PDF was not sent: ${pdfResult.error.slice(0, 400)}`;
+    } else if (pdfResult.skipped && !pdfResult.sent) {
+      invoiceNotice =
+        "Invoice PDF was not attached (e.g. booking not confirmed yet, or duplicate send skipped). The summary message was still sent.";
+    }
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "ROOM_UNIT_DETAILS_SENT_WHATSAPP",
+    entityType: "RoomUnit",
+    entityId: unit.id,
+    metadata: { date: dateKey, toPhone, bookingId: booking?.id ?? null }
+  });
+
+  const params: Record<string, string> = { whatsappSent: "1" };
+  if (invoiceNotice) params.invoiceNotice = invoiceNotice;
+  redirectInvoice(params);
 });
 
 adminRouter.get("/ai-analytics", requireAuth, async (req, res) => {
@@ -575,6 +5524,129 @@ adminRouter.get("/ai-analytics", requireAuth, async (req, res) => {
   <tbody>${rows || '<tr><td colspan="3">No AI intent activity in selected range.</td></tr>'}</tbody>
 </table>`;
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/offers", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const offers = readOffers().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const createdNotice = req.query.created ? '<p class="badge ok">Offer created.</p>' : "";
+  const toggledNotice = req.query.toggled ? '<p class="badge ok">Offer status updated.</p>' : "";
+
+  const rows = offers
+    .map((offer) => {
+      const details: string[] = [];
+      if (offer.type === "STAY_X_GET_Y_FREE") details.push(`Stay ${offer.stayX ?? "-"} get ${offer.stayY ?? "-"}`);
+      if (offer.type === "EARLY_BOOKING") details.push(`Min ${offer.minDaysBeforeCheckIn ?? "-"} days in advance`);
+      if (offer.type === "LONG_STAY") details.push(`Min ${offer.minNights ?? "-"} nights`);
+      if (offer.type === "SEASONAL") details.push(`${offer.seasonStart ?? "-"} to ${offer.seasonEnd ?? "-"}`);
+      if (offer.type === "CORPORATE_RATE") details.push("Corporate guests");
+      return `<tr>
+      <td>${escapeHtml(offer.title)}</td>
+      <td>${escapeHtml(offer.code)}</td>
+      <td>${escapeHtml(offer.type)}</td>
+      <td>${offer.discountPercent}%</td>
+      <td>${escapeHtml(details.join(" • ") || "-")}</td>
+      <td><span class="badge ${offer.isActive ? "ok" : "pending"}">${offer.isActive ? "Active" : "Inactive"}</span></td>
+      <td>
+        <form method="post" action="/admin/offers/${encodeURIComponent(offer.id)}/toggle" style="margin:0">
+          <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:${offer.isActive ? "#fee2e2" : "#dcfce7"}; color:${offer.isActive ? "#991b1b" : "#166534"}; font-weight:700; cursor:pointer">${offer.isActive ? "Disable" : "Enable"}</button>
+        </form>
+      </td>
+      </tr>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Offer Management</h2>
+<p class="muted">Create and manage promotional offers for room pricing.</p>
+${createdNotice}${toggledNotice}
+<section style="margin-bottom:14px">
+  <h3>Create Offer</h3>
+  <form method="post" action="/admin/offers" style="display:grid; gap:10px">
+    <div class="grid-2">
+      <label>Title<br /><input type="text" name="title" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Code<br /><input type="text" name="code" required placeholder="SUMMER_20" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Offer type
+        <select name="type" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">
+          <option value="PERCENTAGE_DISCOUNT">Percentage discounts</option>
+          <option value="STAY_X_GET_Y_FREE">Stay X nights get Y free</option>
+          <option value="EARLY_BOOKING">Early booking discounts</option>
+          <option value="LONG_STAY">Long stay discounts</option>
+          <option value="SEASONAL">Seasonal offers</option>
+          <option value="CORPORATE_RATE">Corporate rates</option>
+        </select>
+      </label>
+      <label>Discount %<br /><input type="number" min="0" max="90" step="0.1" name="discountPercent" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Stay X (for Stay X Get Y)<br /><input type="number" min="1" name="stayX" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Get Y free<br /><input type="number" min="1" name="stayY" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Min days before check-in (Early booking)<br /><input type="number" min="1" name="minDaysBeforeCheckIn" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Min nights (Long stay)<br /><input type="number" min="1" name="minNights" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Season start<br /><input type="date" name="seasonStart" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Season end<br /><input type="date" name="seasonEnd" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    </div>
+    <label style="display:flex; gap:8px; align-items:center"><input type="checkbox" name="corporateOnly" /> Corporate only</label>
+    <button type="submit" style="width:max-content; padding:9px 14px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Create offer</button>
+  </form>
+</section>
+<section>
+  <h3>Existing Offers</h3>
+  <table>
+    <thead><tr><th>Title</th><th>Code</th><th>Type</th><th>Discount</th><th>Conditions</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7">No offers yet.</td></tr>'}</tbody>
+  </table>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/offers", requirePermission("ROOMS", "CREATE"), async (req, res) => {
+  const title = String(req.body.title ?? "").trim();
+  const code = String(req.body.code ?? "").trim().toUpperCase();
+  const type = String(req.body.type ?? "PERCENTAGE_DISCOUNT") as OfferType;
+  const validTypes: OfferType[] = [
+    "PERCENTAGE_DISCOUNT",
+    "STAY_X_GET_Y_FREE",
+    "EARLY_BOOKING",
+    "LONG_STAY",
+    "SEASONAL",
+    "CORPORATE_RATE"
+  ];
+  if (!title || !code || !validTypes.includes(type)) {
+    res.status(400).type("html").send(renderLayout("<h2>Offer Management</h2><p>Invalid offer input.</p>", true));
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const offers = readOffers();
+  offers.push({
+    id: crypto.randomUUID(),
+    title,
+    code,
+    type,
+    discountPercent: clamp(parseNumberInput(req.body.discountPercent, 0), 0, 90),
+    stayX: parseIntegerInput(req.body.stayX, 0) || undefined,
+    stayY: parseIntegerInput(req.body.stayY, 0) || undefined,
+    minDaysBeforeCheckIn: parseIntegerInput(req.body.minDaysBeforeCheckIn, 0) || undefined,
+    minNights: parseIntegerInput(req.body.minNights, 0) || undefined,
+    seasonStart: String(req.body.seasonStart ?? "").trim() || undefined,
+    seasonEnd: String(req.body.seasonEnd ?? "").trim() || undefined,
+    corporateOnly: req.body.corporateOnly === "on",
+    isActive: true,
+    createdAt: nowIso,
+    updatedAt: nowIso
+  });
+  writeOffers(offers);
+  res.redirect("/admin/offers?created=1");
+});
+
+adminRouter.post("/offers/:id/toggle", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const offerId = String(req.params.id ?? "");
+  const offers = readOffers();
+  const idx = offers.findIndex((o) => o.id === offerId);
+  if (idx < 0) {
+    res.redirect("/admin/offers");
+    return;
+  }
+  offers[idx] = { ...offers[idx], isActive: !offers[idx].isActive, updatedAt: new Date().toISOString() };
+  writeOffers(offers);
+  res.redirect("/admin/offers?toggled=1");
 });
 
 adminRouter.get("/booking-funnel", requireAuth, async (req, res) => {
@@ -719,22 +5791,38 @@ adminRouter.get("/routing-health", requireAuth, async (req, res) => {
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/rooms", requireAuth, async (req, res) => {
+adminRouter.get("/rooms", requirePermission("ROOMS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
     where: { slug: "al-ashkhara-beach-resort" },
-    include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
+    include: {
+      roomTypes: {
+        where: { isActive: true },
+        orderBy: { name: "asc" },
+        include: { roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+      }
+    }
   });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Rooms</h2><p>No hotel data found.</p>", true));
     return;
   }
 
+  const canEditStructure = isPlatformOwnerEmail(getSession(req)?.email);
+  const structureNote = canEditStructure
+    ? ""
+    : '<p class="badge pending" style="margin:8px 0">Physical room units can only be added or changed by the platform owner (same login as <code>ADMIN_EMAIL</code>).</p>';
+
   const season = req.query.season === "high" ? "high" : "low";
   const info = req.query.saved ? '<p class="badge ok">Room settings saved.</p>' : "";
+  const unitSavedInfo = req.query.unitSaved ? '<p class="badge ok">Room units updated.</p>' : "";
   const offerInfo = req.query.offer ? '<p class="badge ok">Offer scheme applied.</p>' : "";
   const seasonInfo = req.query.seasonApplied
     ? `<p class="badge ok">${season === "high" ? "High" : "Low"} season rates applied.</p>`
     : "";
+  const offers = readOffers().filter((offer) => offer.isActive);
+  const offerOptions = offers
+    .map((offer) => `<option value="${escapeHtml(offer.code)}">${escapeHtml(offer.title)} (${escapeHtml(offer.type)})</option>`)
+    .join("");
   const roomOptions = hotel.roomTypes
     .map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`)
     .join("");
@@ -751,7 +5839,7 @@ adminRouter.get("/rooms", requireAuth, async (req, res) => {
       </td>
       <td>${Number((room.baseNightlyRate * (1 - tourOperatorDiscount)).toFixed(2))}</td>
       <td>
-          <input type="number" min="0" name="totalInventory" value="${room.totalInventory}" style="width:90px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+          <span style="display:inline-block; min-width:48px; padding:8px; background:#f1f5f9; border-radius:8px; font-weight:600">${room.totalInventory}</span>
       </td>
       <td>
           <label style="display:flex; gap:6px; align-items:center"><input type="checkbox" name="isActive" ${room.isActive ? "checked" : ""} /> Active</label>
@@ -763,16 +5851,72 @@ adminRouter.get("/rooms", requireAuth, async (req, res) => {
       </tr>`
     )
     .join("");
+  const unitWarnings = hotel.roomTypes
+    .filter((room) => room.roomUnits.filter((unit) => unit.isActive).length < room.totalInventory)
+    .map(
+      (room) =>
+        `<p class="badge alert" style="margin:6px 0">Warning: ${escapeHtml(room.name)} has ${room.roomUnits.filter((u) => u.isActive).length} active units but inventory is ${room.totalInventory}.</p>`
+    )
+    .join("");
+  const unitSections = hotel.roomTypes
+    .map((room) => {
+      const units = room.roomUnits;
+      const unitRows = units.length
+        ? units
+            .map(
+              (unit) => `<tr>
+          <td>${escapeHtml(unit.name)}</td>
+          <td>${unit.sortOrder ?? "-"}</td>
+          <td>${unit.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge pending">Disabled</span>'}</td>
+          <td style="display:flex; gap:8px; flex-wrap:wrap">
+            ${
+              canEditStructure
+                ? `<form method="post" action="/admin/rooms/units/${encodeURIComponent(unit.id)}/rename" style="display:flex; gap:8px">
+              <input name="name" required value="${escapeHtml(unit.name)}" style="width:130px; padding:7px; border:1px solid #d8dee6; border-radius:8px" />
+              <input type="number" name="sortOrder" value="${unit.sortOrder ?? ""}" placeholder="Order" style="width:90px; padding:7px; border:1px solid #d8dee6; border-radius:8px" />
+              <button type="submit" style="padding:7px 11px; border:0; border-radius:8px; background:#0b6e6e; color:#fff">Save</button>
+            </form>
+            <form method="post" action="/admin/rooms/units/${encodeURIComponent(unit.id)}/toggle">
+              <button type="submit" style="padding:7px 11px; border:0; border-radius:8px; background:${unit.isActive ? "#ef4444" : "#128c7e"}; color:#fff">${
+                unit.isActive ? "Disable" : "Enable"
+              }</button>
+            </form>`
+                : '<span class="muted" style="font-size:12px">—</span>'
+            }
+          </td>
+        </tr>`
+            )
+            .join("")
+        : '<tr><td colspan="4">No units added yet.</td></tr>';
+      const addUnitForms = canEditStructure
+        ? `<form method="post" action="/admin/rooms/${encodeURIComponent(room.id)}/units/add" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px">
+          <input name="name" placeholder="Unit name (e.g. N7)" required style="padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+          <input type="number" name="sortOrder" placeholder="Sort order" style="width:110px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+          <button type="submit" style="padding:8px 12px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Add Unit</button>
+        </form>
+        <form method="post" action="/admin/rooms/${encodeURIComponent(room.id)}/units/bulk" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px">
+          <input name="prefix" placeholder="Prefix (e.g. N)" style="width:120px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+          <input type="number" min="1" name="start" placeholder="Start" style="width:90px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+          <input type="number" min="1" name="count" placeholder="Count" required style="width:90px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+          <button type="submit" style="padding:8px 12px; border:0; border-radius:8px; background:#075e54; color:#fff">Bulk Generate</button>
+        </form>`
+        : "";
+      return `<section style="margin-top:14px; border:1px solid #e6edf3; border-radius:12px; padding:12px">
+        <h4 style="margin:0 0 8px">${escapeHtml(room.name)} units</h4>
+        ${addUnitForms}
+        <table>
+          <thead><tr><th>Name</th><th>Sort</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>${unitRows}</tbody>
+        </table>
+      </section>`;
+    })
+    .join("");
 
   const content = `
 <h2>Rooms & Pricing</h2>
-<p class="muted">Edit room availability, nightly pricing, and quickly apply offer schemes.</p>
+<p class="muted">Edit room availability, nightly pricing, and quickly apply offer schemes. Physical room totals per category are set in the <strong>platform owner</strong> console under Room capacity (not here).</p>
 ${info}${offerInfo}${seasonInfo}
-<div class="actions">
-  <a class="btn-link primary" href="/admin/inventory">Open Inventory by Date</a>
-  <a class="btn-link" href="/admin/calendar">Open Calendar View</a>
-  <a class="btn-link" href="/admin/bookings">See Booking Report</a>
-</div>
+${unitSavedInfo}
 <section style="margin-bottom:14px">
   <h3>Apply Seasonal Rate Set</h3>
   <form method="post" action="/admin/rooms/season" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
@@ -791,34 +5935,43 @@ ${info}${offerInfo}${seasonInfo}
       <option value="ALL">All room types</option>
       ${roomOptions}
     </select>
-    <select name="offerCode" style="padding:9px; border:1px solid #d8dee6; border-radius:8px">
-      <option value="TOUR_OPERATOR_15">Tour Operator (15% off)</option>
-      <option value="WEEKDAY_SAVER">Weekday Saver (10% off)</option>
-      <option value="FLASH_24H">Flash 24h Offer (20% off)</option>
-    </select>
+    <select name="offerCode" style="padding:9px; border:1px solid #d8dee6; border-radius:8px">${offerOptions}</select>
     <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
   </form>
+  <p class="muted" style="margin-top:8px"><a class="inline-link" href="/admin/offers">Manage offers</a> to create percentage, stay-x-get-y, early booking, long stay, seasonal, and corporate rates.</p>
 </section>
 <table>
   <thead>
     <tr><th>Room Type</th><th>Capacity</th><th>High (${escapeHtml(hotel.currency)})</th><th>Low (${escapeHtml(
       hotel.currency
-    )})</th><th>Base/Edit Rate</th><th>Tour Operator (${escapeHtml(hotel.currency)})</th><th>Inventory</th><th>Status</th><th>Action</th></tr>
+    )})</th><th>Base/Edit Rate</th><th>Tour Operator (${escapeHtml(hotel.currency)})</th><th>Room cap (owner)</th><th>Status</th><th>Action</th></tr>
   </thead>
   <tbody>${roomRows || '<tr><td colspan="9">No room types found.</td></tr>'}</tbody>
-</table>`;
+</table>
+<section style="margin-top:14px">
+  <h3>Room Units</h3>
+  <p class="muted">Manage real units (N7, N8...) per room type. This does not change inventory logic.</p>
+  ${structureNote}
+  ${unitWarnings}
+  ${unitSections}
+</section>`;
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/rooms/update/:roomTypeId", requireAuth, async (req, res) => {
+adminRouter.post("/rooms/update/:roomTypeId", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/rooms");
     return;
   }
   const roomTypeId = String(req.params.roomTypeId ?? "");
+  const existingRt = await prisma.roomType.findFirst({ where: { id: roomTypeId, hotelId: hotel.id } });
+  if (!existingRt) {
+    res.redirect("/admin/rooms");
+    return;
+  }
   const baseNightlyRate = Math.max(0, parseNumberInput(req.body.baseNightlyRate, 0));
-  const totalInventory = Math.max(0, parseIntegerInput(req.body.totalInventory, 0));
+  const totalInventory = existingRt.totalInventory;
   const isActive = req.body.isActive === "on";
 
   await prisma.roomType.updateMany({
@@ -836,7 +5989,82 @@ adminRouter.post("/rooms/update/:roomTypeId", requireAuth, async (req, res) => {
   res.redirect("/admin/rooms?saved=1");
 });
 
-adminRouter.post("/rooms/season", requireAuth, async (req, res) => {
+adminRouter.post("/rooms/:roomTypeId/units/add", requirePermission("ROOMS", "MANAGE"), requirePlatformOwner, async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/rooms");
+    return;
+  }
+  const roomTypeId = String(req.params.roomTypeId ?? "");
+  const name = String(req.body.name ?? "").trim();
+  if (!name) {
+    res.redirect("/admin/rooms");
+    return;
+  }
+  const sortOrderInput = String(req.body.sortOrder ?? "").trim();
+  const sortOrder = sortOrderInput ? parseIntegerInput(sortOrderInput, 0) : null;
+  await prisma.roomUnit.create({
+    data: {
+      hotelId: hotel.id,
+      roomTypeId,
+      name,
+      sortOrder
+    }
+  });
+  res.redirect("/admin/rooms?unitSaved=1");
+});
+
+adminRouter.post("/rooms/:roomTypeId/units/bulk", requirePermission("ROOMS", "MANAGE"), requirePlatformOwner, async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/rooms");
+    return;
+  }
+  const roomTypeId = String(req.params.roomTypeId ?? "");
+  const prefix = String(req.body.prefix ?? "").trim();
+  const start = Math.max(1, parseIntegerInput(req.body.start, 1));
+  const count = Math.max(1, parseIntegerInput(req.body.count, 1));
+  const names = Array.from({ length: count }, (_, index) => `${prefix}${start + index}`.trim()).filter(Boolean);
+  const existing = await prisma.roomUnit.findMany({
+    where: { roomTypeId, name: { in: names } },
+    select: { name: true }
+  });
+  const existingNames = new Set(existing.map((row) => row.name));
+  const createRows = names.filter((name) => !existingNames.has(name)).map((name, index) => ({ hotelId: hotel.id, roomTypeId, name, sortOrder: start + index }));
+  if (createRows.length) {
+    await prisma.roomUnit.createMany({ data: createRows });
+  }
+  res.redirect("/admin/rooms?unitSaved=1");
+});
+
+adminRouter.post("/rooms/units/:id/rename", requirePermission("ROOMS", "MANAGE"), requirePlatformOwner, async (req, res) => {
+  const unitId = String(req.params.id ?? "");
+  const name = String(req.body.name ?? "").trim();
+  const sortOrderInput = String(req.body.sortOrder ?? "").trim();
+  const sortOrder = sortOrderInput ? parseIntegerInput(sortOrderInput, 0) : null;
+  if (!unitId || !name) {
+    res.redirect("/admin/rooms");
+    return;
+  }
+  await prisma.roomUnit.update({
+    where: { id: unitId },
+    data: { name, sortOrder }
+  });
+  res.redirect("/admin/rooms?unitSaved=1");
+});
+
+adminRouter.post("/rooms/units/:id/toggle", requirePermission("ROOMS", "MANAGE"), requirePlatformOwner, async (req, res) => {
+  const unitId = String(req.params.id ?? "");
+  const current = await prisma.roomUnit.findUnique({ where: { id: unitId }, select: { isActive: true } });
+  if (!current) {
+    res.redirect("/admin/rooms");
+    return;
+  }
+  await prisma.roomUnit.update({ where: { id: unitId }, data: { isActive: !current.isActive } });
+  res.redirect("/admin/rooms?unitSaved=1");
+});
+
+adminRouter.post("/rooms/season", requirePermission("ROOMS", "MANAGE"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/rooms");
@@ -870,7 +6098,7 @@ adminRouter.post("/rooms/season", requireAuth, async (req, res) => {
   res.redirect(`/admin/rooms?season=${season}&seasonApplied=1`);
 });
 
-adminRouter.post("/rooms/offers", requireAuth, async (req, res) => {
+adminRouter.post("/rooms/offers", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/rooms");
@@ -879,16 +6107,16 @@ adminRouter.post("/rooms/offers", requireAuth, async (req, res) => {
 
   const offerCode = String(req.body.offerCode ?? "");
   const targetRoomId = String(req.body.targetRoomId ?? "ALL");
-  const discountMap: Record<string, number> = {
-    TOUR_OPERATOR_15: tourOperatorDiscount,
-    WEEKDAY_SAVER: 0.1,
-    FLASH_24H: 0.2
-  };
-  const discount = discountMap[offerCode];
-  if (!discount) {
+  const offer = readOffers().find((entry) => entry.code === offerCode && entry.isActive);
+  if (!offer) {
     res.redirect("/admin/rooms");
     return;
   }
+  const computedDiscount =
+    offer.type === "STAY_X_GET_Y_FREE" && (offer.stayX ?? 0) > 0 && (offer.stayY ?? 0) > 0
+      ? (offer.stayY ?? 0) / ((offer.stayX ?? 0) + (offer.stayY ?? 0))
+      : offer.discountPercent / 100;
+  const discount = clamp(computedDiscount, 0, 0.9);
 
   const roomTypes = await prisma.roomType.findMany({
     where: {
@@ -912,7 +6140,17 @@ adminRouter.post("/rooms/offers", requireAuth, async (req, res) => {
     entityId: targetRoomId !== "ALL" ? targetRoomId : undefined,
     metadata: {
       offerCode,
+      offerType: offer.type,
       discount,
+      condition: {
+        stayX: offer.stayX,
+        stayY: offer.stayY,
+        minDaysBeforeCheckIn: offer.minDaysBeforeCheckIn,
+        minNights: offer.minNights,
+        seasonStart: offer.seasonStart,
+        seasonEnd: offer.seasonEnd,
+        corporateOnly: offer.corporateOnly ?? false
+      },
       affectedRoomTypeIds: roomTypes.map((room) => room.id)
     }
   });
@@ -920,13 +6158,13 @@ adminRouter.post("/rooms/offers", requireAuth, async (req, res) => {
   res.redirect("/admin/rooms?offer=1");
 });
 
-adminRouter.get("/inventory", requireAuth, async (req, res) => {
+adminRouter.get("/inventory", requirePermission("ROOMS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
     where: { slug: "al-ashkhara-beach-resort" },
     include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
   });
   if (!hotel) {
-    res.type("html").send(renderLayout("<h2>Inventory</h2><p>No hotel data found.</p>", true));
+    res.type("html").send(renderLayout("<h2>Room Availability</h2><p>No hotel data found.</p>", true));
     return;
   }
 
@@ -940,7 +6178,7 @@ adminRouter.get("/inventory", requireAuth, async (req, res) => {
   });
   const inventoryMap = new Map<string, (typeof inventoryRows)[number]>();
   for (const row of inventoryRows) {
-    inventoryMap.set(`${row.roomTypeId}_${formatDate(row.date)}`, row);
+    inventoryMap.set(`${row.roomTypeId}_${formatDateForInput(row.date)}`, row);
   }
 
   const info = req.query.saved ? '<p class="badge ok">Inventory updated.</p>' : "";
@@ -948,18 +6186,20 @@ adminRouter.get("/inventory", requireAuth, async (req, res) => {
     .map((room) => {
       const cells = dates
         .map((date) => {
-          const dateKey = formatDate(date);
+          const dateKey = formatDateForInput(date);
           const inv = inventoryMap.get(`${room.id}_${dateKey}`);
-          const total = inv?.total ?? room.totalInventory;
+          const bookableTotal = inv?.total ?? room.totalInventory;
           const reserved = inv?.reserved ?? 0;
           const closedOut = inv?.closedOut ?? false;
           return `<td>
           <form method="post" action="/admin/inventory/update" style="display:grid; gap:6px">
             <input type="hidden" name="roomTypeId" value="${escapeHtml(room.id)}" />
             <input type="hidden" name="date" value="${dateKey}" />
-            <input type="hidden" name="start" value="${formatDate(start)}" />
+            <input type="hidden" name="start" value="${formatDateForInput(start)}" />
             <input type="hidden" name="days" value="${days}" />
-            <label style="font-size:12px; color:#5f6b7a">Total <input type="number" min="0" name="total" value="${total}" style="width:100%; padding:6px; border:1px solid #d8dee6; border-radius:7px" /></label>
+            <label style="font-size:12px; color:#5f6b7a">Bookable (max ${room.totalInventory})
+              <input type="number" min="0" max="${room.totalInventory}" name="total" value="${bookableTotal}" style="width:100%; padding:6px; border:1px solid #d8dee6; border-radius:7px" />
+            </label>
             <label style="font-size:12px; color:#5f6b7a">Reserved <input type="number" min="0" name="reserved" value="${reserved}" style="width:100%; padding:6px; border:1px solid #d8dee6; border-radius:7px" /></label>
             <label style="font-size:12px; display:flex; gap:6px; align-items:center"><input type="checkbox" name="closedOut" ${closedOut ? "checked" : ""} /> Closed</label>
             <button type="submit" style="padding:6px 10px; border:0; border-radius:7px; background:#25d366; color:#083d2d; font-weight:700">Save</button>
@@ -973,16 +6213,11 @@ adminRouter.get("/inventory", requireAuth, async (req, res) => {
 
   const header = dates.map((date) => `<th>${formatDate(date)}</th>`).join("");
   const content = `
-<h2>Inventory Control</h2>
-<p class="muted">Adjust room availability by date, including reserved count and close-out dates.</p>
+<h2>Room Availability</h2>
+<p class="muted">Set <strong>bookable</strong> rooms per day (up to the owner-defined cap), reserved counts, and close-outs. To change the maximum rooms per category, the platform owner uses <strong>Room capacity</strong> under <code>/owner</code>.</p>
 ${info}
-<div class="actions">
-  <a class="btn-link primary" href="/admin/calendar?start=${formatDate(start)}&days=${days}">Open Calendar for Range</a>
-  <a class="btn-link" href="/admin/rooms">Edit Room Rates</a>
-  <a class="btn-link" href="/admin/bookings?start=${formatDate(start)}&end=${formatDate(addDays(start, days - 1))}">Open Report for Range</a>
-</div>
 <form method="get" action="/admin/inventory" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
-  <label>Start <input type="date" name="start" value="${formatDate(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>Start <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
   <label>Days <input type="number" min="3" max="21" name="days" value="${days}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px; width:90px" /></label>
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Filter</button>
 </form>
@@ -993,7 +6228,7 @@ ${info}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/inventory/update", requireAuth, async (req, res) => {
+adminRouter.post("/inventory/update", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/inventory");
@@ -1002,8 +6237,6 @@ adminRouter.post("/inventory/update", requireAuth, async (req, res) => {
 
   const roomTypeId = String(req.body.roomTypeId ?? "");
   const date = parseDateInput(req.body.date, startOfDay(new Date()));
-  const total = Math.max(0, parseIntegerInput(req.body.total, 0));
-  const reserved = clamp(parseIntegerInput(req.body.reserved, 0), 0, total);
   const closedOut = req.body.closedOut === "on";
 
   const roomType = await prisma.roomType.findFirst({ where: { id: roomTypeId, hotelId: hotel.id } });
@@ -1011,6 +6244,11 @@ adminRouter.post("/inventory/update", requireAuth, async (req, res) => {
     res.redirect("/admin/inventory");
     return;
   }
+
+  const cap = roomType.totalInventory;
+  const requestedTotal = Math.max(0, parseIntegerInput(req.body.total, 0));
+  const total = Math.min(requestedTotal, cap);
+  const reserved = clamp(parseIntegerInput(req.body.reserved, 0), 0, total);
 
   await prisma.inventory.upsert({
     where: { roomTypeId_date: { roomTypeId: roomType.id, date } },
@@ -1033,12 +6271,112 @@ adminRouter.post("/inventory/update", requireAuth, async (req, res) => {
     metadata: { roomTypeId: roomType.id, date: formatDate(date), total, reserved, closedOut }
   });
 
-  const start = encodeURIComponent(String(req.body.start ?? formatDate(startOfDay(new Date()))));
+  const start = encodeURIComponent(String(req.body.start ?? formatDateForInput(startOfDay(new Date()))));
   const days = encodeURIComponent(String(req.body.days ?? "7"));
   res.redirect(`/admin/inventory?start=${start}&days=${days}&saved=1`);
 });
 
-adminRouter.get("/bookings", requireAuth, async (req, res) => {
+adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Find booking</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const digitsOnly = qRaw.replace(/\D/g, "");
+  const skipAutoRedirect = req.query.noredirect === "1";
+  const queryOk = qRaw.length >= 2 || digitsOnly.length >= 3;
+
+  const bookings = queryOk
+    ? await prisma.booking.findMany({
+        where: {
+          hotelId: hotel.id,
+          OR: (() => {
+            const or: Prisma.BookingWhereInput[] = [];
+            if (qRaw.length >= 2) {
+              or.push({ id: { contains: qRaw } });
+              or.push({ guest: { fullName: { contains: qRaw } } });
+            }
+            if (digitsOnly.length >= 3) {
+              or.push({ guest: { phoneE164: { contains: digitsOnly } } });
+              if (!qRaw.includes("+") && digitsOnly.length >= 8) {
+                or.push({ guest: { phoneE164: { contains: `+${digitsOnly}` } } });
+              }
+            }
+            return or;
+          })()
+        },
+        include: { roomType: true, guest: true, roomUnit: { select: { name: true } } },
+        orderBy: [{ checkIn: "desc" }],
+        take: 50
+      })
+    : [];
+
+  if (queryOk && bookings.length === 1 && !skipAutoRedirect) {
+    res.redirect(`/admin/bookings/${encodeURIComponent(bookings[0].id)}`);
+    return;
+  }
+
+  const errMsg =
+    qRaw.length > 0 && !queryOk
+      ? '<p class="badge" style="background:#fef9c3;color:#854d0e;border-radius:8px;padding:8px 12px">Enter at least 2 characters, or 3+ digits for phone search.</p>'
+      : "";
+  const noResults =
+    queryOk && bookings.length === 0
+      ? '<p class="badge" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px">No bookings matched. Try booking ID, guest name, or phone.</p>'
+      : "";
+  const multiHint =
+    queryOk && bookings.length > 1
+      ? `<p class="muted" style="margin:0 0 8px">${bookings.length} matches — open the correct row below. <a class="inline-link" href="/admin/bookings/search?q=${encodeURIComponent(qRaw)}&noredirect=1">Pin this list</a> (no auto-open).</p>`
+      : "";
+
+  const rows = bookings
+    .map(
+      (b) => `<tr>
+      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(b.id)}</a></td>
+      <td>${escapeHtml(b.guest.fullName ?? "—")}</td>
+      <td>${escapeHtml(b.guest.phoneE164)}</td>
+      <td>${escapeHtml(b.roomType.name)}</td>
+      <td>${b.roomUnit?.name ? escapeHtml(b.roomUnit.name) : '<span class="badge pending">—</span>'}</td>
+      <td>${formatDate(b.checkIn)}</td>
+      <td>${formatDate(b.checkOut)}</td>
+      <td><span class="badge ${getBadgeClass(b.status)}">${escapeHtml(b.status)}</span></td>
+      <td><span class="badge ${getBadgeClass(b.paymentStatus)}">${escapeHtml(b.paymentStatus)}</span></td>
+      <td><a class="btn-link primary" style="padding:6px 10px;font-size:13px" href="/admin/bookings/${encodeURIComponent(b.id)}">Open details</a></td>
+    </tr>`
+    )
+    .join("");
+
+  const content = `
+<h2>Find booking</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Search by <strong>booking / reservation ID</strong>, <strong>guest name</strong>, or <strong>phone</strong>. A single match opens the booking page automatically.</p>
+${errMsg}${noResults}${multiHint}
+<form method="get" action="/admin/bookings/search" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:16px; max-width:640px">
+  <label style="flex:1; min-width:220px">Search
+    <input type="search" name="q" value="${escapeHtml(qRaw)}" autocomplete="off" placeholder="e.g. WS-…, guest name, or phone" style="width:100%; margin-top:4px; padding:10px 12px; border:1px solid #d8dee6; border-radius:10px" autofocus />
+  </label>
+  <button type="submit" style="padding:10px 18px; border:0; border-radius:10px; background:#128c7e; color:#fff; font-weight:700">Search</button>
+  <a class="btn-link" href="/admin/bookings">Booking report</a>
+  <a class="btn-link" href="/admin/room-board">Room board</a>
+</form>
+${
+  queryOk && bookings.length > 0
+    ? `<table>
+  <thead><tr><th>Booking ID</th><th>Guest</th><th>Phone</th><th>Room type</th><th>Unit</th><th>Check-in</th><th>Check-out</th><th>Booking</th><th>Payment</th><th></th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>`
+    : queryOk
+      ? ""
+      : '<p class="muted">Tip: paste the WhatsStay booking ID, type part of the guest name, or enter mobile digits (with or without country code).</p>'
+}`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Bookings</h2><p>No hotel data found.</p>", true));
@@ -1047,8 +6385,9 @@ adminRouter.get("/bookings", requireAuth, async (req, res) => {
 
   const now = startOfDay(new Date());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const defaultEndInclusive = defaultBookingReportInclusiveEnd(now);
   const start = parseDateInput(req.query.start, monthStart);
-  const end = parseDateInput(req.query.end, now);
+  const end = parseDateInput(req.query.end, defaultEndInclusive);
   const endExclusive = addDays(end, 1);
   const status = typeof req.query.status === "string" ? req.query.status : "ALL";
   const allowedStatuses: BookingStatus[] = [
@@ -1061,13 +6400,29 @@ adminRouter.get("/bookings", requireAuth, async (req, res) => {
     ? (status as BookingStatus)
     : null;
 
+  const paymentStatusParam = typeof req.query.paymentStatus === "string" ? req.query.paymentStatus.trim() : "ALL";
+  const allPaymentFilterValues: PaymentStatus[] = [
+    PaymentStatus.REQUIRES_ACTION,
+    PaymentStatus.PENDING,
+    PaymentStatus.SUCCEEDED,
+    PaymentStatus.FAILED,
+    PaymentStatus.REFUNDED,
+    PaymentStatus.LPO,
+    PaymentStatus.FRIENDS_TRANSFER
+  ];
+  const selectedPaymentStatus: PaymentStatus | null =
+    paymentStatusParam !== "ALL" && allPaymentFilterValues.includes(paymentStatusParam as PaymentStatus)
+      ? (paymentStatusParam as PaymentStatus)
+      : null;
+
   const bookings = await prisma.booking.findMany({
     where: {
       hotelId: hotel.id,
       checkIn: { gte: start, lt: endExclusive },
-      ...(selectedStatus ? { status: selectedStatus } : {})
+      ...(selectedStatus ? { status: selectedStatus } : {}),
+      ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
     },
-    include: { roomType: true, guest: true },
+    include: { roomType: true, guest: true, conversation: { select: { id: true } }, roomUnit: { select: { name: true } } },
     orderBy: { checkIn: "asc" }
   });
 
@@ -1079,33 +6434,44 @@ adminRouter.get("/bookings", requireAuth, async (req, res) => {
   const confirmed = bookings.filter((booking) => booking.status === "CONFIRMED").length;
   const pending = bookings.filter((booking) => booking.status === "PENDING").length;
   const cancelled = bookings.filter((booking) => booking.status === "CANCELLED").length;
+  const whatsappConfirmed = bookings.filter((booking) => booking.status === "CONFIRMED" && Boolean(booking.conversationId)).length;
 
   const rows = bookings
     .map(
-      (booking) => `<tr>
-      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">${escapeHtml(booking.id)}</a></td>
-      <td><a class="inline-link" href="/admin/conversations">${escapeHtml(booking.guest.fullName ?? booking.guest.phoneE164)}</a></td>
+      (booking) => {
+        const sourceLabel = booking.conversationId ? "WhatsApp" : booking.source;
+        const guestName = booking.guest.fullName ?? "-";
+        const rowClass = booking.status === "CONFIRMED" && sourceLabel === "WhatsApp" ? ' class="booking-whatsapp-confirmed"' : "";
+        const unitAssignmentBadge = booking.roomUnitId
+          ? `<span class="badge ok">Unit assigned${booking.roomUnit?.name ? ` (${escapeHtml(booking.roomUnit.name)})` : ""}</span>`
+          : '<span class="badge pending">Pending assignment</span>';
+        return `<tr${rowClass}>
+      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">${escapeHtml(displayBookingReference(booking))}</a></td>
+      <td>${escapeHtml(guestName)}</td>
+      <td>${escapeHtml(booking.guest.phoneE164)}</td>
       <td>${escapeHtml(booking.roomType.name)}</td>
-      <td>${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}</td>
+      <td>${formatDate(booking.checkIn)}</td>
+      <td>${formatDate(booking.checkOut)}</td>
+      <td>${booking.adults}</td>
+      <td>${booking.nights}</td>
       <td>${formatMoney(booking.totalAmount, hotel.currency)}</td>
       <td><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td>
+      <td><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td>
+      <td>${unitAssignmentBadge}</td>
+      <td><span class="badge ${sourceLabel === "WhatsApp" ? "ok" : "pending"}">${escapeHtml(sourceLabel)}</span></td>
       <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Open details</a></td>
       </tr>`
+      }
     )
     .join("");
 
   const content = `
 <h2>Reports & Bookings</h2>
-<p class="muted">Filter performance by date range, booking status, and track revenue trends.</p>
-<div class="actions">
-  <a class="btn-link primary" href="/admin/calendar?start=${formatDate(start)}&days=14">Open Room Calendar</a>
-  <a class="btn-link" href="/admin/inventory?start=${formatDate(start)}&days=7">Adjust Availability</a>
-  <a class="btn-link" href="/admin/billing">Open Billing Details</a>
-</div>
-<form method="get" action="/admin/bookings" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
-  <label>From <input type="date" name="start" value="${formatDate(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
-  <label>To <input type="date" name="end" value="${formatDate(end)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
-  <label>Status
+<p class="muted">Filter performance by date range, booking status, and track revenue trends. Default range uses <strong>check-in from the start of this month through the end of the month three months ahead</strong> so newly confirmed WhatsApp stays (often for future dates) appear without changing dates.</p>
+<form method="get" action="/admin/bookings" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end">
+  <label>From <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>To <input type="date" name="end" value="${formatDateForInput(end)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>Booking status
     <select name="status" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
       <option value="ALL" ${status === "ALL" ? "selected" : ""}>All</option>
       <option value="PENDING" ${status === "PENDING" ? "selected" : ""}>Pending</option>
@@ -1114,27 +6480,1644 @@ adminRouter.get("/bookings", requireAuth, async (req, res) => {
       <option value="NO_SHOW" ${status === "NO_SHOW" ? "selected" : ""}>No Show</option>
     </select>
   </label>
+  <label>Payment status
+    <select name="paymentStatus" style="padding:8px; border:1px solid #d8dee6; border-radius:8px; max-width:220px">
+      <option value="ALL" ${paymentStatusParam === "ALL" ? "selected" : ""}>All</option>
+      <option value="PENDING" ${paymentStatusParam === "PENDING" ? "selected" : ""}>Pending</option>
+      <option value="REQUIRES_ACTION" ${paymentStatusParam === "REQUIRES_ACTION" ? "selected" : ""}>Requires action</option>
+      <option value="LPO" ${paymentStatusParam === "LPO" ? "selected" : ""}>LPO (company PO)</option>
+      <option value="FRIENDS_TRANSFER" ${paymentStatusParam === "FRIENDS_TRANSFER" ? "selected" : ""}>Friends transfer</option>
+      <option value="SUCCEEDED" ${paymentStatusParam === "SUCCEEDED" ? "selected" : ""}>Succeeded</option>
+      <option value="FAILED" ${paymentStatusParam === "FAILED" ? "selected" : ""}>Failed</option>
+      <option value="REFUNDED" ${paymentStatusParam === "REFUNDED" ? "selected" : ""}>Refunded</option>
+    </select>
+  </label>
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
+  <a class="btn-link" href="/admin/bookings/export?start=${encodeURIComponent(formatDateForInput(start))}&end=${encodeURIComponent(formatDateForInput(end))}&status=${encodeURIComponent(status)}&paymentStatus=${encodeURIComponent(paymentStatusParam)}">Export CSV</a>
+  <a class="btn-link" href="/admin/bookings/export?start=${encodeURIComponent(formatDateForInput(start))}&end=${encodeURIComponent(formatDateForInput(end))}&paymentStatus=LPO">Export LPO follow-up</a>
+  <a class="btn-link" href="/admin/bookings/export?start=${encodeURIComponent(formatDateForInput(start))}&end=${encodeURIComponent(formatDateForInput(end))}&paymentStatus=FRIENDS_TRANSFER">Export friends transfer</a>
 </form>
 <div class="grid-4">
-  <article class="stat"><h3>Total bookings</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDate(start)}&end=${formatDate(end)}&status=ALL">${bookings.length}</a></p></article>
-  <article class="stat"><h3>Confirmed</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDate(start)}&end=${formatDate(end)}&status=CONFIRMED">${confirmed}</a></p></article>
-  <article class="stat"><h3>Pending / Cancelled</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDate(start)}&end=${formatDate(end)}&status=PENDING">${pending}</a> / <a class="stat-link" href="/admin/bookings?start=${formatDate(start)}&end=${formatDate(end)}&status=CANCELLED">${cancelled}</a></p></article>
+  <article class="stat"><h3>Total bookings</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=ALL">${bookings.length}</a></p></article>
+  <article class="stat"><h3>Confirmed</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=CONFIRMED">${confirmed}</a></p></article>
+  <article class="stat"><h3>WhatsApp Confirmed</h3><p>${whatsappConfirmed}</p></article>
+  <article class="stat"><h3>Pending / Cancelled</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=PENDING">${pending}</a> / <a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=CANCELLED">${cancelled}</a></p></article>
   <article class="stat"><h3>Revenue</h3><p><a class="stat-link" href="/admin/billing">${formatMoney(revenue, hotel.currency)}</a></p></article>
 </div>
-<p class="muted" style="margin-top:10px">Conversations in range: <strong><a class="inline-link" href="/admin/conversations">${conversationsCount}</a></strong></p>
+<p class="muted" style="margin-top:10px">Conversations in range: <strong><a class="inline-link" href="/admin/conversations?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}">${conversationsCount}</a></strong> (opens conversations filtered by this date range)</p>
+<style>
+  .booking-whatsapp-confirmed { background: #f3fff8; }
+</style>
 <table>
-  <thead><tr><th>Booking ID</th><th>Guest</th><th>Room</th><th>Stay Dates</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="7">No bookings in selected range.</td></tr>'}</tbody>
+  <thead><tr><th>Reference</th><th>Guest Name</th><th>Phone Number</th><th>Room Type</th><th>Check-in</th><th>Check-out</th><th>Guests</th><th>Nights</th><th>Total Amount</th><th>Booking Status</th><th>Payment Status</th><th>Unit Assignment</th><th>Source</th><th>Actions</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="14">No bookings in selected range.</td></tr>'}</tbody>
 </table>`;
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/reports", requireAuth, (_req, res) => {
-  res.redirect("/admin/bookings");
+adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, currency: true } });
+  if (!hotel) {
+    res.status(404).send("Hotel not found");
+    return;
+  }
+  const now = startOfDay(new Date());
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const defaultEndInclusive = defaultBookingReportInclusiveEnd(now);
+  const start = parseDateInput(req.query.start, monthStart);
+  const end = parseDateInput(req.query.end, defaultEndInclusive);
+  const endExclusive = addDays(end, 1);
+  const status = typeof req.query.status === "string" ? req.query.status : "ALL";
+  const allowedStatuses: BookingStatus[] = [
+    BookingStatus.PENDING,
+    BookingStatus.CONFIRMED,
+    BookingStatus.CANCELLED,
+    BookingStatus.NO_SHOW
+  ];
+  const selectedStatus: BookingStatus | null = allowedStatuses.includes(status as BookingStatus) ? (status as BookingStatus) : null;
+  const paymentStatusParam = typeof req.query.paymentStatus === "string" ? req.query.paymentStatus.trim() : "ALL";
+  const allPaymentFilterValues: PaymentStatus[] = [
+    PaymentStatus.REQUIRES_ACTION,
+    PaymentStatus.PENDING,
+    PaymentStatus.SUCCEEDED,
+    PaymentStatus.FAILED,
+    PaymentStatus.REFUNDED,
+    PaymentStatus.LPO,
+    PaymentStatus.FRIENDS_TRANSFER
+  ];
+  const selectedPaymentStatus: PaymentStatus | null =
+    paymentStatusParam !== "ALL" && allPaymentFilterValues.includes(paymentStatusParam as PaymentStatus)
+      ? (paymentStatusParam as PaymentStatus)
+      : null;
+
+  const bookings = await prisma.booking.findMany({
+    where: {
+      hotelId: hotel.id,
+      checkIn: { gte: start, lt: endExclusive },
+      ...(selectedStatus ? { status: selectedStatus } : {}),
+      ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
+    },
+    include: {
+      guest: true,
+      roomType: true,
+      conversation: { select: { id: true } },
+      roomUnit: { select: { name: true } }
+    },
+    orderBy: { checkIn: "asc" }
+  });
+
+  const header = [
+    "Booking ID",
+    "Guest name",
+    "Phone",
+    "Email",
+    "Room type",
+    "Unit",
+    "Check-in",
+    "Check-out",
+    "Nights",
+    "Total amount",
+    "Currency",
+    "Booking status",
+    "Payment status",
+    "Source"
+  ];
+  const lines = [header.map(csvEscapeField).join(",")];
+  for (const b of bookings) {
+    const sourceLabel = b.conversationId ? "WhatsApp" : b.source;
+    lines.push(
+      [
+        b.id,
+        b.guest.fullName ?? "",
+        b.guest.phoneE164,
+        b.guest.email ?? "",
+        b.roomType.name,
+        b.roomUnit?.name ?? "",
+        formatDateForInput(b.checkIn),
+        formatDateForInput(b.checkOut),
+        String(b.nights),
+        String(b.totalAmount),
+        b.currency,
+        b.status,
+        b.paymentStatus,
+        sourceLabel
+      ]
+        .map((cell) => csvEscapeField(String(cell)))
+        .join(",")
+    );
+  }
+  const filename = `bookings-${formatDateForInput(start)}-to-${formatDateForInput(end)}.csv`;
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send("\ufeff" + lines.join("\n"));
 });
 
-adminRouter.get("/bookings/:id", requireAuth, async (req, res) => {
+adminRouter.get("/reports", requirePermission("REPORTS", "VIEW"), (_req, res) => {
+  res.redirect("/admin/reports-center");
+});
+
+adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Reports Center</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const now = startOfDay(new Date());
+  const defaultStart = addDays(now, -29);
+  const defaultEnd = now;
+  const start = parseDateInput(req.query.start, defaultStart);
+  const end = parseDateInput(req.query.end, defaultEnd);
+  const endExclusive = addDays(end, 1);
+  const daysInRange = Math.max(1, Math.round((endExclusive.getTime() - start.getTime()) / (24 * 3600 * 1000)));
+
+  const [bookings, conversations, messages] = await Promise.all([
+    prisma.booking.findMany({
+      where: { hotelId: hotel.id, checkIn: { gte: start, lt: endExclusive } },
+      include: { roomType: true },
+      orderBy: { checkIn: "asc" }
+    }),
+    prisma.conversation.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } },
+      orderBy: { createdAt: "asc" }
+    }),
+    prisma.message.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } },
+      orderBy: { createdAt: "asc" }
+    })
+  ]);
+
+  const revenue = bookings.reduce((sum, b) => sum + b.totalAmount, 0);
+  const totalRoomNights = hotel.roomTypes.reduce((sum, rt) => sum + rt.totalInventory * daysInRange, 0);
+  const bookedRoomNights = bookings.reduce((sum, b) => sum + Math.max(1, b.nights), 0);
+  const occupancyRate = totalRoomNights ? (bookedRoomNights / totalRoomNights) * 100 : 0;
+
+  const bookingsByDay = new Map<string, number>();
+  for (const b of bookings) {
+    const d = formatDateForInput(startOfDay(b.checkIn));
+    bookingsByDay.set(d, (bookingsByDay.get(d) ?? 0) + 1);
+  }
+  const bookingTrendRows = enumerateDates(start, daysInRange)
+    .map((d) => {
+      const key = formatDateForInput(d);
+      return `<tr><td>${key}</td><td>${bookingsByDay.get(key) ?? 0}</td></tr>`;
+    })
+    .join("");
+
+  const roomPerformance = new Map<string, { bookings: number; revenue: number; nights: number }>();
+  for (const b of bookings) {
+    const current = roomPerformance.get(b.roomTypeId) ?? { bookings: 0, revenue: 0, nights: 0 };
+    current.bookings += 1;
+    current.revenue += b.totalAmount;
+    current.nights += Math.max(1, b.nights);
+    roomPerformance.set(b.roomTypeId, current);
+  }
+  const roomPerformanceRows = hotel.roomTypes
+    .map((rt) => {
+      const p = roomPerformance.get(rt.id) ?? { bookings: 0, revenue: 0, nights: 0 };
+      return {
+        name: rt.name,
+        bookings: p.bookings,
+        revenue: p.revenue,
+        nights: p.nights
+      };
+    })
+    .sort((a, b) => b.revenue - a.revenue)
+    .map(
+      (row) => `<tr>
+        <td>${escapeHtml(row.name)}</td>
+        <td>${row.bookings}</td>
+        <td>${row.nights}</td>
+        <td>${formatMoney(row.revenue, hotel.currency)}</td>
+      </tr>`
+    )
+    .join("");
+
+  const inboundMessages = messages.filter((m) => m.direction === "INBOUND").length;
+  const outboundMessages = messages.filter((m) => m.direction === "OUTBOUND").length;
+  const conversationByDay = new Map<string, number>();
+  for (const c of conversations) {
+    const d = formatDateForInput(startOfDay(c.createdAt));
+    conversationByDay.set(d, (conversationByDay.get(d) ?? 0) + 1);
+  }
+  const messageTrendRows = enumerateDates(start, daysInRange)
+    .map((d) => {
+      const key = formatDateForInput(d);
+      return `<tr><td>${key}</td><td>${conversationByDay.get(key) ?? 0}</td></tr>`;
+    })
+    .join("");
+
+  const bestSelling = [...roomPerformance.entries()]
+    .sort((a, b) => b[1].bookings - a[1].bookings)
+    .slice(0, 3)
+    .map(([roomTypeId, v]) => {
+      const room = hotel.roomTypes.find((r) => r.id === roomTypeId);
+      return `${room?.name ?? roomTypeId} (${v.bookings} bookings)`;
+    });
+  const peakDay = [...bookingsByDay.entries()].sort((a, b) => b[1] - a[1])[0];
+  const selectedUnitId = typeof req.query.unitId === "string" ? req.query.unitId : "";
+  const onlyMissingSignature = String(req.query.onlyMissingSignature ?? "") === "1";
+  const onlyMissingIdCopy = String(req.query.onlyMissingIdCopy ?? "") === "1";
+  const onlyMissingTransactionNumber = String(req.query.onlyMissingTransactionNumber ?? "") === "1";
+  const showIncompleteHandoverOnly = String(req.query.showIncompleteHandoverOnly ?? "") === "1";
+  const guestStart = parseDateInput(req.query.guestStart, start);
+  const guestEnd = parseDateInput(req.query.guestEnd, end);
+  const guestStartKey = formatDateForInput(guestStart);
+  const guestEndKey = formatDateForInput(guestEnd);
+  const broadcastNotice = req.query.broadcastSent ? '<p class="badge ok">WhatsApp message sent to selected guests.</p>' : "";
+  const guestLogs = await prisma.auditLog.findMany({
+    where: {
+      hotelId: hotel.id,
+      action: "ROOM_UNIT_GUEST_DETAILS",
+      entityType: "RoomUnit",
+      createdAt: { gte: start, lt: endExclusive }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 500
+  });
+  const latestByUnitDate = new Map<
+    string,
+    {
+      unitId: string;
+      date: string;
+      fullName: string;
+      phone: string;
+      email: string;
+      adults: number;
+      children: number;
+      mealPlan: string;
+      idCardPath: string;
+      handoverId: string;
+      handoverAt: string;
+      handoverBy: string;
+      handoverSignature: string;
+      transactionNumber: string;
+    }
+  >();
+  for (const log of guestLogs) {
+    const m = parseAuditMetadata(log.metadataJson);
+    const unitId = log.entityId ?? "";
+    const date = typeof m.date === "string" ? m.date : "";
+    if (!unitId || !date) continue;
+    const key = `${unitId}::${date}`;
+    if (latestByUnitDate.has(key)) continue;
+    latestByUnitDate.set(key, {
+      unitId,
+      date,
+      fullName: typeof m.fullName === "string" ? m.fullName : "",
+      phone: typeof m.phone === "string" ? m.phone : "",
+      email: typeof m.email === "string" ? m.email : "",
+      adults: typeof m.adults === "number" ? m.adults : 0,
+      children: typeof m.children === "number" ? m.children : 0,
+      mealPlan: typeof m.mealPlan === "string" ? m.mealPlan : "NONE",
+      idCardPath: typeof m.idCardPath === "string" ? m.idCardPath : "",
+      handoverId: typeof m.handoverId === "string" ? m.handoverId : "",
+      handoverAt: typeof m.handoverAt === "string" ? m.handoverAt : "",
+      handoverBy: typeof m.handoverBy === "string" ? m.handoverBy : "",
+      handoverSignature: typeof m.handoverSignature === "string" ? m.handoverSignature : "",
+      transactionNumber: typeof m.transactionNumber === "string" ? m.transactionNumber : ""
+    });
+  }
+  const roomUnits = await prisma.roomUnit.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    select: { id: true, name: true, roomType: { select: { name: true } } },
+    orderBy: [{ roomTypeId: "asc" }, { sortOrder: "asc" }, { name: "asc" }]
+  });
+  const unitNameMap = new Map(roomUnits.map((u) => [u.id, `${u.name} (${u.roomType.name})`]));
+  let guestRowsData = Array.from(latestByUnitDate.values()).filter(
+    (row) => (!selectedUnitId || row.unitId === selectedUnitId) && row.date >= guestStartKey && row.date <= guestEndKey
+  );
+  if (showIncompleteHandoverOnly) {
+    guestRowsData = guestRowsData.filter(
+      (row) => !row.handoverSignature.trim() || !row.idCardPath.trim() || !row.transactionNumber.trim()
+    );
+  }
+  if (onlyMissingSignature) {
+    guestRowsData = guestRowsData.filter((row) => !row.handoverSignature.trim());
+  }
+  if (onlyMissingIdCopy) {
+    guestRowsData = guestRowsData.filter((row) => !row.idCardPath.trim());
+  }
+  if (onlyMissingTransactionNumber) {
+    guestRowsData = guestRowsData.filter((row) => !row.transactionNumber.trim());
+  }
+  guestRowsData = guestRowsData.sort((a, b) => a.date.localeCompare(b.date));
+  const unitFilterOptions = roomUnits
+    .map((u) => `<option value="${escapeHtml(u.id)}" ${u.id === selectedUnitId ? "selected" : ""}>${escapeHtml(`${u.name} (${u.roomType.name})`)}</option>`)
+    .join("");
+  const guestHistoryRows = guestRowsData
+    .map(
+      (row) => `<tr>
+        <td>${escapeHtml(row.date)}</td>
+        <td>${escapeHtml(unitNameMap.get(row.unitId) ?? row.unitId)}</td>
+        <td>${escapeHtml(row.fullName || "—")}</td>
+        <td>${escapeHtml(row.phone || "—")}</td>
+        <td>${escapeHtml(row.email || "—")}</td>
+        <td>${row.adults}</td>
+        <td>${row.children}</td>
+        <td>${escapeHtml(row.mealPlan)}</td>
+        <td>${escapeHtml(row.transactionNumber || "—")}</td>
+        <td>${escapeHtml(row.handoverId || "—")}</td>
+        <td>${escapeHtml(row.handoverAt || "—")}</td>
+        <td>${escapeHtml(row.handoverBy || "—")}</td>
+        <td>${escapeHtml(row.handoverSignature || "—")}</td>
+        <td>${row.idCardPath ? `<a class="inline-link" target="_blank" href="${escapeHtml(row.idCardPath)}">Open ID</a>` : "—"}</td>
+      </tr>`
+    )
+    .join("");
+  const targetPhones = Array.from(new Set(guestRowsData.map((row) => row.phone).filter((phone) => phone.length > 5)));
+
+  const content = `
+<h2>Reports Center</h2>
+<p class="muted">Revenue, occupancy, booking trends, room performance, and messaging analytics in one place.</p>
+${broadcastNotice}
+<form method="get" action="/admin/reports-center" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+  <label>From <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>To <input type="date" name="end" value="${formatDateForInput(end)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
+</form>
+<div class="grid-4">
+  <article class="stat"><h3>Revenue</h3><p>${formatMoney(revenue, hotel.currency)}</p></article>
+  <article class="stat"><h3>Occupancy</h3><p>${occupancyRate.toFixed(1)}%</p></article>
+  <article class="stat"><h3>Total bookings</h3><p>${bookings.length}</p></article>
+  <article class="stat"><h3>Conversations</h3><p>${conversations.length}</p></article>
+</div>
+<div class="grid-2" style="margin-top:12px">
+  <section>
+    <h3>Booking trends</h3>
+    <table>
+      <thead><tr><th>Date</th><th>Bookings</th></tr></thead>
+      <tbody>${bookingTrendRows || '<tr><td colspan="2">No booking trend data.</td></tr>'}</tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Conversation volume trends</h3>
+    <table>
+      <thead><tr><th>Date</th><th>Conversations</th></tr></thead>
+      <tbody>${messageTrendRows || '<tr><td colspan="2">No conversation trend data.</td></tr>'}</tbody>
+    </table>
+    <p class="muted" style="margin-top:8px">Inbound messages: ${inboundMessages} · Outbound messages: ${outboundMessages}</p>
+  </section>
+</div>
+<section style="margin-top:12px">
+  <h3>Room performance</h3>
+  <table>
+    <thead><tr><th>Room type</th><th>Bookings</th><th>Nights</th><th>Revenue</th></tr></thead>
+    <tbody>${roomPerformanceRows || '<tr><td colspan="4">No room performance data.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin-top:12px">
+  <h3>Insights</h3>
+  <table>
+    <tbody>
+      <tr><th>Best selling room types</th><td>${escapeHtml(bestSelling.join(" • ") || "No data yet")}</td></tr>
+      <tr><th>Peak booking period</th><td>${peakDay ? `${escapeHtml(peakDay[0])} (${peakDay[1]} bookings)` : "No data yet"}</td></tr>
+      <tr><th>Conversation volume trend</th><td>${conversations.length > 0 ? `${conversations.length} total conversations in selected range` : "No data yet"}</td></tr>
+    </tbody>
+  </table>
+</section>
+<section style="margin-top:12px">
+  <h3>Guest details & historical report</h3>
+  <form method="get" action="/admin/reports-center" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px">
+    <input type="hidden" name="start" value="${formatDateForInput(start)}" />
+    <input type="hidden" name="end" value="${formatDateForInput(end)}" />
+    <label>From
+      <input type="date" name="guestStart" value="${guestStartKey}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    </label>
+    <label>To
+      <input type="date" name="guestEnd" value="${guestEndKey}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    </label>
+    <label>Room unit
+      <select name="unitId" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+        <option value="">All units</option>${unitFilterOptions}
+      </select>
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; padding-top:24px">
+      <input type="checkbox" name="onlyMissingSignature" value="1" ${onlyMissingSignature ? "checked" : ""} />
+      Only missing handover signature
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; padding-top:24px">
+      <input type="checkbox" name="onlyMissingIdCopy" value="1" ${onlyMissingIdCopy ? "checked" : ""} />
+      Only missing ID copy
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; padding-top:24px">
+      <input type="checkbox" name="onlyMissingTransactionNumber" value="1" ${onlyMissingTransactionNumber ? "checked" : ""} />
+      Only missing payment transaction #
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; padding-top:24px">
+      <input type="checkbox" name="showIncompleteHandoverOnly" value="1" ${showIncompleteHandoverOnly ? "checked" : ""} />
+      Show incomplete handover only
+    </label>
+    <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Filter guest report</button>
+  </form>
+  <table>
+    <thead><tr><th>Date</th><th>Room unit</th><th>Guest</th><th>Phone</th><th>Email</th><th>Adults</th><th>Children</th><th>Meal</th><th>Transaction #</th><th>Handover ID</th><th>Handover at</th><th>Handover by</th><th>Signature</th><th>ID copy</th></tr></thead>
+    <tbody>${guestHistoryRows || '<tr><td colspan="14">No guest details found for selected filters.</td></tr>'}</tbody>
+  </table>
+  <form method="post" action="/admin/reports-center/guest-broadcast" style="margin-top:10px; display:grid; gap:8px; max-width:700px">
+    <input type="hidden" name="start" value="${formatDateForInput(start)}" />
+    <input type="hidden" name="end" value="${formatDateForInput(end)}" />
+    <input type="hidden" name="guestStart" value="${guestStartKey}" />
+    <input type="hidden" name="guestEnd" value="${guestEndKey}" />
+    <input type="hidden" name="unitId" value="${escapeHtml(selectedUnitId)}" />
+    <input type="hidden" name="onlyMissingSignature" value="${onlyMissingSignature ? "1" : "0"}" />
+    <input type="hidden" name="onlyMissingIdCopy" value="${onlyMissingIdCopy ? "1" : "0"}" />
+    <input type="hidden" name="onlyMissingTransactionNumber" value="${onlyMissingTransactionNumber ? "1" : "0"}" />
+    <input type="hidden" name="showIncompleteHandoverOnly" value="${showIncompleteHandoverOnly ? "1" : "0"}" />
+    <input type="hidden" name="phonesCsv" value="${escapeHtml(targetPhones.join(","))}" />
+    <label>Broadcast message (offers / ads / updates)
+      <textarea name="message" rows="3" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px"></textarea>
+    </label>
+    <p class="muted" style="margin:0">Recipients in current filter: ${targetPhones.length}</p>
+    <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#128c7e; color:#fff; font-weight:700; width:max-content">Send WhatsApp broadcast</button>
+  </form>
+</section>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true, currency: true } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>F&amp;B menu</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  await ensureDefaultFbMenu(hotel.id);
+  const saved = req.query.saved ? '<p class="badge ok">Menu saved.</p>' : "";
+  const mergedN = typeof req.query.merged === "string" ? req.query.merged.trim() : "";
+  const mergedBanner =
+    mergedN && /^\d+$/.test(mergedN) && Number(mergedN) > 0
+      ? `<p class="badge ok">Added ${escapeHtml(mergedN)} new menu line(s) from the resort 2026 pack (duplicates skipped).</p>`
+      : "";
+  const bookingIdParam = typeof req.query.bookingId === "string" ? req.query.bookingId.trim() : "";
+  const chargeErr = typeof req.query.chargeError === "string" ? req.query.chargeError.slice(0, 500) : "";
+  const outletWarnFb = typeof req.query.outletWarn === "string" ? req.query.outletWarn.slice(0, 800) : "";
+  const bookingForBanner = bookingIdParam
+    ? await prisma.booking.findFirst({
+        where: { id: bookingIdParam, hotelId: hotel.id },
+        include: { guest: true, roomUnit: { select: { name: true } } }
+      })
+    : null;
+  const chargeSuccessFlag =
+    req.query.chargeSuccess === "1" || String(req.query.chargeSuccess ?? "").toLowerCase() === "true";
+  const chargeSuccessBanner =
+    chargeSuccessFlag && bookingForBanner
+      ? `<p class="badge ok" role="status" style="margin:0;padding:0;background:transparent;line-height:1.55;font-size:15px;font-weight:600;color:#064e3b">Charges are on the folio for <strong>${escapeHtml(
+          bookingForBanner.guest.fullName ?? bookingForBanner.guest.phoneE164
+        )}</strong> · booking <code style="background:rgba(0,0,0,.06);padding:2px 6px;border-radius:4px">${escapeHtml(bookingForBanner.id)}</code>. <a class="inline-link" href="/admin/bookings/${encodeURIComponent(
+          bookingForBanner.id
+        )}">Open booking &amp; F&amp;B</a> to verify lines.</p>`
+      : chargeSuccessFlag && bookingIdParam
+        ? `<p class="badge ok" role="status" style="margin:0;padding:0;background:transparent;font-size:15px;font-weight:600;color:#064e3b">Charges posted. <a class="inline-link" href="/admin/bookings/${encodeURIComponent(bookingIdParam)}">Open booking</a></p>`
+        : "";
+  const bookingStatusBadge =
+    bookingForBanner &&
+    (bookingForBanner.status === BookingStatus.CONFIRMED
+      ? `<span class="badge ok">${escapeHtml(bookingForBanner.status)}</span>`
+      : bookingForBanner.status === BookingStatus.CANCELLED || bookingForBanner.status === BookingStatus.NO_SHOW
+        ? `<span class="badge alert">${escapeHtml(bookingForBanner.status)}</span>`
+        : `<span class="badge pending">${escapeHtml(bookingForBanner.status)}</span>`);
+  const guestRecapLabel = bookingForBanner
+    ? escapeHtml(bookingForBanner.guest.fullName ?? bookingForBanner.guest.phoneE164)
+    : "";
+  const bookingContextPanel = bookingForBanner
+    ? `<section class="fb-pos-card fb-pos-context-loaded" aria-label="Guest folio context">
+      <div class="fb-pos-context-head">
+        <div>
+          <p class="fb-pos-h3">Active folio</p>
+          <h3 class="fb-pos-title">Guest &amp; booking</h3>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <span class="muted" style="font-size:11px;font-weight:600;text-transform:uppercase">Status</span>
+          ${bookingStatusBadge ?? `<span class="badge pending">${escapeHtml(String(bookingForBanner.status))}</span>`}
+        </div>
+      </div>
+      <dl class="fb-pos-dl">
+        <div><dt>Booking ID</dt><dd><code style="background:rgba(0,0,0,.06);padding:2px 8px;border-radius:6px;font-size:14px">${escapeHtml(bookingForBanner.id)}</code></dd></div>
+        <div><dt>Guest</dt><dd>${escapeHtml(bookingForBanner.guest.fullName ?? bookingForBanner.guest.phoneE164)}</dd></div>
+        <div><dt>Room / unit</dt><dd>${escapeHtml(bookingForBanner.roomUnit?.name ?? "Not assigned")}</dd></div>
+        <div><dt>Check-in</dt><dd>${escapeHtml(formatDate(bookingForBanner.checkIn))}</dd></div>
+        <div><dt>Check-out</dt><dd>${escapeHtml(formatDate(bookingForBanner.checkOut))}</dd></div>
+      </dl>
+      <p class="fb-pos-footnote">Review selections below, then post. Charges attach to this booking&apos;s folio and appear on the invoice PDF with room charges.</p>
+    </section>`
+    : "";
+  const bookingGatePanel = bookingForBanner
+    ? ""
+    : bookingIdParam
+      ? `<section class="fb-pos-card fb-pos-context-missing" role="alert" aria-label="No booking loaded">
+      <p class="fb-pos-h3" style="color:#991b1b">Folio not linked</p>
+      <p style="margin:0 0 8px;font-weight:700;color:#7f1d1d">No booking found for ID <code>${escapeHtml(bookingIdParam)}</code>.</p>
+      <p class="muted" style="margin:0;font-size:14px">Copy a valid ID from <a class="inline-link" href="/admin/bookings" target="_blank" rel="noopener">Bookings</a> and click <strong>Load booking</strong>, or open this page from a booking detail link.</p>
+    </section>`
+      : `<section class="fb-pos-card fb-pos-context-idle" aria-label="Link a folio">
+      <p class="fb-pos-h3" style="color:#92400e">No folio loaded</p>
+      <p style="margin:0 0 8px;font-weight:700;color:#78350f">Paste a booking ID and click <strong>Load booking</strong> before posting charges.</p>
+      <p class="muted" style="margin:0;font-size:14px">You can also open <code>/admin/fb/menu?bookingId=…</code> from a guest booking. Menu prices can be edited anytime below.</p>
+    </section>`;
+
+  const items = await prisma.menuItem.findMany({
+    where: { hotelId: hotel.id },
+    orderBy: [{ outletType: "asc" }, { sortOrder: "asc" }, { name: "asc" }]
+  });
+  const rows = items
+    .map((m) => {
+      const inactive = !m.isActive;
+      const dis = inactive ? " disabled" : "";
+      return `<tr class="fb-charge-row" data-fb-active="${m.isActive ? "1" : "0"}" data-fb-price="${String(m.unitPrice)}">
+      <td style="text-align:center"><input type="checkbox" class="fb-charge-cb" form="fb-charge-folio" name="charge_${escapeHtml(m.id)}" value="1"${dis} /></td>
+      <td style="text-align:center"><input type="number" class="fb-charge-qty" form="fb-charge-folio" name="qty_${escapeHtml(m.id)}" min="1" max="99" value="1" style="width:52px;padding:4px;border:1px solid #d8dee6;border-radius:8px"${dis} /></td>
+      <td class="fb-item-outlet">${escapeHtml(m.outletType === "COFFEE_SHOP" ? "Coffee shop" : "Restaurant")}</td>
+      <td class="fb-item-name">${escapeHtml(m.name)}</td>
+      <td>${formatMoney(m.unitPrice, hotel.currency)}</td>
+      <td>${m.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge pending">Off</span>'}</td>
+      <td>
+        <form method="post" action="/admin/fb/menu/${encodeURIComponent(m.id)}/toggle" style="display:inline"><button type="submit" class="btn-link" style="padding:4px 8px">${m.isActive ? "Disable" : "Enable"}</button></form>
+      </td>
+    </tr>`;
+    })
+    .join("");
+  const content = `
+<style>
+.fb-pos-title { margin:0;font-size:1.2rem;font-weight:800;color:#064e3b;letter-spacing:-0.02em; }
+.fb-pos-h3 { margin:0 0 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#64748b; }
+.fb-pos-card { border-radius:12px;padding:16px 18px;margin-bottom:14px; }
+.fb-pos-context-loaded { background:#ecfdf5;border:1px solid #6ee7b7;border-left:4px solid #059669; }
+.fb-pos-context-idle { background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #d97706; }
+.fb-pos-context-missing { background:#fef2f2;border:1px solid #fecaca;border-left:4px solid #dc2626; }
+.fb-pos-context-head { display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;flex-wrap:wrap; }
+.fb-pos-dl { display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px 24px;margin:0; }
+.fb-pos-dl div { margin:0; }
+.fb-pos-dl dt { font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#047857;margin:0 0 4px; }
+.fb-pos-dl dd { margin:0;font-size:15px;font-weight:600;color:#0f172a;line-height:1.35; }
+.fb-pos-footnote { margin:14px 0 0;font-size:12px;color:#047857;line-height:1.45;border-top:1px solid rgba(5,150,105,.25);padding-top:12px; }
+.fb-pos-shell { margin-bottom:20px;border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px 20px;background:#f1f5f9; }
+.fb-pos-shell-head { margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #cbd5e1; }
+.fb-pos-shell-head h2 { margin:0 0 6px;font-size:1.35rem; }
+.fb-pos-panel { background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;margin-bottom:14px; }
+.fb-pos-panel-title { margin:0 0 12px;font-size:1rem;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:10px;flex-wrap:wrap; }
+.fb-pos-panel-tag { font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#64748b;background:#f1f5f9;padding:4px 8px;border-radius:6px; }
+.fb-pos-ticket-row { display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:8px; }
+.fb-pos-checkout { background:#fff;border:2px solid #0f766e;border-radius:12px;padding:14px 16px;margin-bottom:14px; }
+.fb-pos-checkout-title { margin:0 0 10px;font-size:1rem;font-weight:800;color:#0f172a; }
+.fb-pos-table { width:100%;border-collapse:collapse;font-size:13px; }
+.fb-pos-table th { text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;background:#f8fafc;font-weight:700;color:#334155; }
+.fb-pos-table th.num { text-align:right; }
+.fb-pos-table td { padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top; }
+.fb-pos-table td.num { text-align:right;font-variant-numeric:tabular-nums; }
+.fb-pos-table tfoot td { border-bottom:none;padding-top:12px;font-weight:700; }
+.fb-pos-tfoot-note td { font-weight:400 !important;font-size:12px;color:#64748b;font-style:italic;padding-top:6px !important; }
+.fb-pos-total-row td { font-size:17px;padding-top:14px !important;border-top:2px solid #e2e8f0;color:#0f172a; }
+#fb-charge-root .fb-pos-post-bar { display:flex;flex-wrap:wrap;align-items:stretch;justify-content:space-between;gap:16px;padding:18px 20px;background:linear-gradient(135deg,#0f766e 0%,#0d9488 100%);border-radius:12px;color:#fff;box-shadow:0 4px 14px rgba(15,118,110,.25); }
+.fb-pos-post-copy { flex:1;min-width:220px; }
+.fb-pos-recap { margin:0 0 4px;font-size:16px;font-weight:700;line-height:1.4; }
+.fb-pos-recap-sub { margin:0;font-size:13px;opacity:.92;line-height:1.4; }
+.fb-pos-post-actions { display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:10px; }
+.fb-pos-post-btn { padding:16px 28px;border:0;border-radius:10px;background:#fff;color:#0f766e;font-weight:800;font-size:17px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.12);white-space:nowrap; }
+.fb-pos-post-btn:hover { filter:brightness(1.03); }
+.fb-pos-post-btn:disabled { opacity:.55;cursor:not-allowed; }
+#fb-submit-error { display:none;margin:0 0 12px;padding:10px 14px;border-radius:8px;background:#fee2e2;color:#7f1d1d;font-weight:600;font-size:14px; }
+</style>
+<h2>Restaurant &amp; coffee shop menu</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Master catalog and <strong>folio charge (POS)</strong>. Posted F&amp;B appears on the guest invoice with room revenue.</p>
+<p class="muted" style="font-size:12px">Edit prices anytime in the table below. For parity with your printed <strong>Restaurant menu 2026</strong> PDF, adjust names and amounts after review.</p>
+${saved}
+${mergedBanner}
+${chargeSuccessFlag && chargeSuccessBanner ? `<div class="fb-pos-card" style="background:#ecfdf5;border:2px solid #34d399;margin-bottom:16px;padding:16px 18px;border-radius:12px" role="status"><strong style="display:block;margin-bottom:8px;color:#065f46;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Success — folio updated</strong>${chargeSuccessBanner}</div>` : ""}
+${outletWarnFb && chargeSuccessFlag ? `<div class="fb-pos-card" style="background:#fffbeb;border:2px solid #f59e0b;margin-bottom:16px;padding:14px 16px;border-radius:12px" role="alert"><strong style="display:block;margin-bottom:6px;color:#92400e;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Outlet WhatsApp notice</strong><p style="margin:0;font-size:14px;color:#78350f;font-weight:600">${escapeHtml(outletWarnFb)}</p></div>` : ""}
+${chargeErr ? `<p class="badge alert" style="padding:12px 14px;font-size:14px;margin-bottom:14px" role="alert"><strong>Post failed.</strong> ${escapeHtml(chargeErr)}</p>` : ""}
+<section id="fb-charge-root" class="fb-pos-shell" data-currency="${escapeHtml(hotel.currency)}" data-booking-valid="${bookingForBanner ? "1" : "0"}" data-loaded-booking-id="${bookingForBanner ? escapeHtml(bookingForBanner.id) : ""}" data-guest-recap="${guestRecapLabel}">
+  <header class="fb-pos-shell-head">
+    <h2 style="margin:0 0 4px;font-size:1.25rem">Folio charge</h2>
+    <p class="muted" style="margin:0;font-size:13px">Hotel POS-style screen: link a booking, pick menu lines, confirm totals, post to the guest folio.</p>
+  </header>
+  ${bookingContextPanel}
+  ${bookingGatePanel}
+  <section class="fb-pos-panel" aria-label="Link booking and ticket options">
+    <h3 class="fb-pos-panel-title"><span class="fb-pos-panel-tag">Step 1</span> Link folio &amp; ticket</h3>
+    <form id="fb-charge-folio" method="post" action="/admin/fb/menu/charge-folio">
+      <div class="fb-pos-ticket-row">
+        <label>Booking ID <span style="color:#b91c1c">*</span><br/>
+          <input type="text" id="fb-booking-id-input" name="bookingId" value="${escapeHtml(bookingIdParam)}" required placeholder="Paste ID, then Load booking" style="padding:9px 11px;border:1px solid #cbd5e1;border-radius:8px;min-width:280px;font-size:15px" autocomplete="off" />
+        </label>
+        <button type="button" id="fb-load-booking-btn" style="padding:10px 16px;border:1px solid #0f766e;border-radius:8px;background:#fff;color:#0f766e;font-weight:700;cursor:pointer">Load booking</button>
+        <a class="btn-link" href="/admin/bookings" target="_blank" rel="noopener noreferrer" style="align-self:center">Bookings list</a>
+      </div>
+      <div class="fb-pos-ticket-row">
+        <label>Service<br/>
+          <select name="serviceMode" style="padding:9px 11px;border:1px solid #cbd5e1;border-radius:8px;min-width:160px">
+            <option value="ROOM_SERVICE">Room service</option>
+            <option value="DINING_IN">Dining in</option>
+          </select>
+        </label>
+        <label style="min-width:220px;flex:1">Notes (kitchen / bar)<br/>
+          <input type="text" name="notes" maxlength="500" placeholder="Optional" style="width:100%;max-width:420px;padding:9px 11px;border:1px solid #cbd5e1;border-radius:8px" />
+        </label>
+      </div>
+    </form>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">Only <strong>active</strong> items can be charged. Mixed restaurant + coffee creates <strong>one folio ticket per outlet</strong> (same invoice total).</p>
+  </section>
+  <section class="fb-pos-panel" aria-label="Menu selection">
+    <h3 class="fb-pos-panel-title"><span class="fb-pos-panel-tag">Step 2</span> Select items</h3>
+    <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px">
+      <table class="fb-pos-table">
+        <thead><tr><th>Add</th><th class="num">Qty</th><th>Outlet</th><th>Item</th><th class="num">Unit price</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7">No items.</td></tr>'}</tbody>
+      </table>
+    </div>
+  </section>
+  <section class="fb-pos-checkout" aria-label="Checkout summary">
+    <h3 class="fb-pos-checkout-title"><span class="fb-pos-panel-tag" style="background:#ecfdf5;color:#047857">Step 3</span> Checkout summary</h3>
+    <p id="fb-folio-preview-empty" class="muted" style="margin:0 0 12px;font-size:14px">No lines selected. Tick items in the table above to build the folio charge.</p>
+    <div id="fb-folio-preview-body" style="display:none">
+      <div style="overflow-x:auto">
+        <table class="fb-pos-table">
+          <thead>
+            <tr>
+              <th>Outlet</th>
+              <th>Item</th>
+              <th class="num">Qty</th>
+              <th class="num">Unit</th>
+              <th class="num">Line total</th>
+            </tr>
+          </thead>
+          <tbody id="fb-folio-preview-tbody"></tbody>
+          <tfoot>
+            <tr>
+              <td colspan="4" class="num" style="font-weight:700;color:#334155">Subtotal</td>
+              <td class="num" id="fb-checkout-subtotal">0.00 ${escapeHtml(hotel.currency)}</td>
+            </tr>
+            <tr class="fb-pos-tfoot-note">
+              <td colspan="5">Tax / service charge is not itemized on F&amp;B in this system — totals are menu unit price × quantity.</td>
+            </tr>
+            <tr class="fb-pos-total-row">
+              <td colspan="4" class="num">Total to post to folio</td>
+              <td class="num" id="fb-checkout-total"><span id="fb-folio-grand-total">0.00 ${escapeHtml(hotel.currency)}</span></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p id="fb-folio-outlet-notes" class="muted" style="margin:10px 0 0;font-size:12px"></p>
+    </div>
+  </section>
+  <p id="fb-submit-error" role="alert"></p>
+  <section class="fb-pos-post-bar" aria-label="Post charges">
+    <div class="fb-pos-post-copy">
+      <p id="fb-post-recap" class="fb-pos-recap">Link a booking to enable posting.</p>
+      <p id="fb-post-recap-sub" class="fb-pos-recap-sub">The button posts your checkout total to the loaded guest folio.</p>
+    </div>
+    <div class="fb-pos-post-actions">
+      <button type="submit" form="fb-charge-folio" id="fb-post-folio-btn" class="fb-pos-post-btn">Post charges to folio</button>
+    </div>
+  </section>
+  <script>
+    (function () {
+      var root = document.getElementById("fb-charge-root");
+      var form = document.getElementById("fb-charge-folio");
+      var btn = document.getElementById("fb-load-booking-btn");
+      var input = document.getElementById("fb-booking-id-input");
+      var errEl = document.getElementById("fb-submit-error");
+      var cur = root ? root.getAttribute("data-currency") || "OMR" : "OMR";
+      function fmt(n) {
+        var x = Number(n);
+        if (!isFinite(x)) x = 0;
+        return x.toFixed(2) + " " + cur;
+      }
+      function showErr(msg) {
+        if (!errEl) return;
+        errEl.textContent = msg;
+        errEl.style.display = msg ? "block" : "none";
+      }
+      function recalcPreview() {
+        var tbody = document.getElementById("fb-folio-preview-tbody");
+        var empty = document.getElementById("fb-folio-preview-empty");
+        var body = document.getElementById("fb-folio-preview-body");
+        var grandEl = document.getElementById("fb-folio-grand-total");
+        var subEl = document.getElementById("fb-checkout-subtotal");
+        var outletNote = document.getElementById("fb-folio-outlet-notes");
+        var postBtn = document.getElementById("fb-post-folio-btn");
+        var recap = document.getElementById("fb-post-recap");
+        var recapSub = document.getElementById("fb-post-recap-sub");
+        if (!tbody || !empty || !body || !grandEl) return;
+        var valid = root && root.getAttribute("data-booking-valid") === "1";
+        var loadedId = root ? (root.getAttribute("data-loaded-booking-id") || "").trim() : "";
+        var guest = root ? (root.getAttribute("data-guest-recap") || "").trim() : "";
+        tbody.innerHTML = "";
+        var grand = 0;
+        var lineCount = 0;
+        var outlets = {};
+        document.querySelectorAll("tr.fb-charge-row").forEach(function (tr) {
+          if (tr.getAttribute("data-fb-active") !== "1") return;
+          var cb = tr.querySelector(".fb-charge-cb");
+          var qEl = tr.querySelector(".fb-charge-qty");
+          if (!cb || !cb.checked || cb.disabled) return;
+          var qty = parseInt(qEl && qEl.value, 10);
+          if (!isFinite(qty) || qty < 1) qty = 1;
+          if (qty > 99) qty = 99;
+          var price = parseFloat(tr.getAttribute("data-fb-price") || "0");
+          var nameEl = tr.querySelector(".fb-item-name");
+          var outEl = tr.querySelector(".fb-item-outlet");
+          var name = nameEl ? nameEl.textContent.trim() : "";
+          var outlet = outEl ? outEl.textContent.trim() : "";
+          var line = Math.round(price * qty * 100) / 100;
+          grand += line;
+          lineCount += 1;
+          outlets[outlet] = true;
+          var trp = document.createElement("tr");
+          function cell(text, alignRight, bold) {
+            var td = document.createElement("td");
+            td.className = alignRight ? "num" : "";
+            td.style.padding = "8px 10px";
+            td.style.borderBottom = "1px solid #f1f5f9";
+            td.style.verticalAlign = "top";
+            if (alignRight) td.style.textAlign = "right";
+            if (bold) td.style.fontWeight = "600";
+            td.textContent = text;
+            return td;
+          }
+          trp.appendChild(cell(outlet, false, false));
+          trp.appendChild(cell(name, false, false));
+          trp.appendChild(cell(String(qty), true, false));
+          trp.appendChild(cell(fmt(price), true, false));
+          trp.appendChild(cell(fmt(line), true, true));
+          tbody.appendChild(trp);
+        });
+        var subText = fmt(grand);
+        if (lineCount === 0) {
+          empty.style.display = "block";
+          body.style.display = "none";
+          grandEl.textContent = "0.00 " + cur;
+          if (subEl) subEl.textContent = "0.00 " + cur;
+          if (outletNote) outletNote.textContent = "";
+          if (postBtn) postBtn.disabled = true;
+          if (recap) {
+            recap.textContent = valid
+              ? "Folio linked" + (guest ? " for " + guest : "") + (loadedId ? " · booking " + loadedId : "") + ". Select menu lines to charge."
+              : "No folio linked — paste a booking ID and click Load booking.";
+          }
+          if (recapSub) {
+            recapSub.textContent = valid
+              ? "Checkout summary will show line totals and the amount posted to this folio."
+              : "Posting stays disabled until a valid booking is loaded.";
+          }
+          return;
+        }
+        empty.style.display = "none";
+        body.style.display = "block";
+        grandEl.textContent = subText;
+        if (subEl) subEl.textContent = subText;
+        if (postBtn) postBtn.disabled = !valid;
+        var ok = Object.keys(outlets);
+        if (outletNote) {
+          outletNote.textContent = ok.length > 1
+            ? "Posting creates " + ok.length + " folio tickets (one per outlet). Invoice total matches the total below."
+            : "Posting creates one folio ticket (" + ok[0] + ").";
+        }
+        if (recap) {
+          recap.textContent =
+            "Post " +
+            subText +
+            " to " +
+            (guest || "guest") +
+            " · booking " +
+            loadedId +
+            " (" +
+            lineCount +
+            " line" +
+            (lineCount === 1 ? "" : "s") +
+            ").";
+        }
+        if (recapSub) {
+          recapSub.textContent =
+            "Subtotal and total are the same (no separate tax line). Confirm above, then post.";
+        }
+      }
+      document.querySelectorAll(".fb-charge-cb, .fb-charge-qty").forEach(function (el) {
+        el.addEventListener("change", recalcPreview);
+        el.addEventListener("input", recalcPreview);
+      });
+      recalcPreview();
+      if (btn && input) {
+        btn.addEventListener("click", function () {
+          var id = (input.value || "").trim();
+          if (!id) {
+            input.focus();
+            return;
+          }
+          window.location.href = "/admin/fb/menu?bookingId=" + encodeURIComponent(id);
+        });
+      }
+      if (form && root && input) {
+        form.addEventListener("submit", function (e) {
+          showErr("");
+          var valid = root.getAttribute("data-booking-valid") === "1";
+          var loadedId = (root.getAttribute("data-loaded-booking-id") || "").trim();
+          var typed = (input.value || "").trim();
+          if (!valid || !loadedId) {
+            e.preventDefault();
+            showErr("Load a valid booking first: paste the booking ID and click \\"Load booking\\" so the folio target is confirmed.");
+            input.focus();
+            return;
+          }
+          if (typed !== loadedId) {
+            e.preventDefault();
+            showErr("Booking ID changed since load. Click \\"Load booking\\" again to confirm the folio, or restore ID " + loadedId + ".");
+            return;
+          }
+          var hasLine = false;
+          document.querySelectorAll("tr.fb-charge-row").forEach(function (tr) {
+            if (tr.getAttribute("data-fb-active") !== "1") return;
+            var cb = tr.querySelector(".fb-charge-cb");
+            if (cb && cb.checked && !cb.disabled) hasLine = true;
+          });
+          if (!hasLine) {
+            e.preventDefault();
+            showErr("Select at least one active menu item with a quantity.");
+          }
+        });
+      }
+    })();
+  </script>
+</section>
+<section style="margin-bottom:16px;border:1px solid #e2e8f0;border-radius:12px;padding:14px">
+  <h3 style="margin-top:0">Add menu item</h3>
+  <form method="post" action="/admin/fb/menu/add" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+    <label>Outlet
+      <select name="outletType" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
+        <option value="RESTAURANT">Restaurant</option>
+        <option value="COFFEE_SHOP">Coffee shop</option>
+      </select>
+    </label>
+    <label>Name <input type="text" name="name" required placeholder="e.g. Club sandwich" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;min-width:180px" /></label>
+    <label>Price (${escapeHtml(hotel.currency)}) <input type="number" name="unitPrice" min="0" step="0.01" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100px" /></label>
+    <label>Sort <input type="number" name="sortOrder" value="0" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:72px" /></label>
+    <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:#128c7e;color:#fff;font-weight:700">Add</button>
+  </form>
+</section>
+<section style="margin-bottom:12px">
+  <form method="post" action="/admin/fb/menu/append-resort-menu" style="display:inline">
+    <button type="submit" class="btn-link" style="padding:8px 12px;border:1px solid #d8dee6;border-radius:8px;background:#fff">Add missing items from 2026 resort pack</button>
+  </form>
+  <span class="muted" style="font-size:12px;margin-left:8px">Safe to run more than once — skips duplicates by name + outlet.</span>
+</section>
+<p class="muted"><a class="inline-link" href="/admin/bookings">Back to bookings</a></p>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/fb/menu/charge-folio", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/fb/menu");
+    return;
+  }
+  const bookingId = String(req.body.bookingId ?? "").trim();
+  const serviceRaw = String(req.body.serviceMode ?? "").toUpperCase();
+  const serviceMode = serviceRaw === "DINING_IN" ? FbServiceMode.DINING_IN : FbServiceMode.ROOM_SERVICE;
+  const notes = String(req.body.notes ?? "").trim().slice(0, 500);
+
+  const redirectBack = (msg: string) => {
+    res.redirect(`/admin/fb/menu?chargeError=${encodeURIComponent(msg)}&bookingId=${encodeURIComponent(bookingId)}`);
+  };
+
+  if (!bookingId) {
+    redirectBack("Booking ID is required.");
+    return;
+  }
+
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    select: { id: true, guestId: true }
+  });
+  if (!booking) {
+    redirectBack("Booking not found for this hotel.");
+    return;
+  }
+
+  const menuItems = await prisma.menuItem.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    select: { id: true }
+  });
+  const lines: { menuItemId: string; qty: number }[] = [];
+  for (const m of menuItems) {
+    const flag = req.body[`charge_${m.id}`];
+    if (flag !== "1" && flag !== "on") continue;
+    const qty = clamp(parseIntegerInput(req.body[`qty_${m.id}`], 1), 1, 99);
+    lines.push({ menuItemId: m.id, qty });
+  }
+
+  if (lines.length === 0) {
+    redirectBack("Select at least one active menu item.");
+    return;
+  }
+
+  try {
+    const outletWarnings = await createFbOrdersFromMenuLines({
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      guestId: booking.guestId,
+      serviceMode,
+      notes: notes || null,
+      lines
+    });
+    await logAudit({
+      hotelId: hotel.id,
+      action: "FB_ORDER_POSTED_TO_FOLIO",
+      entityType: "Booking",
+      entityId: bookingId,
+      metadata: { from: "fb_menu_page", outletNotifyWarnings: outletWarnings }
+    });
+    const warnQ =
+      outletWarnings.length > 0 ? `&outletWarn=${encodeURIComponent(outletWarnings.join(" "))}` : "";
+    res.redirect(`/admin/fb/menu?bookingId=${encodeURIComponent(bookingId)}&chargeSuccess=1${warnQ}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not post F&B charges.";
+    redirectBack(msg);
+  }
+});
+
+adminRouter.post("/fb/menu/append-resort-menu", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/fb/menu");
+    return;
+  }
+  const n = await appendMissingFbMenuItems(hotel.id);
+  await logAudit({
+    hotelId: hotel.id,
+    action: "FB_MENU_APPEND_PACK",
+    entityType: "Hotel",
+    entityId: hotel.id,
+    metadata: { added: n }
+  });
+  res.redirect(`/admin/fb/menu?merged=${encodeURIComponent(String(n))}&saved=1`);
+});
+
+adminRouter.post("/fb/menu/add", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/fb/menu");
+    return;
+  }
+  const outletRaw = String(req.body.outletType ?? "").toUpperCase();
+  const outletType = outletRaw === "COFFEE_SHOP" ? FbOutletType.COFFEE_SHOP : FbOutletType.RESTAURANT;
+  const name = String(req.body.name ?? "").trim();
+  const unitPrice = Math.max(0, parseNumberInput(req.body.unitPrice, 0));
+  const sortOrder = parseIntegerInput(req.body.sortOrder, 0);
+  if (!name) {
+    res.redirect("/admin/fb/menu");
+    return;
+  }
+  await prisma.menuItem.create({
+    data: { hotelId: hotel.id, outletType, name, unitPrice, sortOrder, isActive: true }
+  });
+  await logAudit({ hotelId: hotel.id, action: "FB_MENU_ITEM_ADDED", entityType: "MenuItem", metadata: { name, outletType, unitPrice } });
+  res.redirect("/admin/fb/menu?saved=1");
+});
+
+adminRouter.post("/fb/menu/:itemId/toggle", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/fb/menu");
+    return;
+  }
+  const item = await prisma.menuItem.findFirst({ where: { id: String(req.params.itemId ?? ""), hotelId: hotel.id } });
+  if (item) {
+    await prisma.menuItem.update({ where: { id: item.id }, data: { isActive: !item.isActive } });
+  }
+  res.redirect("/admin/fb/menu?saved=1");
+});
+
+adminRouter.get("/bookings/:id/fb-order", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true, currency: true } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    include: { guest: true }
+  });
+  if (!booking) {
+    res.status(404).type("html").send(renderLayout("<h2>Booking</h2><p>Not found.</p>", true));
+    return;
+  }
+  await ensureDefaultFbMenu(hotel.id);
+  const menuItems = await prisma.menuItem.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: [{ outletType: "asc" }, { sortOrder: "asc" }, { name: "asc" }]
+  });
+  const restOpts = menuItems
+    .filter((m) => m.outletType === "RESTAURANT")
+    .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} (${formatMoney(m.unitPrice, hotel.currency)})</option>`)
+    .join("");
+  const coffeeOpts = menuItems
+    .filter((m) => m.outletType === "COFFEE_SHOP")
+    .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} (${formatMoney(m.unitPrice, hotel.currency)})</option>`)
+    .join("");
+  const lineRows = Array.from({ length: 8 }, (_, i) => {
+    const n = String(i);
+    return `<tr>
+      <td style="padding:6px"><select name="line_${n}_menuItemId" style="width:100%;padding:6px;border:1px solid #d8dee6;border-radius:8px"><option value="">—</option><optgroup label="Restaurant">${restOpts}</optgroup><optgroup label="Coffee shop">${coffeeOpts}</optgroup></select></td>
+      <td style="padding:6px"><input type="number" name="line_${n}_qty" min="1" max="99" value="1" style="width:64px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+    </tr>`;
+  }).join("");
+  const err = typeof req.query.error === "string" ? `<p class="badge alert">${escapeHtml(req.query.error.slice(0, 400))}</p>` : "";
+  const content = `
+<h2>Post F&amp;B charge to folio</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Booking <strong>${escapeHtml(booking.id)}</strong> · Guest ${escapeHtml(booking.guest.fullName ?? booking.guest.phoneE164)}</p>
+${err}
+<p class="muted">Charges post to this guest&apos;s booking folio and appear on the invoice PDF (accommodation + F&amp;B total).</p>
+<form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/fb-order" style="max-width:720px">
+  <input type="hidden" name="bookingId" value="${escapeHtml(booking.id)}" />
+  <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px">
+    <label>Service
+      <select name="serviceMode" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
+        <option value="ROOM_SERVICE">Room service</option>
+        <option value="DINING_IN">Dining in</option>
+      </select>
+    </label>
+  </div>
+  <p class="muted" style="margin:0 0 8px;font-size:13px">Outlet is determined from each menu line (restaurant vs coffee shop). Mixed orders create separate tickets per outlet.</p>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:12px">
+    <thead><tr><th style="text-align:left">Menu item</th><th>Qty</th></tr></thead>
+    <tbody>${lineRows}</tbody>
+  </table>
+  <label>Notes (kitchen / bar)
+    <textarea name="notes" rows="2" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px"></textarea>
+  </label>
+  <div class="actions" style="margin-top:12px">
+    <button type="submit" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Post to folio</button>
+    <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Cancel</a>
+    <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">Edit menu prices</a>
+  </div>
+</form>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/bookings/:id/fb-order", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, hotelId: hotel.id }, select: { id: true, guestId: true } });
+  if (!booking) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const serviceRaw = String(req.body.serviceMode ?? "").toUpperCase();
+  const serviceMode = serviceRaw === "DINING_IN" ? FbServiceMode.DINING_IN : FbServiceMode.ROOM_SERVICE;
+  const notes = String(req.body.notes ?? "").trim().slice(0, 500);
+
+  const linePairs: { menuItemId: string; qty: number }[] = [];
+  for (let i = 0; i < 8; i++) {
+    const mid = String(req.body[`line_${i}_menuItemId`] ?? "").trim();
+    const qty = clamp(parseIntegerInput(req.body[`line_${i}_qty`], 1), 1, 99);
+    if (mid) linePairs.push({ menuItemId: mid, qty });
+  }
+
+  const redirectErr = (msg: string) => {
+    res.redirect(`/admin/bookings/${encodeURIComponent(bookingId)}/fb-order?error=${encodeURIComponent(msg)}`);
+  };
+
+  if (linePairs.length === 0) {
+    redirectErr("Add at least one menu line with quantity.");
+    return;
+  }
+
+  try {
+    const outletWarnings = await createFbOrdersFromMenuLines({
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      guestId: booking.guestId,
+      serviceMode,
+      notes: notes || null,
+      lines: linePairs
+    });
+    await logAudit({
+      hotelId: hotel.id,
+      action: "FB_ORDER_POSTED_TO_FOLIO",
+      entityType: "Booking",
+      entityId: bookingId,
+      metadata: { serviceMode, outletNotifyWarnings: outletWarnings }
+    });
+    const warnQ =
+      outletWarnings.length > 0 ? `&outletWarn=${encodeURIComponent(outletWarnings.join(" "))}` : "";
+    res.redirect(`/admin/bookings/${encodeURIComponent(bookingId)}?fbPosted=1${warnQ}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Could not post F&B charge.";
+    redirectErr(msg);
+  }
+});
+
+function formatOutletOrderTicketOutletKey(key: string): string {
+  switch (key) {
+    case "COFFEE_SHOP":
+      return "Coffee shop";
+    case "RESTAURANT":
+      return "Restaurant";
+    case "CAFE":
+      return "Café";
+    case "ROOM_SERVICE":
+      return "Room service";
+    case "ACTIVITY":
+      return "Activity";
+    default:
+      return key;
+  }
+}
+
+function outletTicketWhatsappBadgeHtml(t: {
+  whatsappNotifyOk: boolean | null;
+  whatsappNotifyDetail: string | null;
+  whatsappNotifyAt: Date | null;
+}): string {
+  const when = t.whatsappNotifyAt ? formatDateTime(t.whatsappNotifyAt) : "";
+  if (t.whatsappNotifyOk === true) {
+    return `<span class="outlet-wa outlet-wa-ok" title="Sent ${escapeHtml(when)}">WhatsApp ✓</span>`;
+  }
+  if (t.whatsappNotifyOk === false) {
+    const d = (t.whatsappNotifyDetail || "Failed or skipped").slice(0, 160);
+    return `<span class="outlet-wa outlet-wa-fail" title="${escapeHtml(d)}">WhatsApp ✗</span>`;
+  }
+  return `<span class="outlet-wa outlet-wa-unk" title="No notify attempt recorded yet">WhatsApp —</span>`;
+}
+
+adminRouter.get("/outlet-dashboard", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Outlet board</h2><p>No hotel data.</p>", true));
+    return;
+  }
+  let dateFrom = String(req.query.dateFrom ?? "").trim();
+  let dateTo = String(req.query.dateTo ?? "").trim();
+  if (!dateFrom && !dateTo) {
+    const today = startOfDay(new Date());
+    dateTo = formatDateForInput(today);
+    dateFrom = formatDateForInput(addDays(today, -7));
+  }
+  const outletQ = String(req.query.outlet ?? "all").trim();
+  const serviceQ = String(req.query.service ?? "all").trim();
+  const where: Prisma.OutletOrderTicketWhereInput = { hotelId: hotel.id };
+  if (outletQ && outletQ !== "all") where.outletKey = outletQ;
+  if (serviceQ === "ROOM_SERVICE") where.serviceMode = FbServiceMode.ROOM_SERVICE;
+  else if (serviceQ === "DINING_IN") where.serviceMode = FbServiceMode.DINING_IN;
+  else if (serviceQ === "folio_desk") where.source = OutletTicketSource.FOLIO_CHARGE;
+
+  const createdFilter: Prisma.DateTimeFilter = {};
+  if (dateFrom) createdFilter.gte = startOfDay(parseDateInput(dateFrom, startOfDay(new Date())));
+  if (dateTo) createdFilter.lte = endOfDay(parseDateInput(dateTo, startOfDay(new Date())));
+  if (Object.keys(createdFilter).length > 0) where.createdAt = createdFilter;
+
+  const tickets = await prisma.outletOrderTicket.findMany({
+    where,
+    include: {
+      booking: { include: { guest: true, roomUnit: { include: { roomType: true } } } },
+      fbOrder: { include: { lines: { orderBy: { id: "asc" } } } },
+      folioTransaction: true
+    },
+    orderBy: { createdAt: "desc" },
+    take: 400
+  });
+
+  const statusOrder: OutletTicketStatus[] = [
+    OutletTicketStatus.NEW,
+    OutletTicketStatus.ACKNOWLEDGED,
+    OutletTicketStatus.PREPARING,
+    OutletTicketStatus.READY,
+    OutletTicketStatus.DELIVERED,
+    OutletTicketStatus.CANCELLED
+  ];
+  const byStatus = new Map<OutletTicketStatus, typeof tickets>();
+  for (const s of statusOrder) byStatus.set(s, []);
+  for (const t of tickets) {
+    const bucket = byStatus.get(t.ticketStatus);
+    if (bucket) bucket.push(t);
+  }
+
+  const renderCard = (t: (typeof tickets)[number]): string => {
+    const ref = displayBookingReference(t.booking);
+    const guest = t.booking.guest.fullName?.trim() || t.booking.guest.phoneE164 || "—";
+    const unit =
+      t.booking.roomUnit?.name && t.booking.roomUnit.roomType?.name
+        ? `${t.booking.roomUnit.name} (${t.booking.roomUnit.roomType.name})`
+        : t.booking.roomUnit?.name || "—";
+    let items = "—";
+    if (t.fbOrder?.lines?.length) {
+      items = t.fbOrder.lines
+        .map((l) => `${l.quantity}× ${l.itemNameSnap} (${formatMoney(l.lineTotal, hotel.currency)})`)
+        .join(" · ");
+    } else if (t.folioTransaction) {
+      const ft = t.folioTransaction;
+      items = `${ft.quantity}× ${ft.itemName} (${formatMoney(ft.netAmount, ft.currency || hotel.currency)})`;
+    }
+    const modeLabel =
+      t.serviceMode === FbServiceMode.ROOM_SERVICE
+        ? "Room service"
+        : t.serviceMode === FbServiceMode.DINING_IN
+          ? "Dining in"
+          : t.source === OutletTicketSource.FOLIO_CHARGE
+            ? "Desk folio"
+            : "—";
+    const isNew = t.ticketStatus === OutletTicketStatus.NEW;
+    const statusOptions = (Object.values(OutletTicketStatus) as string[])
+      .map(
+        (s) =>
+          `<option value="${escapeHtml(s)}"${t.ticketStatus === s ? " selected" : ""}>${escapeHtml(s)}</option>`
+      )
+      .join("");
+    return `<article class="outlet-board-card${isNew ? " outlet-board-card--new" : ""}">
+      <div class="outlet-board-card-head">
+        <strong>${escapeHtml(formatOutletOrderTicketOutletKey(t.outletKey))}</strong>
+        ${outletTicketWhatsappBadgeHtml(t)}
+      </div>
+      <p class="outlet-board-card-ref"><code>${escapeHtml(ref)}</code> · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(t.bookingId)}">Booking</a></p>
+      <p class="outlet-board-card-meta"><strong>${escapeHtml(guest)}</strong><br/><span class="muted">${escapeHtml(unit)}</span></p>
+      <p class="outlet-board-card-items">${escapeHtml(items)}</p>
+      ${t.notes ? `<p class="outlet-board-card-notes"><em>${escapeHtml(t.notes)}</em></p>` : ""}
+      <p class="outlet-board-card-foot muted">${escapeHtml(modeLabel)} · ${formatDateTime(t.createdAt)}</p>
+      <form method="post" action="/admin/outlet-orders/${encodeURIComponent(t.id)}/status" class="outlet-board-card-form">
+        <input type="hidden" name="redirectTo" value="dashboard" />
+        <input type="hidden" name="outlet" value="${escapeHtml(outletQ)}" />
+        <input type="hidden" name="statusFilter" value="all" />
+        <input type="hidden" name="service" value="${escapeHtml(serviceQ)}" />
+        <input type="hidden" name="dateFrom" value="${escapeHtml(dateFrom)}" />
+        <input type="hidden" name="dateTo" value="${escapeHtml(dateTo)}" />
+        <label class="outlet-board-card-status-label"><span class="muted">Move to</span>
+          <select name="ticketStatus">${statusOptions}</select>
+        </label>
+        <button type="submit" class="outlet-board-save">Update</button>
+      </form>
+    </article>`;
+  };
+
+  const columnsHtml = statusOrder
+    .map((st) => {
+      const list = byStatus.get(st) ?? [];
+      const cards = list.map((t) => renderCard(t)).join("") || `<p class="muted outlet-board-empty">None</p>`;
+      return `<section class="outlet-board-col" data-status="${escapeHtml(st)}">
+        <header class="outlet-board-col-head">
+          <h3>${escapeHtml(st)}</h3>
+          <span class="outlet-board-count">${list.length}</span>
+        </header>
+        <div class="outlet-board-col-body">${cards}</div>
+      </section>`;
+    })
+    .join("");
+
+  const outletFilterHtml = [
+    ["all", "All outlets"],
+    ["RESTAURANT", "Restaurant"],
+    ["COFFEE_SHOP", "Coffee shop"],
+    ["CAFE", "Café (folio)"],
+    ["ROOM_SERVICE", "Room service"],
+    ["ACTIVITY", "Activity"]
+  ]
+    .map(
+      ([v, lab]) =>
+        `<option value="${escapeHtml(v)}"${outletQ === v ? " selected" : ""}>${escapeHtml(lab)}</option>`
+    )
+    .join("");
+
+  const serviceFilterHtml = [
+    ["all", "All service types"],
+    ["ROOM_SERVICE", "Room service"],
+    ["DINING_IN", "Dining in"],
+    ["folio_desk", "Desk folio only"]
+  ]
+    .map(
+      ([v, lab]) =>
+        `<option value="${escapeHtml(v)}"${serviceQ === v ? " selected" : ""}>${escapeHtml(lab)}</option>`
+    )
+    .join("");
+
+  const updatedBanner = req.query.updated ? '<p class="badge ok">Ticket updated.</p>' : "";
+  const errBanner =
+    req.query.err || req.query.missing
+      ? `<p class="badge alert" role="alert">Could not update ticket.</p>`
+      : "";
+
+  const content = `
+<style>
+.outlet-board-wrap { margin-bottom: 20px; }
+.outlet-board-filters { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:16px; padding:14px 16px; background:#fff; border:1px solid #e2e8f0; border-radius:12px; }
+.outlet-board-filters label { font-size:13px; color:#475569; }
+.outlet-board-filters input[type="date"] { padding:8px; border:1px solid #cbd5e1; border-radius:8px; }
+.outlet-board-grid { display:flex; gap:12px; align-items:flex-start; overflow-x:auto; padding-bottom:8px; scroll-snap-type:x mandatory; }
+.outlet-board-col { flex:0 0 min(280px, 92vw); scroll-snap-align:start; background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; min-height:120px; display:flex; flex-direction:column; }
+.outlet-board-col-head { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:1px solid #e2e8f0; background:#f1f5f9; border-radius:12px 12px 0 0; position:sticky; top:0; z-index:1; }
+.outlet-board-col-head h3 { margin:0; font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:#334155; }
+.outlet-board-count { font-size:12px; font-weight:800; background:#e2e8f0; color:#475569; padding:2px 8px; border-radius:999px; }
+.outlet-board-col-body { padding:10px; display:flex; flex-direction:column; gap:10px; flex:1; max-height:70vh; overflow-y:auto; }
+.outlet-board-card { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; font-size:13px; box-shadow:0 1px 2px rgba(15,23,42,.06); }
+.outlet-board-card--new { border-left:4px solid #059669; box-shadow:0 4px 14px rgba(5,150,105,.15); }
+.outlet-board-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:6px; }
+.outlet-wa { font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; white-space:nowrap; }
+.outlet-wa-ok { background:#d1fae5; color:#065f46; }
+.outlet-wa-fail { background:#fee2e2; color:#991b1b; }
+.outlet-wa-unk { background:#f1f5f9; color:#64748b; }
+.outlet-board-card-ref { margin:0 0 6px; font-size:12px; }
+.outlet-board-card-meta { margin:0 0 6px; line-height:1.4; }
+.outlet-board-card-items { margin:0 0 6px; font-weight:600; color:#0f172a; line-height:1.35; }
+.outlet-board-card-notes { margin:0 0 6px; font-size:12px; color:#334155; }
+.outlet-board-card-foot { margin:0 0 8px; font-size:11px; }
+.outlet-board-card-form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; border-top:1px solid #f1f5f9; padding-top:8px; margin:0; }
+.outlet-board-card-status-label { display:flex; flex-direction:column; gap:4px; font-size:11px; margin:0; flex:1; min-width:120px; }
+.outlet-board-card-status-label select { padding:6px; border-radius:8px; border:1px solid #cbd5e1; font-size:12px; width:100%; }
+.outlet-board-save { padding:6px 12px; border:0; border-radius:8px; background:#128c7e; color:#fff; font-weight:700; font-size:12px; cursor:pointer; }
+.outlet-board-empty { margin:0; font-size:13px; padding:8px 0; }
+</style>
+<div class="outlet-board-wrap">
+<h2>Outlet board</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Incoming orders by status. <strong>New</strong> tickets are highlighted. Internal tickets are the source of truth; WhatsApp is auxiliary.</p>
+${updatedBanner}
+${errBanner}
+<p class="muted" style="font-size:13px"><a class="inline-link" href="/admin/outlet-orders">Table view</a> · <a class="inline-link" href="/admin/fb/menu">F&amp;B menu</a></p>
+<form method="get" action="/admin/outlet-dashboard" class="outlet-board-filters">
+  <label>Outlet
+    <select name="outlet" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">${outletFilterHtml}</select>
+  </label>
+  <label>Service
+    <select name="service" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">${serviceFilterHtml}</select>
+  </label>
+  <label>From
+    <input type="date" name="dateFrom" value="${escapeHtml(dateFrom)}" />
+  </label>
+  <label>To
+    <input type="date" name="dateTo" value="${escapeHtml(dateTo)}" />
+  </label>
+  <button type="submit" class="btn-link primary" style="padding:9px 14px;border-radius:8px">Apply</button>
+</form>
+<div class="outlet-board-grid">${columnsHtml}</div>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/outlet-orders", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Outlet orders</h2><p>No hotel data.</p>", true));
+    return;
+  }
+  const outletQ = String(req.query.outlet ?? "all").trim();
+  const statusQ = String(req.query.status ?? "all").trim();
+  const where: Prisma.OutletOrderTicketWhereInput = { hotelId: hotel.id };
+  if (outletQ && outletQ !== "all") where.outletKey = outletQ;
+  if (statusQ && statusQ !== "all" && (Object.values(OutletTicketStatus) as string[]).includes(statusQ)) {
+    where.ticketStatus = statusQ as OutletTicketStatus;
+  }
+  const tickets = await prisma.outletOrderTicket.findMany({
+    where,
+    include: {
+      booking: { include: { guest: true, roomUnit: { include: { roomType: true } } } },
+      fbOrder: { include: { lines: { orderBy: { id: "asc" } } } },
+      folioTransaction: true
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200
+  });
+
+  const outletFilterHtml = [
+    ["all", "All outlets"],
+    ["RESTAURANT", "Restaurant"],
+    ["COFFEE_SHOP", "Coffee shop"],
+    ["CAFE", "Café (folio)"],
+    ["ROOM_SERVICE", "Room service"],
+    ["ACTIVITY", "Activity"]
+  ]
+    .map(
+      ([v, lab]) =>
+        `<option value="${escapeHtml(v)}"${outletQ === v ? " selected" : ""}>${escapeHtml(lab)}</option>`
+    )
+    .join("");
+
+  const statusFilterHtml = (["all", ...Object.values(OutletTicketStatus)] as const)
+    .map((v) => {
+      const lab = v === "all" ? "All statuses" : v;
+      return `<option value="${escapeHtml(v)}"${statusQ === v ? " selected" : ""}>${escapeHtml(lab)}</option>`;
+    })
+    .join("");
+
+  const updatedBanner = req.query.updated ? '<p class="badge ok">Ticket status updated.</p>' : "";
+  const errBanner =
+    req.query.err || req.query.missing
+      ? `<p class="badge alert" role="alert">Could not update ticket (invalid status or not found).</p>`
+      : "";
+
+  const rows = tickets
+    .map((t) => {
+      const ref = displayBookingReference(t.booking);
+      const guest = t.booking.guest.fullName?.trim() || t.booking.guest.phoneE164 || "—";
+      const unit =
+        t.booking.roomUnit?.name && t.booking.roomUnit.roomType?.name
+          ? `${t.booking.roomUnit.name} (${t.booking.roomUnit.roomType.name})`
+          : t.booking.roomUnit?.name || "—";
+      let itemsHtml = "—";
+      if (t.fbOrder?.lines?.length) {
+        itemsHtml = t.fbOrder.lines
+          .map((l) => `${l.quantity}× ${escapeHtml(l.itemNameSnap)} (${formatMoney(l.lineTotal, hotel.currency)})`)
+          .join("<br/>");
+      } else if (t.folioTransaction) {
+        const ft = t.folioTransaction;
+        itemsHtml = `${ft.quantity}× ${escapeHtml(ft.itemName)} (${formatMoney(ft.netAmount, ft.currency || hotel.currency)})`;
+      }
+      const srcLabel = t.source === "FB_MENU" ? "Menu / POS" : "Folio";
+      const modeLabel =
+        t.serviceMode === "ROOM_SERVICE"
+          ? "Room service"
+          : t.serviceMode === "DINING_IN"
+            ? "Dining in"
+            : "—";
+      const statusOptions = (Object.values(OutletTicketStatus) as string[])
+        .map(
+          (s) =>
+            `<option value="${escapeHtml(s)}"${t.ticketStatus === s ? " selected" : ""}>${escapeHtml(s)}</option>`
+        )
+        .join("");
+      return `<tr>
+        <td style="white-space:nowrap;font-size:12px"><code title="${escapeHtml(t.id)}">${escapeHtml(t.id.slice(0, 10))}…</code></td>
+        <td><strong>${escapeHtml(formatOutletOrderTicketOutletKey(t.outletKey))}</strong><br/><span class="muted" style="font-size:12px">${escapeHtml(srcLabel)}</span></td>
+        <td><code>${escapeHtml(ref)}</code><br/><a class="inline-link" style="font-size:12px" href="/admin/bookings/${encodeURIComponent(t.bookingId)}">Open booking</a></td>
+        <td>${escapeHtml(guest)}</td>
+        <td>${escapeHtml(unit)}</td>
+        <td style="font-size:13px;line-height:1.45">${itemsHtml}</td>
+        <td style="max-width:140px;font-size:12px">${t.notes ? escapeHtml(t.notes) : "—"}</td>
+        <td class="muted" style="font-size:12px">${escapeHtml(modeLabel)}</td>
+        <td style="white-space:nowrap;font-size:12px">${formatDateTime(t.createdAt)}</td>
+        <td>
+          <form method="post" action="/admin/outlet-orders/${encodeURIComponent(t.id)}/status" style="margin:0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <input type="hidden" name="outlet" value="${escapeHtml(outletQ)}" />
+            <input type="hidden" name="statusFilter" value="${escapeHtml(statusQ)}" />
+            <input type="hidden" name="service" value="all" />
+            <input type="hidden" name="dateFrom" value="" />
+            <input type="hidden" name="dateTo" value="" />
+            <select name="ticketStatus" style="padding:6px 8px;border-radius:8px;border:1px solid #cbd5e1;font-size:12px;max-width:130px">${statusOptions}</select>
+            <button type="submit" style="padding:6px 10px;border:0;border-radius:8px;background:#128c7e;color:#fff;font-weight:700;font-size:12px;cursor:pointer">Save</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Outlet order tickets</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Internal kitchen / café / room-service queue. One ticket per posting action (menu batch per outlet, or folio charge line). WhatsApp alerts are separate; tickets stay even if WhatsApp fails.</p>
+<p class="muted" style="font-size:13px"><a class="inline-link primary" href="/admin/outlet-dashboard">Outlet board</a> (kanban by status)</p>
+${updatedBanner}
+${errBanner}
+<form method="get" action="/admin/outlet-orders" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px">
+  <label>Outlet
+    <select name="outlet" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">${outletFilterHtml}</select>
+  </label>
+  <label>Status
+    <select name="status" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">${statusFilterHtml}</select>
+  </label>
+  <button type="submit" class="btn-link primary" style="padding:9px 14px;border-radius:8px">Apply filters</button>
+  <a class="btn-link" href="/admin/fb/menu">F&amp;B menu</a>
+</form>
+<div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:12px;background:#fff">
+  <table style="width:100%;border-collapse:collapse;font-size:14px">
+    <thead>
+      <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
+        <th style="text-align:left;padding:10px">ID</th>
+        <th style="text-align:left;padding:10px">Outlet</th>
+        <th style="text-align:left;padding:10px">Booking ref</th>
+        <th style="text-align:left;padding:10px">Guest</th>
+        <th style="text-align:left;padding:10px">Room / unit</th>
+        <th style="text-align:left;padding:10px">Items</th>
+        <th style="text-align:left;padding:10px">Notes</th>
+        <th style="text-align:left;padding:10px">Service</th>
+        <th style="text-align:left;padding:10px">Created</th>
+        <th style="text-align:left;padding:10px">Status</th>
+      </tr>
+    </thead>
+    <tbody>${rows || '<tr><td colspan="10" style="padding:16px" class="muted">No tickets match these filters.</td></tr>'}</tbody>
+  </table>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/outlet-orders/:ticketId/status", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/outlet-dashboard");
+    return;
+  }
+  const ticketId = String(req.params.ticketId ?? "");
+  const nextRaw = String(req.body.ticketStatus ?? "").trim();
+  const outletQ = String(req.body.outlet ?? "all").trim();
+  const statusFilter = String(req.body.statusFilter ?? "all").trim();
+  const redirectTo = String(req.body.redirectTo ?? "").trim();
+  const dateFrom = String(req.body.dateFrom ?? "").trim();
+  const dateTo = String(req.body.dateTo ?? "").trim();
+  const serviceQ = String(req.body.service ?? "all").trim();
+  const q = new URLSearchParams();
+  q.set("outlet", outletQ);
+  q.set("status", statusFilter);
+  q.set("service", serviceQ);
+  q.set("dateFrom", dateFrom);
+  q.set("dateTo", dateTo);
+  if (!(Object.values(OutletTicketStatus) as string[]).includes(nextRaw)) {
+    q.set("err", "1");
+    res.redirect(
+      redirectTo === "dashboard" ? `/admin/outlet-dashboard?${q.toString()}` : `/admin/outlet-orders?${q.toString()}`
+    );
+    return;
+  }
+  const nextStatus = nextRaw as OutletTicketStatus;
+  const ticket = await prisma.outletOrderTicket.findFirst({
+    where: { id: ticketId, hotelId: hotel.id }
+  });
+  if (!ticket) {
+    q.set("missing", "1");
+    res.redirect(
+      redirectTo === "dashboard" ? `/admin/outlet-dashboard?${q.toString()}` : `/admin/outlet-orders?${q.toString()}`
+    );
+    return;
+  }
+  await prisma.outletOrderTicket.update({
+    where: { id: ticket.id },
+    data: { ticketStatus: nextStatus }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "OUTLET_ORDER_TICKET_STATUS",
+    entityType: "OutletOrderTicket",
+    entityId: ticket.id,
+    metadata: { from: ticket.ticketStatus, to: nextStatus }
+  });
+  q.set("updated", "1");
+  res.redirect(
+    redirectTo === "dashboard" ? `/admin/outlet-dashboard?${q.toString()}` : `/admin/outlet-orders?${q.toString()}`
+  );
+});
+
+adminRouter.get("/bookings/:id/invoice-print", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, city: true, country: true }
+  });
+  if (!hotel) {
+    res.status(404).send("Hotel not found");
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    include: { guest: true, roomType: true, property: true }
+  });
+  if (!booking) {
+    res.status(404).send("Booking not found");
+    return;
+  }
+  const selectedUnitCode = await getBookingUnitCode(booking.id);
+  const fbFolio = await getFbFolioForBooking(booking.id);
+  const grandTotal = Number((booking.totalAmount + fbFolio.subtotal).toFixed(2));
+  const invoiceNumber = `INV-${booking.id}`;
+  const filename = `${booking.id}-invoice.pdf`;
+  const invoicePdf = await buildBookingInvoicePdf({
+    documentKind: "invoice",
+    invoiceNumber,
+    issuedAt: new Date(),
+    hotelName: hotel.displayName,
+    hotelCity: hotel.city,
+    hotelCountry: hotel.country,
+    guestName: booking.guest.fullName ?? "Guest",
+    guestPhone: booking.guest.phoneE164,
+    bookingId: booking.id,
+    bookingStatus: booking.status,
+    paymentStatus: booking.paymentStatus,
+    roomType: booking.roomType.name,
+    selectedUnit: selectedUnitCode,
+    propertyName: booking.property.name,
+    checkIn: booking.checkIn,
+    checkOut: booking.checkOut,
+    nights: booking.nights,
+    adults: booking.adults,
+    children: booking.children,
+    totalAmount: booking.totalAmount,
+    currency: booking.currency,
+    fbLines: fbFolio.lines,
+    fbSubtotal: fbFolio.subtotal,
+    grandTotal
+  });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+  res.send(invoicePdf);
+});
+
+adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Booking</h2><p>No hotel data found.</p>", true));
@@ -1159,10 +8142,37 @@ adminRouter.get("/bookings/:id", requireAuth, async (req, res) => {
   }
 
   const updatedNotice = req.query.updated ? '<p class="badge ok">Booking updated.</p>' : "";
+  const outletWarnBooking =
+    typeof req.query.outletWarn === "string" && req.query.outletWarn.trim().length > 0
+      ? req.query.outletWarn.trim().slice(0, 800)
+      : "";
+  const fbPostedNotice = req.query.fbPosted
+    ? `<p class="badge ok">Restaurant / coffee charge posted to this guest&apos;s folio.</p>${
+        outletWarnBooking
+          ? `<p class="badge alert" role="alert" style="margin-top:8px"><strong>Outlet WhatsApp:</strong> ${escapeHtml(outletWarnBooking)}</p>`
+          : ""
+      }`
+    : "";
+  const paymentLinkNotice = req.query.paymentLinkSent ? '<p class="badge ok">Payment link sent to guest via WhatsApp.</p>' : "";
   const invoiceSentNotice = req.query.invoiceSent ? '<p class="badge ok">Invoice PDF sent to guest.</p>' : "";
+  const quotationSentNotice = req.query.quotationSent ? '<p class="badge ok">Quotation PDF sent to guest.</p>' : "";
+  const receiptSentNotice = req.query.receiptSent ? '<p class="badge ok">Receipt PDF sent to guest.</p>' : "";
   const invoiceErrorNotice =
     typeof req.query.invoiceError === "string" ? `<p class="badge alert">${escapeHtml(req.query.invoiceError)}</p>` : "";
-  const [selectedUnitCode, latestInvoiceDispatch] = await Promise.all([getBookingUnitCode(booking.id), getLatestInvoiceDispatch(booking.id)]);
+  const [selectedUnitCode, latestInvoiceDispatch, fbFolio, fbOrders] = await Promise.all([
+    getBookingUnitCode(booking.id),
+    getLatestInvoiceDispatch(booking.id),
+    getFbFolioForBooking(booking.id),
+    prisma.fbOrder.findMany({
+      where: { bookingId: booking.id, status: FbOrderStatus.POSTED },
+      orderBy: { createdAt: "desc" },
+      include: { lines: true }
+    })
+  ]);
+  const folioGrandTotal = Number((booking.totalAmount + fbFolio.subtotal).toFixed(2));
+  const noUnitWarning = selectedUnitCode
+    ? ""
+    : '<p class="badge alert">No room unit assigned yet. Booking can still proceed with auto-assignment on confirmation.</p>';
   const paymentChangedSinceLastInvoice = Boolean(
     latestInvoiceDispatch.paymentStatusAtSend && latestInvoiceDispatch.paymentStatusAtSend !== booking.paymentStatus
   );
@@ -1170,6 +8180,8 @@ adminRouter.get("/bookings/:id", requireAuth, async (req, res) => {
     ? `Last sent ${formatDateTime(latestInvoiceDispatch.sentAt)}${latestInvoiceDispatch.paymentStatusAtSend ? ` (payment status at send: ${latestInvoiceDispatch.paymentStatusAtSend})` : ""}.`
     : "Invoice not sent yet.";
   const canSendInvoice = booking.status === BookingStatus.CONFIRMED;
+  const canSendQuotation = booking.status !== BookingStatus.CANCELLED;
+  const canSendReceipt = booking.status === BookingStatus.CONFIRMED;
   const paymentRows = booking.paymentIntents
     .map(
       (payment) => `<tr>
@@ -1182,6 +8194,19 @@ adminRouter.get("/bookings/:id", requireAuth, async (req, res) => {
     )
     .join("");
 
+  const fbOrderRows = fbOrders
+    .map(
+      (o) =>
+        `<tr>
+      <td>${formatDateTime(o.createdAt)}</td>
+      <td>${escapeHtml(o.outletType === FbOutletType.COFFEE_SHOP ? "Coffee shop" : "Restaurant")}</td>
+      <td>${escapeHtml(o.serviceMode === FbServiceMode.ROOM_SERVICE ? "Room service" : "Dining in")}</td>
+      <td>${escapeHtml(o.lines.map((l) => `${l.quantity}× ${l.itemNameSnap}`).join(", "))}</td>
+      <td>${formatMoney(o.totalAmount, booking.currency)}</td>
+    </tr>`
+    )
+    .join("");
+
   const conversationLink = booking.conversationId
     ? `<a class="inline-link" href="/admin/conversations/${encodeURIComponent(booking.conversationId)}">Open linked conversation</a>`
     : '<span class="muted">No conversation linked.</span>';
@@ -1190,14 +8215,21 @@ adminRouter.get("/bookings/:id", requireAuth, async (req, res) => {
 <h2>Booking ${escapeHtml(booking.id)}</h2>
 <p class="muted">Full booking history and actions for front desk operations.</p>
 ${updatedNotice}
+${fbPostedNotice}
+${paymentLinkNotice}
 ${invoiceSentNotice}
+${quotationSentNotice}
+${receiptSentNotice}
 ${invoiceErrorNotice}
+${noUnitWarning}
 <div class="actions">
   <a class="btn-link" href="/admin/bookings">Back to reports</a>
   <a class="btn-link" href="/admin/calendar?start=${formatDate(booking.checkIn)}&days=14">Open calendar around stay</a>
   <a class="btn-link primary" href="/admin/inventory?start=${formatDate(booking.checkIn)}&days=7">Adjust inventory around check-in</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/select-unit">Select room unit</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/confirm">Confirmation summary</a>
+  <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/fb-order">Post F&amp;B charge (restaurant / coffee)</a>
+  <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">F&amp;B menu &amp; prices</a>
 </div>
 <div class="grid-2">
   <section>
@@ -1205,11 +8237,20 @@ ${invoiceErrorNotice}
     <table>
       <tbody>
         <tr><th>Guest</th><td>${escapeHtml(booking.guest.fullName ?? "-")} (${escapeHtml(booking.guest.phoneE164)})</td></tr>
+        <tr><th>Phone Number</th><td>${escapeHtml(booking.guest.phoneE164)}</td></tr>
         <tr><th>Property</th><td>${escapeHtml(booking.property.name)}</td></tr>
         <tr><th>Room type</th><td>${escapeHtml(booking.roomType.name)}</td></tr>
         <tr><th>Selected unit</th><td>${selectedUnitCode ? escapeHtml(selectedUnitCode) : '<span class="badge pending">Not selected</span>'}</td></tr>
         <tr><th>Stay</th><td>${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)} (${booking.nights} nights)</td></tr>
-        <tr><th>Total</th><td>${formatMoney(booking.totalAmount, booking.currency)}</td></tr>
+        <tr><th>Guests</th><td>${booking.adults}</td></tr>
+        <tr><th>Accommodation total</th><td>${formatMoney(booking.totalAmount, booking.currency)}</td></tr>
+        <tr><th>F&amp;B (posted to folio)</th><td>${
+          fbFolio.subtotal > 0 ? formatMoney(fbFolio.subtotal, booking.currency) : '<span class="muted">—</span>'
+        }</td></tr>
+        <tr><th>Folio total (invoice)</th><td><strong>${formatMoney(folioGrandTotal, booking.currency)}</strong> <span class="muted">accommodation + F&amp;B</span></td></tr>
+        <tr><th>Source</th><td><span class="badge ${booking.conversationId ? "ok" : "pending"}">${escapeHtml(
+    booking.conversationId ? "WhatsApp" : booking.source
+  )}</span></td></tr>
         <tr><th>Status</th><td><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td></tr>
         <tr><th>Payment</th><td><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td></tr>
         <tr><th>Conversation</th><td>${conversationLink}</td></tr>
@@ -1233,6 +8274,9 @@ ${invoiceErrorNotice}
       <label>Payment status
         <select name="paymentStatus" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
           <option value="PENDING" ${booking.paymentStatus === "PENDING" ? "selected" : ""}>Pending</option>
+          <option value="REQUIRES_ACTION" ${booking.paymentStatus === "REQUIRES_ACTION" ? "selected" : ""}>Requires action</option>
+          <option value="LPO" ${booking.paymentStatus === "LPO" ? "selected" : ""}>LPO (company purchase order)</option>
+          <option value="FRIENDS_TRANSFER" ${booking.paymentStatus === "FRIENDS_TRANSFER" ? "selected" : ""}>Friends / bank transfer (manual)</option>
           <option value="SUCCEEDED" ${booking.paymentStatus === "SUCCEEDED" ? "selected" : ""}>Succeeded</option>
           <option value="FAILED" ${booking.paymentStatus === "FAILED" ? "selected" : ""}>Failed</option>
           <option value="REFUNDED" ${booking.paymentStatus === "REFUNDED" ? "selected" : ""}>Refunded</option>
@@ -1240,20 +8284,44 @@ ${invoiceErrorNotice}
       </label>
       <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Update Payment Status</button>
     </form>
-    <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/send-invoice" style="display:grid; gap:8px; margin-top:12px">
-      <p class="muted" style="margin:0">${escapeHtml(invoiceStatusNote)}</p>
-      ${
-        paymentChangedSinceLastInvoice
-          ? '<p class="badge alert" style="margin:0; width:fit-content">Payment status changed since last invoice. Resend recommended.</p>'
-          : ""
-      }
-      <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#128c7e; color:#fff; font-weight:700" ${
-        canSendInvoice ? "" : "disabled"
-      }>${latestInvoiceDispatch.sentAt ? "Resend Invoice PDF to Guest" : "Send Invoice PDF to Guest"}</button>
-      ${canSendInvoice ? "" : '<p class="muted" style="margin:0">Invoice can be sent after booking is confirmed.</p>'}
-    </form>
+    <p class="muted" style="margin:0;font-size:12px">Follow-up lists: export <a class="inline-link" href="/admin/bookings/export?paymentStatus=LPO">LPO</a> or <a class="inline-link" href="/admin/bookings/export?paymentStatus=FRIENDS_TRANSFER">friends transfer</a> bookings from the <a class="inline-link" href="/admin/bookings">booking report</a>.</p>
+    <div style="display:grid; gap:10px; margin-top:12px">
+      <p class="muted" style="margin:0"><strong>${escapeHtml(hotel.displayName)}</strong> — send PDFs to the guest on WhatsApp (hotel-led wording; not a duplicate booking confirmation).</p>
+      <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/send-invoice" style="display:grid; gap:6px">
+        <p class="muted" style="margin:0">${escapeHtml(invoiceStatusNote)}</p>
+        ${
+          paymentChangedSinceLastInvoice
+            ? '<p class="badge alert" style="margin:0; width:fit-content">Payment status changed since last invoice. Resend recommended.</p>'
+            : ""
+        }
+        <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#128c7e; color:#fff; font-weight:700" ${
+          canSendInvoice ? "" : "disabled"
+        }>${latestInvoiceDispatch.sentAt ? "Resend invoice (folio)" : "Send invoice (folio)"}</button>
+        ${canSendInvoice ? "" : '<p class="muted" style="margin:0">Invoice is available after the booking is confirmed.</p>'}
+      </form>
+      <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/send-quotation" style="display:grid; gap:6px">
+        <p class="muted" style="margin:0;font-size:12px">Quotation — proposed charges for planning (clearly not a booking confirmation).</p>
+        <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#0f766e; color:#fff; font-weight:700" ${
+          canSendQuotation ? "" : "disabled"
+        }>Send quotation PDF</button>
+      </form>
+      <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/send-receipt" style="display:grid; gap:6px">
+        <p class="muted" style="margin:0;font-size:12px">Receipt — payment acknowledgement / folio snapshot.</p>
+        <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#115e59; color:#fff; font-weight:700" ${
+          canSendReceipt ? "" : "disabled"
+        }>Send receipt PDF</button>
+      </form>
+    </div>
   </section>
 </div>
+<section style="margin-top:14px">
+  <h3>Food &amp; beverage (folio)</h3>
+  <p class="muted">Posted from the menu; included on the guest invoice PDF with accommodation.</p>
+  <table>
+    <thead><tr><th>Posted</th><th>Outlet</th><th>Service</th><th>Items</th><th>Total</th></tr></thead>
+    <tbody>${fbOrderRows || '<tr><td colspan="5">No F&amp;B charges on this folio yet.</td></tr>'}</tbody>
+  </table>
+</section>
 <section style="margin-top:14px">
   <h3>Payment Intent History</h3>
   <table>
@@ -1265,7 +8333,61 @@ ${invoiceErrorNotice}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/bookings/:id/select-unit", requireAuth, async (req, res) => {
+adminRouter.post("/reports-center/guest-broadcast", requirePermission("REPORTS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/reports-center");
+    return;
+  }
+  const message = String(req.body.message ?? "").trim();
+  const phonesCsv = String(req.body.phonesCsv ?? "");
+  const start = String(req.body.start ?? "");
+  const end = String(req.body.end ?? "");
+  const guestStart = String(req.body.guestStart ?? "");
+  const guestEnd = String(req.body.guestEnd ?? "");
+  const unitId = String(req.body.unitId ?? "");
+  const onlyMissingSignature = String(req.body.onlyMissingSignature ?? "0") === "1" ? "1" : "0";
+  const onlyMissingIdCopy = String(req.body.onlyMissingIdCopy ?? "0") === "1" ? "1" : "0";
+  const onlyMissingTransactionNumber = String(req.body.onlyMissingTransactionNumber ?? "0") === "1" ? "1" : "0";
+  const showIncompleteHandoverOnly = String(req.body.showIncompleteHandoverOnly ?? "0") === "1" ? "1" : "0";
+  if (!message) {
+    res.redirect(
+      `/admin/reports-center?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&guestStart=${encodeURIComponent(guestStart)}&guestEnd=${encodeURIComponent(guestEnd)}&unitId=${encodeURIComponent(unitId)}&onlyMissingSignature=${encodeURIComponent(onlyMissingSignature)}&onlyMissingIdCopy=${encodeURIComponent(onlyMissingIdCopy)}&onlyMissingTransactionNumber=${encodeURIComponent(onlyMissingTransactionNumber)}&showIncompleteHandoverOnly=${encodeURIComponent(showIncompleteHandoverOnly)}`
+    );
+    return;
+  }
+  const phones = Array.from(new Set(phonesCsv.split(",").map((p) => p.trim()).filter((p) => p.length > 5)));
+  const config = loadPartnerSetupConfig(hotel.id);
+  for (const phone of phones) {
+    await sendWhatsAppText({
+      to: phone.replace(/\D/g, ""),
+      body: message,
+      phoneNumberId: config.whatsappPhoneNumberId || undefined
+    });
+  }
+  await logAudit({
+    hotelId: hotel.id,
+    action: "REPORTS_GUEST_BROADCAST_SENT",
+    entityType: "Report",
+    metadata: {
+      recipients: phones.length,
+      start,
+      end,
+      guestStart,
+      guestEnd,
+      unitId,
+      onlyMissingSignature,
+      onlyMissingIdCopy,
+      onlyMissingTransactionNumber,
+      showIncompleteHandoverOnly
+    }
+  });
+  res.redirect(
+    `/admin/reports-center?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&guestStart=${encodeURIComponent(guestStart)}&guestEnd=${encodeURIComponent(guestEnd)}&unitId=${encodeURIComponent(unitId)}&onlyMissingSignature=${encodeURIComponent(onlyMissingSignature)}&onlyMissingIdCopy=${encodeURIComponent(onlyMissingIdCopy)}&onlyMissingTransactionNumber=${encodeURIComponent(onlyMissingTransactionNumber)}&showIncompleteHandoverOnly=${encodeURIComponent(showIncompleteHandoverOnly)}&broadcastSent=1`
+  );
+});
+
+adminRouter.get("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Select Unit</h2><p>No hotel data found.</p>", true));
@@ -1282,7 +8404,7 @@ adminRouter.get("/bookings/:id/select-unit", requireAuth, async (req, res) => {
     return;
   }
 
-  const [selectedUnitCode, minInventory, bookedUnits] = await Promise.all([
+  const [selectedUnitCode, minInventory, bookedUnits, allUnits] = await Promise.all([
     getBookingUnitCode(booking.id),
     getMinInventoryForStay({
       hotelId: hotel.id,
@@ -1297,16 +8419,17 @@ adminRouter.get("/bookings/:id/select-unit", requireAuth, async (req, res) => {
       checkIn: booking.checkIn,
       checkOut: booking.checkOut,
       excludeBookingId: booking.id
+    }),
+    prisma.roomUnit.findMany({
+      where: { hotelId: hotel.id, roomTypeId: booking.roomTypeId, isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: { name: true }
     })
   ]);
 
-  const availableUnits: string[] = [];
-  for (let unitNo = 1; unitNo <= Math.max(minInventory, 0); unitNo += 1) {
-    const code = buildUnitCode(booking.roomType.code, unitNo);
-    if (!bookedUnits.has(code) || code === selectedUnitCode) {
-      availableUnits.push(code);
-    }
-  }
+  const availableUnits = allUnits
+    .map((unit) => unit.name)
+    .filter((name) => !bookedUnits.has(name) || name === selectedUnitCode);
 
   const unitOptions = availableUnits
     .map((unitCode) => `<option value="${escapeHtml(unitCode)}" ${unitCode === selectedUnitCode ? "selected" : ""}>${escapeHtml(unitCode)}</option>`)
@@ -1343,7 +8466,7 @@ ${renderBookingWizard(2, { bookingId: booking.id, conversationId: booking.conver
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/bookings/:id/select-unit", requireAuth, async (req, res) => {
+adminRouter.post("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/bookings");
@@ -1365,12 +8488,26 @@ adminRouter.post("/bookings/:id/select-unit", requireAuth, async (req, res) => {
     return;
   }
 
+  const unit = await prisma.roomUnit.findFirst({
+    where: { hotelId: hotel.id, roomTypeId: booking.roomTypeId, name: unitCode, isActive: true },
+    select: { id: true, name: true }
+  });
+  if (!unit) {
+    res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}/select-unit`);
+    return;
+  }
+
+  await prisma.booking.update({
+    where: { id: booking.id },
+    data: { roomUnitId: unit.id }
+  });
+
   await logAudit({
     hotelId: hotel.id,
     action: "BOOKING_UNIT_SELECTED",
     entityType: "Booking",
     entityId: booking.id,
-    metadata: { unitCode, checkIn: formatDate(booking.checkIn), checkOut: formatDate(booking.checkOut) }
+    metadata: { unitCode: unit.name, checkIn: formatDate(booking.checkIn), checkOut: formatDate(booking.checkOut) }
   });
 
   if (booking.conversationId) {
@@ -1387,14 +8524,14 @@ adminRouter.post("/bookings/:id/select-unit", requireAuth, async (req, res) => {
         check_out: formatDate(booking.checkOut),
         booking_id: booking.id
       },
-      `Room unit ${unitCode} selected for booking ${booking.id}.`
+      `Room unit ${unit.name} selected for booking ${booking.id}.`
     );
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: booking.conversationId,
         direction: MessageDirection.OUTBOUND,
-        body: `${quoteMessage}\nUnit: ${unitCode}.`,
+        body: `${quoteMessage}\nUnit: ${unit.name}.`,
         aiIntent: "UNIT_SELECTED"
       }
     });
@@ -1407,7 +8544,7 @@ adminRouter.post("/bookings/:id/select-unit", requireAuth, async (req, res) => {
   res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}/confirm`);
 });
 
-adminRouter.get("/bookings/:id/confirm", requireAuth, async (req, res) => {
+adminRouter.get("/bookings/:id/confirm", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Confirm Booking</h2><p>No hotel data found.</p>", true));
@@ -1423,13 +8560,24 @@ adminRouter.get("/bookings/:id/confirm", requireAuth, async (req, res) => {
     return;
   }
   const selectedUnitCode = await getBookingUnitCode(booking.id);
+  const activeUnitCount = await prisma.roomUnit.count({
+    where: { hotelId: hotel.id, roomTypeId: booking.roomTypeId, isActive: true }
+  });
   const policyText =
     "Cancellation policy: Free cancellation up to 48 hours before check-in. Late cancellation or no-show may incur one-night charge.";
-  const canConfirm = Boolean(selectedUnitCode);
+  const unitWarning = selectedUnitCode
+    ? ""
+    : '<p class="badge alert">No room unit is currently assigned. Confirming will try auto-assignment; booking still proceeds if no unit is available.</p>';
+  const inventoryWarning =
+    activeUnitCount < booking.roomType.totalInventory
+      ? `<p class="badge alert">Active units (${activeUnitCount}) are fewer than inventory (${booking.roomType.totalInventory}).</p>`
+      : "";
   const content = `
 <h2>Booking Confirmation Summary</h2>
 <p class="muted">Review guest details, selected unit and pricing before final confirmation.</p>
 ${renderBookingWizard(3, { bookingId: booking.id, conversationId: booking.conversationId ?? undefined })}
+${unitWarning}
+${inventoryWarning}
 <div class="actions">
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Back to booking</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/select-unit">Change unit selection</a>
@@ -1447,14 +8595,12 @@ ${renderBookingWizard(3, { bookingId: booking.id, conversationId: booking.conver
   </tbody>
 </table>
 <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/confirm" style="max-width:420px; margin-top:12px">
-  <button type="submit" style="width:100%; padding:10px 14px; border:0; border-radius:10px; background:#128c7e; color:#fff; font-weight:700" ${
-    canConfirm ? "" : "disabled"
-  }>Confirm Booking</button>
+  <button type="submit" style="width:100%; padding:10px 14px; border:0; border-radius:10px; background:#128c7e; color:#fff; font-weight:700">Confirm Booking</button>
 </form>`;
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/bookings/:id/confirm", requireAuth, async (req, res) => {
+adminRouter.post("/bookings/:id/confirm", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/bookings");
@@ -1469,10 +8615,34 @@ adminRouter.post("/bookings/:id/confirm", requireAuth, async (req, res) => {
     res.redirect("/admin/bookings");
     return;
   }
-  const selectedUnitCode = await getBookingUnitCode(booking.id);
+  let selectedUnitCode = await getBookingUnitCode(booking.id);
   if (!selectedUnitCode) {
-    res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}/select-unit`);
-    return;
+    const assignedUnitId = await autoAssignRoomUnitForBookingTx({
+      tx: prisma,
+      hotelId: hotel.id,
+      roomTypeId: booking.roomTypeId,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      excludeBookingId: booking.id
+    });
+    if (assignedUnitId) {
+      await prisma.booking.update({
+        where: { id: booking.id },
+        data: { roomUnitId: assignedUnitId }
+      });
+      const assignedUnit = await prisma.roomUnit.findUnique({ where: { id: assignedUnitId }, select: { name: true } });
+      selectedUnitCode = assignedUnit?.name ?? null;
+      if (selectedUnitCode) {
+        await logAudit({
+          hotelId: hotel.id,
+          action: "BOOKING_UNIT_AUTO_ASSIGNED",
+          entityType: "Booking",
+          entityId: booking.id,
+          bookingId: booking.id,
+          metadata: { unitCode: selectedUnitCode, checkIn: formatDate(booking.checkIn), checkOut: formatDate(booking.checkOut) }
+        });
+      }
+    }
   }
 
   await prisma.booking.update({
@@ -1480,11 +8650,47 @@ adminRouter.post("/bookings/:id/confirm", requireAuth, async (req, res) => {
     data: { status: BookingStatus.CONFIRMED }
   });
 
+  const confirmSession = getSession(req);
+  await recordBookingStatusChange(prisma, {
+    hotelId: hotel.id,
+    bookingId: booking.id,
+    fromStatus: booking.status,
+    toStatus: BookingStatus.CONFIRMED,
+    source: "ADMIN",
+    actorUserId: confirmSession?.staffId ?? null
+  });
+
+  const confirmed = await prisma.booking.findFirst({
+    where: { id: booking.id, hotelId: hotel.id },
+    select: { guestId: true, roomUnitId: true, currency: true }
+  });
+  if (confirmed) {
+    await ensureActiveFolio(prisma, {
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      guestId: confirmed.guestId,
+      roomUnitId: confirmed.roomUnitId,
+      currency: confirmed.currency,
+      staffId: confirmSession?.staffId ?? null
+    });
+  }
+
+  await reserveInventoryForBooking({
+    tx: prisma,
+    hotelId: hotel.id,
+    roomTypeId: booking.roomTypeId,
+    propertyId: booking.propertyId,
+    checkIn: booking.checkIn,
+    checkOut: booking.checkOut,
+    rooms: 1
+  });
+
   await logAudit({
     hotelId: hotel.id,
     action: "BOOKING_CONFIRMED_WITH_UNIT",
     entityType: "Booking",
     entityId: booking.id,
+    bookingId: booking.id,
     metadata: { unitCode: selectedUnitCode, checkIn: formatDate(booking.checkIn), checkOut: formatDate(booking.checkOut) }
   });
 
@@ -1500,14 +8706,16 @@ adminRouter.post("/bookings/:id/confirm", requireAuth, async (req, res) => {
         check_out: formatDate(booking.checkOut),
         booking_id: booking.id
       },
-      `Booking ${booking.id} confirmed. Unit ${selectedUnitCode} reserved for ${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}.`
+      selectedUnitCode
+        ? `Booking ${booking.id} confirmed. Unit ${selectedUnitCode} reserved for ${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}.`
+        : `Booking ${booking.id} confirmed for ${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}. Unit assignment is pending.`
     );
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: booking.conversationId,
         direction: MessageDirection.OUTBOUND,
-        body: `${confirmationMessage} Unit: ${selectedUnitCode}.`,
+        body: selectedUnitCode ? `${confirmationMessage} Unit: ${selectedUnitCode}.` : `${confirmationMessage} Unit assignment pending.`,
         aiIntent: "BOOKING_CONFIRMED"
       }
     });
@@ -1517,20 +8725,18 @@ adminRouter.post("/bookings/:id/confirm", requireAuth, async (req, res) => {
     });
   }
 
-  const autoInvoice = await sendInvoicePdfForBooking({
+  const paymentLink = await sendBookingPaymentLinkAfterConfirmation({
     hotelId: hotel.id,
-    bookingId: booking.id,
-    trigger: "BOOKING_CONFIRMED_ACTION",
-    force: false
+    bookingId: booking.id
   });
 
   const query = new URLSearchParams({ updated: "1" });
-  if (autoInvoice.sent) query.set("invoiceSent", "1");
-  if (autoInvoice.error) query.set("invoiceError", autoInvoice.error);
+  if (paymentLink.sent) query.set("paymentLinkSent", "1");
+  if (paymentLink.error) query.set("invoiceError", paymentLink.error);
   res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}?${query.toString()}`);
 });
 
-adminRouter.post("/bookings/:id/send-invoice", requireAuth, async (req, res) => {
+adminRouter.post("/bookings/:id/send-invoice", requirePermission("BILLING", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/bookings");
@@ -1548,7 +8754,8 @@ adminRouter.post("/bookings/:id/send-invoice", requireAuth, async (req, res) => 
     hotelId: hotel.id,
     bookingId: booking.id,
     trigger: "MANUAL_SEND_OR_RESEND",
-    force: true
+    force: true,
+    documentKind: "invoice"
   });
 
   const query = new URLSearchParams();
@@ -1558,7 +8765,59 @@ adminRouter.post("/bookings/:id/send-invoice", requireAuth, async (req, res) => 
   res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}?${query.toString()}`);
 });
 
-adminRouter.post("/bookings/:id/status", requireAuth, async (req, res) => {
+adminRouter.post("/bookings/:id/send-quotation", requirePermission("BILLING", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, hotelId: hotel.id }, select: { id: true } });
+  if (!booking) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const result = await sendInvoicePdfForBooking({
+    hotelId: hotel.id,
+    bookingId: booking.id,
+    trigger: "MANUAL_SEND_QUOTATION",
+    force: true,
+    documentKind: "quotation"
+  });
+  const query = new URLSearchParams();
+  if (result.sent) query.set("quotationSent", "1");
+  if (result.error) query.set("invoiceError", result.error);
+  if (!result.sent && !result.error) query.set("invoiceError", "Quotation not sent (booking may be cancelled).");
+  res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}?${query.toString()}`);
+});
+
+adminRouter.post("/bookings/:id/send-receipt", requirePermission("BILLING", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({ where: { id: bookingId, hotelId: hotel.id }, select: { id: true } });
+  if (!booking) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const result = await sendInvoicePdfForBooking({
+    hotelId: hotel.id,
+    bookingId: booking.id,
+    trigger: "MANUAL_SEND_RECEIPT",
+    force: true,
+    documentKind: "receipt"
+  });
+  const query = new URLSearchParams();
+  if (result.sent) query.set("receiptSent", "1");
+  if (result.error) query.set("invoiceError", result.error);
+  if (!result.sent && !result.error) query.set("invoiceError", "Receipt not sent. Booking may not be confirmed.");
+  res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}?${query.toString()}`);
+});
+
+adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/bookings");
@@ -1586,17 +8845,81 @@ adminRouter.post("/bookings/:id/status", requireAuth, async (req, res) => {
       where: { id: bookingId, hotelId: hotel.id },
       data: { status: nextStatus }
     });
+    const statusSession = getSession(req);
+    await recordBookingStatusChange(prisma, {
+      hotelId: hotel.id,
+      bookingId,
+      fromStatus: existingBooking.status,
+      toStatus: nextStatus,
+      source: "ADMIN",
+      actorUserId: statusSession?.staffId ?? null
+    });
     await logAudit({
       hotelId: hotel.id,
       action: "BOOKING_STATUS_UPDATED",
       entityType: "Booking",
       entityId: bookingId,
+      bookingId,
       metadata: { status: nextStatus }
     });
   }
   const becameConfirmed = nextStatus === BookingStatus.CONFIRMED && existingBooking.status !== BookingStatus.CONFIRMED;
   let autoInvoiceResult: { sent: boolean; skipped: boolean; error?: string } | null = null;
   if (becameConfirmed) {
+    const confirmedBooking = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id },
+      select: {
+        roomTypeId: true,
+        propertyId: true,
+        checkIn: true,
+        checkOut: true,
+        roomUnitId: true,
+        guestId: true,
+        currency: true
+      }
+    });
+    if (confirmedBooking) {
+      if (!confirmedBooking.roomUnitId) {
+        const assignedUnitId = await autoAssignRoomUnitForBookingTx({
+          tx: prisma,
+          hotelId: hotel.id,
+          roomTypeId: confirmedBooking.roomTypeId,
+          checkIn: confirmedBooking.checkIn,
+          checkOut: confirmedBooking.checkOut,
+          excludeBookingId: bookingId
+        });
+        if (assignedUnitId) {
+          await prisma.booking.update({
+            where: { id: bookingId },
+            data: { roomUnitId: assignedUnitId }
+          });
+        }
+      }
+      await reserveInventoryForBooking({
+        tx: prisma,
+        hotelId: hotel.id,
+        roomTypeId: confirmedBooking.roomTypeId,
+        propertyId: confirmedBooking.propertyId,
+        checkIn: confirmedBooking.checkIn,
+        checkOut: confirmedBooking.checkOut,
+        rooms: 1
+      });
+      const b2 = await prisma.booking.findFirst({
+        where: { id: bookingId, hotelId: hotel.id },
+        select: { guestId: true, roomUnitId: true, currency: true }
+      });
+      if (b2) {
+        const sess = getSession(req);
+        await ensureActiveFolio(prisma, {
+          hotelId: hotel.id,
+          bookingId,
+          guestId: b2.guestId,
+          roomUnitId: b2.roomUnitId,
+          currency: b2.currency,
+          staffId: sess?.staffId ?? null
+        });
+      }
+    }
     autoInvoiceResult = await sendInvoicePdfForBooking({
       hotelId: hotel.id,
       bookingId,
@@ -1610,7 +8933,7 @@ adminRouter.post("/bookings/:id/status", requireAuth, async (req, res) => {
   res.redirect(`/admin/bookings/${encodeURIComponent(bookingId)}?${query.toString()}`);
 });
 
-adminRouter.post("/bookings/:id/payment", requireAuth, async (req, res) => {
+adminRouter.post("/bookings/:id/payment", requirePermission("BILLING", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/bookings");
@@ -1619,12 +8942,21 @@ adminRouter.post("/bookings/:id/payment", requireAuth, async (req, res) => {
 
   const bookingId = String(req.params.id ?? "");
   const rawStatus = String(req.body.paymentStatus ?? "");
-  const allowed: PaymentStatus[] = [PaymentStatus.PENDING, PaymentStatus.SUCCEEDED, PaymentStatus.FAILED, PaymentStatus.REFUNDED];
+  const allowed: PaymentStatus[] = [
+    PaymentStatus.PENDING,
+    PaymentStatus.REQUIRES_ACTION,
+    PaymentStatus.SUCCEEDED,
+    PaymentStatus.FAILED,
+    PaymentStatus.REFUNDED,
+    PaymentStatus.LPO,
+    PaymentStatus.FRIENDS_TRANSFER
+  ];
   const nextPaymentStatus: PaymentStatus | null = allowed.includes(rawStatus as PaymentStatus)
     ? (rawStatus as PaymentStatus)
     : null;
 
   let invoiceSent = false;
+  let invoiceError: string | undefined;
   if (nextPaymentStatus) {
     await prisma.booking.updateMany({
       where: { id: bookingId, hotelId: hotel.id },
@@ -1637,16 +8969,20 @@ adminRouter.post("/bookings/:id/payment", requireAuth, async (req, res) => {
       entityId: bookingId,
       metadata: { paymentStatus: nextPaymentStatus }
     });
-    const invoiceResult = await sendInvoicePdfForBooking({
-      hotelId: hotel.id,
-      bookingId,
-      trigger: "PAYMENT_STATUS_UPDATED",
-      force: true
-    });
-    invoiceSent = invoiceResult.sent;
+    if (nextPaymentStatus === PaymentStatus.SUCCEEDED) {
+      const invoiceResult = await sendInvoicePdfForBooking({
+        hotelId: hotel.id,
+        bookingId,
+        trigger: "PAYMENT_STATUS_TO_SUCCEEDED",
+        force: true
+      });
+      invoiceSent = invoiceResult.sent;
+      invoiceError = invoiceResult.error;
+    }
   }
   const query = new URLSearchParams({ updated: "1" });
   if (invoiceSent) query.set("invoiceSent", "1");
+  if (invoiceError) query.set("invoiceError", invoiceError.slice(0, 500));
   res.redirect(`/admin/bookings/${encodeURIComponent(bookingId)}?${query.toString()}`);
 });
 
@@ -1660,8 +8996,21 @@ adminRouter.get("/calendar", requireAuth, async (req, res) => {
     return;
   }
 
-  const start = parseDateInput(req.query.start, startOfDay(new Date()));
-  const days = clamp(parseIntegerInput(req.query.days, 14), 7, 21);
+  const today = startOfDay(new Date());
+  const requestedStart = parseDateInput(req.query.start, today);
+  const view = typeof req.query.view === "string" && ["daily", "weekly", "monthly"].includes(req.query.view)
+    ? (req.query.view as "daily" | "weekly" | "monthly")
+    : "weekly";
+  let start = requestedStart;
+  let days: number;
+  if (view === "daily") {
+    days = 1;
+  } else if (view === "monthly") {
+    start = new Date(requestedStart.getFullYear(), requestedStart.getMonth(), 1);
+    days = new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
+  } else {
+    days = 7;
+  }
   const dates = enumerateDates(start, days);
   const endExclusive = addDays(start, days);
   const roomTypeIds = hotel.roomTypes.map((room) => room.id);
@@ -1671,7 +9020,7 @@ adminRouter.get("/calendar", requireAuth, async (req, res) => {
   });
   const inventoryMap = new Map<string, (typeof inventories)[number]>();
   for (const row of inventories) {
-    inventoryMap.set(`${row.roomTypeId}_${formatDate(row.date)}`, row);
+    inventoryMap.set(`${row.roomTypeId}_${formatDateForInput(row.date)}`, row);
   }
 
   const bookings = await prisma.booking.findMany({
@@ -1681,21 +9030,23 @@ adminRouter.get("/calendar", requireAuth, async (req, res) => {
       status: { in: ["PENDING", "CONFIRMED"] },
       checkIn: { lt: endExclusive },
       checkOut: { gt: start }
-    }
+    },
+    include: { guest: true, roomType: true },
+    orderBy: { checkIn: "asc" }
   });
 
   const bookingCountMap = new Map<string, number>();
   for (const booking of bookings) {
     for (const date of dates) {
       if (date >= booking.checkIn && date < booking.checkOut) {
-        const key = `${booking.roomTypeId}_${formatDate(date)}`;
+        const key = `${booking.roomTypeId}_${formatDateForInput(date)}`;
         bookingCountMap.set(key, (bookingCountMap.get(key) ?? 0) + 1);
       }
     }
   }
 
   const occupancyByDate = dates.map((date) => {
-    const keyDate = formatDate(date);
+    const keyDate = formatDateForInput(date);
     let totalRooms = 0;
     let usedRooms = 0;
     for (const room of hotel.roomTypes) {
@@ -1714,12 +9065,12 @@ adminRouter.get("/calendar", requireAuth, async (req, res) => {
     };
   });
 
-  const header = dates.map((date) => `<th>${formatDate(date)}</th>`).join("");
+  const header = dates.map((date) => `<th>${formatDateForInput(date)}</th>`).join("");
   const rows = hotel.roomTypes
     .map((room) => {
       const cells = dates
         .map((date) => {
-          const key = `${room.id}_${formatDate(date)}`;
+          const key = `${room.id}_${formatDateForInput(date)}`;
           const inv = inventoryMap.get(key);
           const booked = bookingCountMap.get(key) ?? 0;
           const total = inv?.total ?? room.totalInventory;
@@ -1732,6 +9083,29 @@ adminRouter.get("/calendar", requireAuth, async (req, res) => {
         })
         .join("");
       return `<tr><th>${escapeHtml(room.name)}</th>${cells}</tr>`;
+    })
+    .join("");
+
+  const timelineRows = bookings
+    .map((booking) => {
+      const cells = dates
+        .map((date) => {
+          const inStay = date >= booking.checkIn && date < booking.checkOut;
+          const edgeStart = formatDateForInput(date) === formatDateForInput(booking.checkIn);
+          const edgeEnd = formatDateForInput(addDays(date, 1)) === formatDateForInput(booking.checkOut);
+          if (!inStay) return '<td style="background:#fff"></td>';
+          const bg = booking.status === "CONFIRMED" ? "#128c7e" : "#7dd3fc";
+          const radiusLeft = edgeStart ? "8px" : "0";
+          const radiusRight = edgeEnd ? "8px" : "0";
+          return `<td style="padding:4px"><div title="${escapeHtml(booking.id)}" style="height:14px; background:${bg}; border-radius:${radiusLeft} ${radiusRight} ${radiusRight} ${radiusLeft}"></div></td>`;
+        })
+        .join("");
+      return `<tr>
+        <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">${escapeHtml(booking.id.slice(0, 10))}</a></td>
+        <td>${escapeHtml(booking.guest.fullName ?? booking.guest.phoneE164)}</td>
+        <td>${escapeHtml(booking.roomType.name)}</td>
+        ${cells}
+      </tr>`;
     })
     .join("");
 
@@ -1749,29 +9123,200 @@ adminRouter.get("/calendar", requireAuth, async (req, res) => {
       .join("")}
   </div>
 </div>
-<div class="actions">
-  <a class="btn-link primary" href="/admin/inventory?start=${formatDate(start)}&days=${days}">Edit Inventory for This Range</a>
-  <a class="btn-link" href="/admin/bookings?start=${formatDate(start)}&end=${formatDate(addDays(start, days - 1))}">View Booking Report for Range</a>
-  <a class="btn-link" href="/admin/rooms">Update Room Pricing</a>
-</div>
 <form method="get" action="/admin/calendar" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
-  <label>Start <input type="date" name="start" value="${formatDate(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
-  <label>Days <input type="number" min="7" max="21" name="days" value="${days}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px; width:90px" /></label>
+  <label>Start <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>View
+    <select name="view" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="daily" ${view === "daily" ? "selected" : ""}>Daily</option>
+      <option value="weekly" ${view === "weekly" ? "selected" : ""}>Weekly</option>
+      <option value="monthly" ${view === "monthly" ? "selected" : ""}>Monthly</option>
+    </select>
+  </label>
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Show</button>
 </form>
 <table>
   <thead><tr><th>Room Type</th>${header}</tr></thead>
   <tbody>${rows || '<tr><td colspan="8">No room types found.</td></tr>'}</tbody>
-</table>`;
+</table>
+<section style="margin-top:14px">
+  <h3>Booking Timeline</h3>
+  <p class="muted">Bars show booking stay span across the selected ${view} range.</p>
+  <table>
+    <thead><tr><th>Booking</th><th>Guest</th><th>Room</th>${header}</tr></thead>
+    <tbody>${timelineRows || `<tr><td colspan="${dates.length + 3}">No bookings in this range.</td></tr>`}</tbody>
+  </table>
+</section>`;
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/conversations", requireAuth, async (req, res) => {
+adminRouter.get(
+  "/conversations/live/activity",
+  requirePermissionJson("CONVERSATIONS", "VIEW"),
+  async (req, res) => {
+    const hotel = await prisma.hotel.findUnique({
+      where: { slug: "al-ashkhara-beach-resort" },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.status(404).json({ ok: false, error: "hotel_not_found" });
+      return;
+    }
+    const sinceParam = typeof req.query.since === "string" ? req.query.since : "";
+    let since = new Date(Date.now() - 60_000);
+    if (sinceParam.trim()) {
+      const parsed = new Date(sinceParam);
+      if (!Number.isNaN(parsed.getTime())) since = parsed;
+    }
+
+    const [newConvs, inboundMessages] = await Promise.all([
+      prisma.conversation.findMany({
+        where: { hotelId: hotel.id, createdAt: { gt: since } },
+        include: {
+          guest: true,
+          bookings: { take: 1, select: { id: true } },
+          messages: { orderBy: { createdAt: "asc" }, take: 1 }
+        },
+        orderBy: { createdAt: "asc" }
+      }),
+      prisma.message.findMany({
+        where: {
+          hotelId: hotel.id,
+          direction: MessageDirection.INBOUND,
+          createdAt: { gt: since }
+        },
+        include: {
+          conversation: {
+            include: { guest: true, bookings: { take: 1, select: { id: true } } }
+          }
+        },
+        orderBy: { createdAt: "asc" }
+      })
+    ]);
+
+    const firstMsgIds = new Set<string>();
+    for (const c of newConvs) {
+      const m0 = c.messages[0];
+      if (m0?.id) firstMsgIds.add(m0.id);
+    }
+
+    type ActivityEvent = {
+      type: "conversation_started" | "guest_message";
+      conversationId: string;
+      sortKey: string;
+      title: string;
+      preview: string;
+      category: "booking" | "inquiry";
+    };
+    const events: ActivityEvent[] = [];
+
+    for (const c of newConvs) {
+      const hasBooking = c.bookings.length > 0;
+      const category = classifyConversationActivity(c.state, hasBooking);
+      const guestLabel = c.guest.fullName ?? c.guest.phoneE164;
+      const preview = (c.messages[0]?.body ?? "").slice(0, 140);
+      const title =
+        category === "booking" ? `New chat: ${guestLabel} (booking)` : `New guest chat: ${guestLabel}`;
+      events.push({
+        type: "conversation_started",
+        conversationId: c.id,
+        sortKey: c.createdAt.toISOString(),
+        title,
+        preview,
+        category
+      });
+    }
+
+    for (const m of inboundMessages) {
+      if (firstMsgIds.has(m.id)) continue;
+      const conv = m.conversation;
+      const hasBooking = conv.bookings.length > 0;
+      const category = classifyConversationActivity(conv.state, hasBooking);
+      const guestLabel = conv.guest.fullName ?? conv.guest.phoneE164;
+      const preview = m.body.slice(0, 140);
+      const title =
+        category === "booking" ? `Booking message (${guestLabel})` : `Guest message (${guestLabel})`;
+      events.push({
+        type: "guest_message",
+        conversationId: m.conversationId,
+        sortKey: m.createdAt.toISOString(),
+        title,
+        preview,
+        category
+      });
+    }
+
+    events.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
+
+    res.json({
+      ok: true,
+      serverTime: new Date().toISOString(),
+      events: events.map((e) => ({
+        type: e.type,
+        conversationId: e.conversationId,
+        title: e.title,
+        preview: e.preview,
+        category: e.category
+      }))
+    });
+  }
+);
+
+adminRouter.get(
+  "/conversations/live/:conversationId/messages",
+  requirePermissionJson("CONVERSATIONS", "VIEW"),
+  async (req, res) => {
+    const hotel = await prisma.hotel.findUnique({
+      where: { slug: "al-ashkhara-beach-resort" },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.status(404).json({ ok: false, error: "hotel_not_found" });
+      return;
+    }
+    const conversationId = String(req.params.conversationId ?? "");
+    const conversation = await prisma.conversation.findFirst({
+      where: { id: conversationId, hotelId: hotel.id },
+      select: { id: true }
+    });
+    if (!conversation) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+    const sinceRaw = typeof req.query.since === "string" ? req.query.since.trim() : "";
+    if (!sinceRaw) {
+      res.json({ ok: true, messages: [] });
+      return;
+    }
+    const sinceDate = new Date(sinceRaw);
+    if (Number.isNaN(sinceDate.getTime())) {
+      res.json({ ok: true, messages: [] });
+      return;
+    }
+    const messages = await prisma.message.findMany({
+      where: {
+        conversationId,
+        hotelId: hotel.id,
+        createdAt: { gt: sinceDate }
+      },
+      orderBy: { createdAt: "asc" }
+    });
+    res.json({ ok: true, messages });
+  }
+);
+
+adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Conversations</h2><p>No hotel data found.</p>", true));
     return;
   }
+
+  const now = startOfDay(new Date());
+  const defaultStart = addDays(now, -30);
+  const defaultEnd = now;
+  const start = parseDateInput(req.query.start, defaultStart);
+  const end = parseDateInput(req.query.end, defaultEnd);
+  const endExclusive = addDays(end, 1);
 
   const state = typeof req.query.state === "string" ? req.query.state : "ALL";
   const allowedStates: ConversationState[] = [
@@ -1789,6 +9334,7 @@ adminRouter.get("/conversations", requireAuth, async (req, res) => {
   const conversations = await prisma.conversation.findMany({
     where: {
       hotelId: hotel.id,
+      createdAt: { gte: start, lt: endExclusive },
       ...(selectedState ? { state: selectedState } : {})
     },
     include: {
@@ -1809,13 +9355,16 @@ adminRouter.get("/conversations", requireAuth, async (req, res) => {
     .map((conversation) => {
       const latestMessage = conversation.messages[0];
       const latestBooking = conversation.bookings[0];
+      const agentBadge = (conversation as { agentHandoffAt?: Date | null }).agentHandoffAt
+        ? ' <span class="badge alert" title="Guest requested human agent">Agent handoff</span>'
+        : "";
       return `<tr>
       <td><a class="inline-link" href="/admin/conversations/${encodeURIComponent(conversation.id)}">${escapeHtml(
         conversation.guest.fullName ?? conversation.guest.phoneE164
       )}</a></td>
       <td>${escapeHtml(conversation.guest.phoneE164)}</td>
       <td>${latestMessage ? escapeHtml(latestMessage.body.slice(0, 90)) : "-"}</td>
-      <td><span class="badge ${getConversationBadgeClass(conversation.state)}">${escapeHtml(conversation.state)}</span></td>
+      <td><span class="badge ${getConversationBadgeClass(conversation.state)}">${escapeHtml(conversation.state)}</span>${agentBadge}</td>
       <td>${latestBooking ? `<a class="inline-link" href="/admin/bookings/${encodeURIComponent(latestBooking.id)}">${escapeHtml(latestBooking.id)}</a>` : "-"}</td>
       <td>${formatDateTime(conversation.lastMessageAt ?? conversation.createdAt)}</td>
       <td><a class="inline-link" href="/admin/conversations/${encodeURIComponent(conversation.id)}">Open details</a></td>
@@ -1824,14 +9373,11 @@ adminRouter.get("/conversations", requireAuth, async (req, res) => {
     .join("");
 
   const content = `
-<h2>Conversations</h2>
-<p class="muted">Guest WhatsApp conversations with full history and action controls.</p>
-<div class="actions">
-  <a class="btn-link primary" href="/admin/bookings">Open booking report</a>
-  <a class="btn-link" href="/admin/inventory">Check inventory</a>
-  <a class="btn-link" href="/admin/calendar">Open room calendar</a>
-</div>
+<h2 data-admin-conversations-index="1">Conversations</h2>
+<p class="muted">Guest WhatsApp conversations with full history and action controls. Results are filtered by the selected date range (conversation created date). <strong>New messages poll every 8 seconds</strong> while you are logged in; the list refreshes when activity arrives.</p>
 <form method="get" action="/admin/conversations" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+  <label>From <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>To <input type="date" name="end" value="${formatDateForInput(end)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
   <label>State
     <select name="state" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
       <option value="ALL" ${state === "ALL" ? "selected" : ""}>All</option>
@@ -1845,15 +9391,16 @@ adminRouter.get("/conversations", requireAuth, async (req, res) => {
   </label>
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
 </form>
+<p class="muted" style="margin-bottom:10px">Showing <strong>${conversations.length}</strong> conversation(s) in range ${formatDateForInput(start)} – ${formatDateForInput(end)}.</p>
 <table>
   <thead><tr><th>Guest</th><th>Phone</th><th>Latest Message</th><th>State</th><th>Linked Booking</th><th>Last Activity</th><th>Actions</th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="7">No conversations yet.</td></tr>'}</tbody>
+  <tbody>${rows || '<tr><td colspan="7">No conversations in this date range.</td></tr>'}</tbody>
 </table>`;
 
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/conversations/:id", requireAuth, async (req, res) => {
+adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Conversation</h2><p>No hotel data found.</p>", true));
@@ -1879,17 +9426,28 @@ adminRouter.get("/conversations/:id", requireAuth, async (req, res) => {
     return;
   }
 
+  const agentHandoffAt = (conversation as { agentHandoffAt?: Date | null }).agentHandoffAt;
+  const handledByHuman = Boolean(agentHandoffAt);
+  const handlerLabel = handledByHuman ? "Human receptionist" : "AI";
+  const handlerBadgeClass = handledByHuman ? "badge alert" : "badge ok";
+
   const updatedNotice = req.query.updated ? '<p class="badge ok">Conversation updated.</p>' : "";
+  const replyError = req.query.replyError ? `<p class="badge alert">${escapeHtml(decodeURIComponent(String(req.query.replyError)))}</p>` : "";
+
   const messageTimeline = conversation.messages
     .map(
-      (message) => `<article class="bubble ${message.direction === MessageDirection.INBOUND ? "inbound" : "outbound"}">
+      (message) => {
+        const isInbound = message.direction === MessageDirection.INBOUND;
+        const senderLabel = isInbound ? "Guest" : (message.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI");
+        return `<article class="bubble ${isInbound ? "inbound" : "outbound"}">
       <div class="bubble-head">
-        <span><strong>${escapeHtml(message.direction)}</strong></span>
+        <span><strong>${escapeHtml(senderLabel)}</strong></span>
         <span>${formatDateTime(message.createdAt)}</span>
       </div>
       <p class="bubble-body">${escapeHtml(message.body)}</p>
-      <p class="bubble-meta">Intent: ${escapeHtml(message.aiIntent ?? "-")}</p>
-      </article>`
+      ${message.aiIntent && message.aiIntent !== "MANUAL_REPLY" ? `<p class="bubble-meta">Intent: ${escapeHtml(message.aiIntent)}</p>` : ""}
+      </article>`;
+      }
     )
     .join("");
 
@@ -1904,36 +9462,77 @@ adminRouter.get("/conversations/:id", requireAuth, async (req, res) => {
     )
     .join("");
 
+  const lastMsgAt =
+    conversation.messages.length > 0
+      ? conversation.messages[conversation.messages.length - 1].createdAt.toISOString()
+      : new Date(conversation.createdAt.getTime() - 1).toISOString();
+
   const content = `
-<h2>Conversation Detail</h2>
-<p class="muted">Complete message history and front-desk actions for one guest thread.</p>
+<h2>Conversation</h2>
+<p class="muted" style="margin-top:0">Thread updates automatically every <strong>8 seconds</strong> while this page is open.</p>
 ${updatedNotice}
-<div class="actions">
+${replyError}
+<div class="actions" style="margin-bottom:12px">
   <a class="btn-link" href="/admin/conversations">Back to conversations</a>
   <a class="btn-link" href="/admin/bookings">Open booking report</a>
-  <a class="btn-link primary" href="/admin/inventory">Check room availability</a>
-  <a class="btn-link" href="/admin/conversations/${encodeURIComponent(
-    conversation.id
-  )}/create-booking">Start structured booking flow</a>
+  <a class="btn-link" href="/admin/inventory">Check room availability</a>
+  <a class="btn-link" href="/admin/conversations/${encodeURIComponent(conversation.id)}/create-booking">Start structured booking flow</a>
 </div>
-<div class="grid-2">
-  <section>
-    <h3>Guest & State</h3>
-    <table>
-      <tbody>
-        <tr><th>Guest</th><td>${escapeHtml(conversation.guest.fullName ?? "-")}</td></tr>
-        <tr><th>Phone</th><td>${escapeHtml(conversation.guest.phoneE164)}</td></tr>
-        <tr><th>Current state</th><td><span class="badge ${getConversationBadgeClass(conversation.state)}">${escapeHtml(conversation.state)}</span></td></tr>
-        <tr><th>Property</th><td>${escapeHtml(conversation.property?.name ?? "Not assigned")}</td></tr>
-        <tr><th>Last activity</th><td>${formatDateTime(conversation.lastMessageAt ?? conversation.updatedAt)}</td></tr>
-      </tbody>
-    </table>
-  </section>
-  <section>
-    <h3>Actions</h3>
-    <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/state" style="display:grid; gap:8px; margin-bottom:12px">
-      <label>Conversation state
-        <select name="state" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+
+<div class="chat-layout" style="display:grid; grid-template-columns:1fr 280px; gap:16px; align-items:start; max-width:1200px;">
+  <div class="chat-main" data-chat-conversation-id="${escapeHtml(conversation.id)}" data-chat-last-msg-at="${escapeHtml(lastMsgAt)}" style="background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:420px;">
+    <div class="chat-header" style="padding:12px 16px; border-bottom:1px solid var(--border); background:#f8fafc; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+      <div>
+        <strong style="font-size:15px;">${escapeHtml(conversation.guest.fullName ?? "Guest")}</strong>
+        <span class="muted" style="font-size:13px; margin-left:8px;">${escapeHtml(conversation.guest.phoneE164)}</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span class="badge ${getConversationBadgeClass(conversation.state)}" style="margin:0;">${escapeHtml(conversation.state)}</span>
+        <span class="${handlerBadgeClass}" title="${handledByHuman ? "Guest requested human; staff is handling" : "Chatbot is handling"}">Handled by: ${escapeHtml(handlerLabel)}</span>
+      </div>
+    </div>
+    <div class="chat-messages" style="flex:1; overflow-y:auto; padding:16px; min-height:240px; max-height:50vh;">
+      <div class="timeline" style="display:flex; flex-direction:column; gap:10px;">${messageTimeline || '<p class="muted">No messages yet.</p>'}</div>
+    </div>
+    <div class="chat-reply" style="padding:12px 16px; border-top:1px solid var(--border); background:#f8fafc;">
+      <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/reply" style="display:flex; gap:10px; align-items:flex-end;">
+        <textarea name="replyBody" required rows="2" style="flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-family:inherit; font-size:14px; resize:vertical; min-height:44px;" placeholder="Type a message… e.g. What time will you arrive? Your booking is confirmed."></textarea>
+        <button type="submit" style="padding:10px 18px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700; cursor:pointer; white-space:nowrap;">Send</button>
+      </form>
+      <p class="muted" style="font-size:12px; margin:8px 0 0;">Replies are sent to the guest via WhatsApp.</p>
+    </div>
+  </div>
+  <aside class="chat-sidebar" style="display:flex; flex-direction:column; gap:12px;">
+    <section style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px;">
+      <h3 style="margin:0 0 10px; font-size:14px;">Guest & State</h3>
+      <table style="min-width:0; margin:0;">
+        <tbody>
+          <tr><th style="width:30%;">Guest</th><td>${escapeHtml(conversation.guest.fullName ?? "-")}</td></tr>
+          <tr><th>Phone</th><td>${escapeHtml(conversation.guest.phoneE164)}</td></tr>
+          <tr><th>Property</th><td>${escapeHtml(conversation.property?.name ?? "Not assigned")}</td></tr>
+          <tr><th>Last activity</th><td>${formatDateTime(conversation.lastMessageAt ?? conversation.updatedAt)}</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px;">
+      <h3 style="margin:0 0 10px; font-size:14px;">Conversation mode</h3>
+      <p style="margin:0 0 10px; font-size:13px;"><span class="${handlerBadgeClass}">Handled by: ${escapeHtml(handlerLabel)}</span></p>
+      ${handledByHuman ? `
+      <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/end-agent-handoff">
+        <button type="submit" style="width:100%; padding:9px 12px; border:0; border-radius:8px; background:#6b7280; color:#fff; font-weight:700;">Return to AI Mode</button>
+      </form>
+      <p class="muted" style="font-size:12px; margin:8px 0 0;">Chatbot will respond to the guest again.</p>
+      ` : `
+      <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/switch-to-receptionist">
+        <button type="submit" style="width:100%; padding:9px 12px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700;">Switch to Receptionist Mode</button>
+      </form>
+      <p class="muted" style="font-size:12px; margin:8px 0 0;">Chatbot will stop; staff handles replies.</p>
+      `}
+    </section>
+    <section style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px;">
+      <h3 style="margin:0 0 10px; font-size:14px;">State</h3>
+      <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/state" style="display:grid; gap:8px;">
+        <select name="state" style="padding:8px; border:1px solid var(--border); border-radius:8px;">
           <option value="NEW" ${conversation.state === "NEW" ? "selected" : ""}>New</option>
           <option value="QUALIFYING" ${conversation.state === "QUALIFYING" ? "selected" : ""}>Qualifying</option>
           <option value="QUOTED" ${conversation.state === "QUOTED" ? "selected" : ""}>Quoted</option>
@@ -1941,33 +9540,152 @@ ${updatedNotice}
           <option value="CONFIRMED" ${conversation.state === "CONFIRMED" ? "selected" : ""}>Confirmed</option>
           <option value="CLOSED" ${conversation.state === "CLOSED" ? "selected" : ""}>Closed</option>
         </select>
-      </label>
-      <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Update State</button>
-    </form>
-    <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/reply" style="display:grid; gap:8px">
-      <label>Quick reply text
-        <textarea name="replyBody" rows="4" required style="width:100%; padding:9px; border:1px solid #d8dee6; border-radius:8px" placeholder="Type manual reply to log in history"></textarea>
-      </label>
-      <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Log Outbound Reply</button>
-    </form>
-  </section>
-</div>
-<section style="margin-top:14px">
-  <h3>Message History</h3>
-  <div class="timeline">${messageTimeline || '<p class="muted">No messages yet.</p>'}</div>
-</section>
-<section style="margin-top:14px">
-  <h3>Linked Bookings</h3>
-  <table>
-    <thead><tr><th>Booking</th><th>Room</th><th>Stay</th><th>Status</th></tr></thead>
-    <tbody>${linkedBookingRows || '<tr><td colspan="4">No linked bookings yet.</td></tr>'}</tbody>
-  </table>
-</section>`;
+        <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700;">Update</button>
+      </form>
+    </section>
+    <section style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px;">
+      <h3 style="margin:0 0 10px; font-size:14px;">Linked Bookings</h3>
+      <table style="min-width:0; margin:0; font-size:12px;">
+        <thead><tr><th>Booking</th><th>Room</th><th>Stay</th><th>Status</th></tr></thead>
+        <tbody>${linkedBookingRows || '<tr><td colspan="4">None</td></tr>'}</tbody>
+      </table>
+    </section>
+  </aside>
+</div>`;
 
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/conversations/:id/state", requireAuth, async (req, res) => {
+adminRouter.post("/conversations/:id/switch-to-receptionist", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/conversations");
+    return;
+  }
+  const conversationId = String(req.params.id ?? "");
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, hotelId: hotel.id },
+    include: { guest: true }
+  });
+  if (!conversation) {
+    res.redirect("/admin/conversations");
+    return;
+  }
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: { agentHandoffAt: new Date() } as import("@prisma/client").Prisma.ConversationUpdateInput
+  });
+  const session = await prisma.conversationSession.findUnique({
+    where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } }
+  });
+  if (session?.metadataJson) {
+    try {
+      const meta = JSON.parse(session.metadataJson) as Record<string, unknown>;
+      meta.conversationMode = "AGENT_MODE";
+      await prisma.conversationSession.update({
+        where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
+        data: { metadataJson: JSON.stringify(meta) }
+      });
+    } catch {
+      // ignore parse error
+    }
+  }
+  const handoffBody = guestReceptionistHandoffMessage(hotel.displayName);
+  const toPhone = normalizePhoneForWhatsApp(conversation.guest.phoneE164);
+  const partner = loadPartnerSetupConfig(hotel.id);
+  if (toPhone) {
+    try {
+      await sendWhatsAppText({
+        to: toPhone,
+        body: handoffBody,
+        phoneNumberId: partner.whatsappPhoneNumberId || undefined
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: handoffBody,
+          aiIntent: "STAFF_HANDOFF_NOTICE"
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    } catch {
+      // guest still sees handoff in UI; WhatsApp send is best-effort
+    }
+  }
+  await logAudit({
+    hotelId: hotel.id,
+    action: "CONVERSATION_SWITCHED_TO_RECEPTIONIST",
+    entityType: "Conversation",
+    entityId: conversation.id,
+    metadata: {}
+  });
+  res.redirect(`/admin/conversations/${encodeURIComponent(conversation.id)}?updated=1`);
+});
+
+adminRouter.post("/conversations/:id/end-agent-handoff", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/conversations");
+    return;
+  }
+  const conversationId = String(req.params.id ?? "");
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, hotelId: hotel.id },
+    include: { guest: true }
+  });
+  if (!conversation) {
+    res.redirect("/admin/conversations");
+    return;
+  }
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: { agentHandoffAt: null } as import("@prisma/client").Prisma.ConversationUpdateInput
+  });
+  const session = await prisma.conversationSession.findUnique({
+    where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } }
+  });
+  if (session?.metadataJson) {
+    try {
+      const meta = JSON.parse(session.metadataJson) as Record<string, unknown>;
+      meta.conversationMode = "IDLE";
+      await prisma.conversationSession.update({
+        where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
+        data: { metadataJson: JSON.stringify(meta) }
+      });
+    } catch {
+      // ignore parse error
+    }
+  }
+  const resumeBody = guestChatbotResumeMessage(hotel.displayName);
+  const toPhone = normalizePhoneForWhatsApp(conversation.guest.phoneE164);
+  const partner = loadPartnerSetupConfig(hotel.id);
+  if (toPhone) {
+    try {
+      await sendWhatsAppText({
+        to: toPhone,
+        body: resumeBody,
+        phoneNumberId: partner.whatsappPhoneNumberId || undefined
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: resumeBody,
+          aiIntent: "STAFF_CHATBOT_RESUME"
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    } catch {
+      // best-effort guest notice
+    }
+  }
+  res.redirect(`/admin/conversations/${encodeURIComponent(conversation.id)}?updated=1`);
+});
+
+adminRouter.post("/conversations/:id/state", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/conversations");
@@ -2005,7 +9723,7 @@ adminRouter.post("/conversations/:id/state", requireAuth, async (req, res) => {
   res.redirect(`/admin/conversations/${encodeURIComponent(conversationId)}?updated=1`);
 });
 
-adminRouter.post("/conversations/:id/reply", requireAuth, async (req, res) => {
+adminRouter.post("/conversations/:id/reply", requirePermission("CONVERSATIONS", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/conversations");
@@ -2019,9 +9737,31 @@ adminRouter.post("/conversations/:id/reply", requireAuth, async (req, res) => {
     return;
   }
 
-  const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, hotelId: hotel.id } });
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, hotelId: hotel.id },
+    include: { guest: true }
+  });
   if (!conversation) {
     res.redirect("/admin/conversations");
+    return;
+  }
+
+  const config = loadPartnerSetupConfig(hotel.id);
+  const phoneNumberId = config.whatsappPhoneNumberId || undefined;
+  const toPhone = String(conversation.guest.phoneE164).replace(/\D/g, "");
+
+  try {
+    await sendWhatsAppText({
+      to: toPhone,
+      body: replyBody,
+      phoneNumberId,
+      conversationId: conversation.id
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.redirect(
+      `/admin/conversations/${encodeURIComponent(conversationId)}?replyError=${encodeURIComponent(message.slice(0, 200))}`
+    );
     return;
   }
 
@@ -2041,7 +9781,7 @@ adminRouter.post("/conversations/:id/reply", requireAuth, async (req, res) => {
   });
   await logAudit({
     hotelId: hotel.id,
-    action: "CONVERSATION_REPLY_LOGGED",
+    action: "CONVERSATION_REPLY_SENT",
     entityType: "Conversation",
     entityId: conversation.id,
     metadata: { bodyPreview: replyBody.slice(0, 120) }
@@ -2050,7 +9790,7 @@ adminRouter.post("/conversations/:id/reply", requireAuth, async (req, res) => {
   res.redirect(`/admin/conversations/${encodeURIComponent(conversationId)}?updated=1`);
 });
 
-adminRouter.get("/conversations/:id/create-booking", requireAuth, async (req, res) => {
+adminRouter.get("/conversations/:id/create-booking", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/conversations");
@@ -2117,7 +9857,7 @@ ${renderBookingWizard(1, { conversationId: conversation.id })}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/conversations/:id/create-booking", requireAuth, async (req, res) => {
+adminRouter.post("/conversations/:id/create-booking", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
     res.redirect("/admin/conversations");
@@ -2160,24 +9900,41 @@ adminRouter.post("/conversations/:id/create-booking", requireAuth, async (req, r
     });
   }
 
-  const booking = await prisma.booking.create({
-    data: {
-      id: bookingId,
+  const booking = await prisma.$transaction(async (tx) => {
+    const referenceCode = await allocateBookingReferenceCode(tx, {
       hotelId: hotel.id,
-      propertyId: roomType.propertyId,
-      roomTypeId: roomType.id,
-      guestId: conversation.guestId,
-      conversationId: conversation.id,
-      checkIn,
-      checkOut: normalizedCheckOut,
-      nights,
-      adults,
-      children,
-      totalAmount,
-      currency: hotel.currency,
-      status: BookingStatus.PENDING,
-      paymentStatus: PaymentStatus.PENDING
-    }
+      source: ChannelProvider.WHATSAPP,
+      refDate: new Date()
+    });
+    return tx.booking.create({
+      data: {
+        id: bookingId,
+        hotelId: hotel.id,
+        propertyId: roomType.propertyId,
+        roomTypeId: roomType.id,
+        guestId: conversation.guestId,
+        conversationId: conversation.id,
+        checkIn,
+        checkOut: normalizedCheckOut,
+        nights,
+        adults,
+        children,
+        totalAmount,
+        currency: hotel.currency,
+        status: BookingStatus.PENDING,
+        paymentStatus: PaymentStatus.PENDING,
+        source: ChannelProvider.WHATSAPP,
+        referenceCode
+      }
+    });
+  });
+
+  await recordBookingStatusChange(prisma, {
+    hotelId: hotel.id,
+    bookingId: booking.id,
+    fromStatus: null,
+    toStatus: BookingStatus.PENDING,
+    source: "CONVERSATION_WIZARD"
   });
 
   await prisma.conversation.update({
@@ -2212,6 +9969,7 @@ adminRouter.post("/conversations/:id/create-booking", requireAuth, async (req, r
     action: "BOOKING_CREATED_FROM_CONVERSATION",
     entityType: "Booking",
     entityId: booking.id,
+    bookingId: booking.id,
     metadata: {
       conversationId: conversation.id,
       guestId: conversation.guestId,
@@ -2229,7 +9987,7 @@ adminRouter.post("/conversations/:id/create-booking", requireAuth, async (req, r
   res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}/select-unit`);
 });
 
-adminRouter.get("/subscription", requireAuth, async (_req, res) => {
+adminRouter.get("/subscription", requirePermission("BILLING", "VIEW"), async (_req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: "al-ashkhara-beach-resort" },
     include: {
@@ -2247,7 +10005,9 @@ adminRouter.get("/subscription", requireAuth, async (_req, res) => {
             gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
           }
         }
-      }
+      },
+      invoices: { orderBy: { createdAt: "desc" }, take: 10 },
+      paymentIntents: { orderBy: { createdAt: "desc" }, take: 10 }
     }
   });
 
@@ -2257,6 +10017,32 @@ adminRouter.get("/subscription", requireAuth, async (_req, res) => {
   }
 
   const sub = hotel.subscriptions[0];
+  const subscriptionStart = sub?.currentPeriodStart ?? sub?.startedAt ?? sub?.createdAt;
+
+  const paymentHistoryRows = hotel.paymentIntents
+    .map(
+      (p) => `<tr>
+        <td>${escapeHtml(p.id.slice(0, 12))}</td>
+        <td>${formatDateTime(p.createdAt)}</td>
+        <td>${p.amount} ${escapeHtml(p.currency)}</td>
+        <td>${escapeHtml(p.kind)}</td>
+        <td><span class="badge ${p.status === "SUCCEEDED" ? "ok" : "pending"}">${escapeHtml(p.status)}</span></td>
+      </tr>`
+    )
+    .join("");
+
+  const statementRows = hotel.invoices
+    .map(
+      (inv) => `<tr>
+        <td><a class="inline-link" href="/admin/billing">${escapeHtml(inv.id.slice(0, 12))}</a></td>
+        <td>${formatDate(inv.createdAt)}</td>
+        <td>${inv.amountTotal} ${escapeHtml(inv.currency)}</td>
+        <td><span class="badge ${inv.status === "PAID" ? "ok" : "pending"}">${escapeHtml(inv.status)}</span></td>
+        <td>${inv.paidAt ? formatDate(inv.paidAt) : "—"}</td>
+      </tr>`
+    )
+    .join("");
+
   const content = `
 <h2>Subscription</h2>
 <p class="muted">Live subscription status for ${escapeHtml(hotel.displayName)}.</p>
@@ -2270,9 +10056,10 @@ adminRouter.get("/subscription", requireAuth, async (_req, res) => {
     <h3>Current Plan</h3>
     <table>
       <tbody>
-        <tr><th>Plan</th><td>${escapeHtml(sub?.plan.name ?? "No active plan")}</td></tr>
+        <tr><th>Plan type</th><td>${escapeHtml(sub?.plan.name ?? "No active plan")}${sub?.plan.code ? ` (${escapeHtml(sub.plan.code)})` : ""}</td></tr>
         <tr><th>Price</th><td>${sub ? `${sub.plan.monthlyPrice} ${escapeHtml(hotel.currency)} / month` : "-"}</td></tr>
         <tr><th>Status</th><td><span class="badge ${sub?.status === "ACTIVE" ? "ok" : "pending"}">${escapeHtml(sub?.status ?? "NONE")}</span></td></tr>
+        <tr><th>Subscription start date</th><td>${subscriptionStart ? formatDate(subscriptionStart) : "—"}</td></tr>
         <tr><th>Renewal date</th><td>${formatDate(sub?.currentPeriodEnd)}</td></tr>
       </tbody>
     </table>
@@ -2288,18 +10075,30 @@ adminRouter.get("/subscription", requireAuth, async (_req, res) => {
       </tbody>
     </table>
   </section>
-</div>`;
+</div>
+<section style="margin-top: 14px">
+  <h3>Payment history</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Date</th><th>Amount</th><th>Kind</th><th>Status</th></tr></thead>
+    <tbody>${paymentHistoryRows || '<tr><td colspan="5">No payment history yet.</td></tr>'}</tbody>
+  </table>
+  <p><a class="btn-link" href="/admin/billing">View all payments</a></p>
+</section>
+<section style="margin-top: 14px">
+  <h3>Billing statements</h3>
+  <table>
+    <thead><tr><th>Invoice</th><th>Date</th><th>Amount</th><th>Status</th><th>Paid</th></tr></thead>
+    <tbody>${statementRows || '<tr><td colspan="5">No billing statements yet.</td></tr>'}</tbody>
+  </table>
+  <p><a class="btn-link" href="/admin/billing">View all billing statements</a></p>
+</section>`;
 
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/billing", requireAuth, async (_req, res) => {
+adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
-    include: {
-      invoices: { orderBy: { createdAt: "desc" }, take: 8 },
-      paymentIntents: { orderBy: { createdAt: "desc" }, take: 8 }
-    }
+    where: { slug: "al-ashkhara-beach-resort" }
   });
 
   if (!hotel) {
@@ -2307,20 +10106,47 @@ adminRouter.get("/billing", requireAuth, async (_req, res) => {
     return;
   }
 
-  const invoiceRows = hotel.invoices
+  const defaultEnd = new Date();
+  const defaultStart = addDays(defaultEnd, -30);
+  const start = parseDateInput(req.query.start, defaultStart);
+  const endRaw = parseDateInput(req.query.end, defaultEnd);
+  const end = endOfDay(endRaw);
+
+  const [invoices, paymentIntents] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
+      orderBy: { createdAt: "desc" },
+      include: { subscription: { select: { id: true } } }
+    }),
+    prisma.paymentIntent.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
+      orderBy: { createdAt: "desc" }
+    })
+  ]);
+
+  const exportQuery = new URLSearchParams({
+    start: formatDateForInput(start),
+    end: formatDateForInput(endRaw)
+  }).toString();
+
+  const subscriptionInvoiceRows = invoices
     .map(
       (invoice) => `<tr>
       <td><a class="inline-link" href="/admin/bookings">${escapeHtml(invoice.id)}</a></td>
+      <td>${formatDate(invoice.createdAt)}</td>
       <td>${invoice.amountTotal} ${escapeHtml(invoice.currency)}</td>
       <td><span class="badge ${invoice.status === "PAID" ? "ok" : "pending"}">${escapeHtml(invoice.status)}</span></td>
+      <td>${invoice.subscriptionId ? '<span class="badge ok">Subscription</span>' : "—"}</td>
+      <td>${invoice.paidAt ? formatDate(invoice.paidAt) : "—"}</td>
       </tr>`
     )
     .join("");
 
-  const paymentRows = hotel.paymentIntents
+  const paymentHistoryRows = paymentIntents
     .map(
       (payment) => `<tr>
-      <td><a class="inline-link" href="/admin/bookings">${escapeHtml(payment.id.slice(0, 10).toUpperCase())}</a></td>
+      <td>${escapeHtml(payment.id.slice(0, 12))}</td>
+      <td>${formatDateTime(payment.createdAt)}</td>
       <td>${payment.amount} ${escapeHtml(payment.currency)}</td>
       <td>${escapeHtml(payment.kind)}</td>
       <td><span class="badge ${payment.status === "SUCCEEDED" ? "ok" : "pending"}">${escapeHtml(payment.status)}</span></td>
@@ -2335,7 +10161,13 @@ adminRouter.get("/billing", requireAuth, async (_req, res) => {
   <a class="btn-link primary" href="/admin/bookings">Open Booking Financials</a>
   <a class="btn-link" href="/admin/subscription">View Plan & Limits</a>
   <a class="btn-link" href="/admin/reports">Open Report Filters</a>
+  <a class="btn-link" href="/admin/billing/export?${escapeHtml(exportQuery)}" download="billing-export.csv">Export to CSV</a>
 </div>
+<form method="get" action="/admin/billing" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px">
+  <label>From <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>To <input type="date" name="end" value="${formatDateForInput(endRaw)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Apply</button>
+</form>
 <div class="grid-2">
   <section>
     <h3>Payment Settings</h3>
@@ -2348,22 +10180,109 @@ adminRouter.get("/billing", requireAuth, async (_req, res) => {
     </table>
   </section>
   <section>
-    <h3>Latest Invoices</h3>
-    <table>
-      <thead><tr><th>Invoice</th><th>Amount</th><th>Status</th></tr></thead>
-      <tbody>${invoiceRows || '<tr><td colspan="3">No invoices yet.</td></tr>'}</tbody>
-    </table>
+    <h3>Date range</h3>
+    <p>${formatDateForInput(start)} – ${formatDateForInput(endRaw)}</p>
   </section>
 </div>
 <section style="margin-top: 14px">
-  <h3>Payment Intents</h3>
+  <h3>Subscription invoices</h3>
   <table>
-    <thead><tr><th>ID</th><th>Amount</th><th>Kind</th><th>Status</th></tr></thead>
-    <tbody>${paymentRows || '<tr><td colspan="4">No payment intents yet.</td></tr>'}</tbody>
+    <thead><tr><th>Invoice</th><th>Date</th><th>Amount</th><th>Status</th><th>Type</th><th>Paid</th></tr></thead>
+    <tbody>${subscriptionInvoiceRows || '<tr><td colspan="6">No invoices in this range.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin-top: 14px">
+  <h3>Payment history</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Date</th><th>Amount</th><th>Kind</th><th>Status</th></tr></thead>
+    <tbody>${paymentHistoryRows || '<tr><td colspan="5">No payments in this range.</td></tr>'}</tbody>
   </table>
 </section>`;
 
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" }
+  });
+
+  if (!hotel) {
+    res.status(404).type("text/plain").send("Hotel not found");
+    return;
+  }
+
+  const defaultEnd = new Date();
+  const defaultStart = addDays(defaultEnd, -30);
+  const start = parseDateInput(req.query.start, defaultStart);
+  const endRaw = parseDateInput(req.query.end, defaultEnd);
+  const end = endOfDay(endRaw);
+
+  const [invoices, paymentIntents] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
+      orderBy: { createdAt: "desc" },
+      include: { subscription: { select: { id: true } } }
+    }),
+    prisma.paymentIntent.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
+      orderBy: { createdAt: "desc" }
+    })
+  ]);
+
+  function csvCell(value: string): string {
+    const escaped = value.replaceAll('"', '""');
+    return `"${escaped}"`;
+  }
+
+  const header =
+    "Type,Id,Date,Amount,Currency,Status,Kind,Subscription,Paid At\n";
+  const invoiceLines = invoices
+    .map(
+      (inv) =>
+        [
+          "Invoice",
+          inv.id,
+          formatDate(inv.createdAt),
+          inv.amountTotal,
+          inv.currency,
+          inv.status,
+          "",
+          inv.subscriptionId ? "Yes" : "",
+          inv.paidAt ? formatDate(inv.paidAt) : ""
+        ]
+          .map(String)
+          .map(csvCell)
+          .join(",") + "\n"
+    )
+    .join("");
+  const paymentLines = paymentIntents
+    .map(
+      (p) =>
+        [
+          "Payment",
+          p.id,
+          formatDateTime(p.createdAt),
+          p.amount,
+          p.currency,
+          p.status,
+          p.kind,
+          "",
+          ""
+        ]
+          .map(String)
+          .map(csvCell)
+          .join(",") + "\n"
+    )
+    .join("");
+
+  res
+    .type("text/csv")
+    .setHeader(
+      "Content-Disposition",
+      `attachment; filename="billing-${formatDateForInput(start)}-${formatDateForInput(endRaw)}.csv"`
+    )
+    .send(header + invoiceLines + paymentLines);
 });
 
 adminRouter.get("/integrations", requireAuth, async (_req, res) => {
@@ -2396,6 +10315,24 @@ adminRouter.get("/integrations", requireAuth, async (_req, res) => {
     })
     .join("");
 
+  const bookingCom = hotel.integrations.find((integration) => integration.provider === "BOOKING_COM");
+  const bookingComReady = Boolean(bookingCom);
+  const bookingComJobs = bookingCom
+    ? bookingCom.syncJobs
+        .filter((job) => job.action.startsWith("BOOKING_COM_"))
+        .slice(0, 8)
+        .map(
+          (job) => `<tr>
+            <td>${escapeHtml(job.action)}</td>
+            <td><span class="badge ${job.status === "SUCCESS" ? "ok" : job.status === "FAILED" ? "alert" : "pending"}">${escapeHtml(
+              job.status
+            )}</span></td>
+            <td>${formatDateTime(job.createdAt)}</td>
+          </tr>`
+        )
+        .join("")
+    : "";
+
   const content = `
 <h2>Integrations</h2>
 <p class="muted">Live OTA/channel-manager integration status.</p>
@@ -2409,9 +10346,101 @@ adminRouter.get("/integrations", requireAuth, async (_req, res) => {
     <tr><th>Provider</th><th>Connection</th><th>Room Mapping</th><th>Last Sync</th><th>Latest Sync Job</th></tr>
   </thead>
   <tbody>${rows || '<tr><td colspan="5">No integration connections yet.</td></tr>'}</tbody>
-</table>`;
+</table>
+<section style="margin-top:14px">
+  <h3>Booking.com Channel Manager Readiness</h3>
+  <p class="muted">Architecture prep only. No external Booking.com API calls are performed yet.</p>
+  <table>
+    <tbody>
+      <tr><th>Connection record</th><td>${bookingComReady ? '<span class="badge ok">Prepared</span>' : '<span class="badge pending">Missing</span>'}</td></tr>
+      <tr><th>Sync domains supported</th><td>Room availability, Rates, Inventory, Bookings</td></tr>
+      <tr><th>Sync mode</th><td>Incremental / Full</td></tr>
+    </tbody>
+  </table>
+  ${
+    bookingComReady
+      ? `<form method="post" action="/admin/integrations/booking-com/prepare-sync" style="display:grid; gap:8px; margin-top:10px">
+  <div style="display:flex; gap:12px; flex-wrap:wrap">
+    <label><input type="checkbox" name="domains" value="availability" checked /> Availability</label>
+    <label><input type="checkbox" name="domains" value="rates" checked /> Rates</label>
+    <label><input type="checkbox" name="domains" value="inventory" checked /> Inventory</label>
+    <label><input type="checkbox" name="domains" value="bookings" checked /> Bookings</label>
+  </div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+    <label>Mode
+      <select name="mode" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+        <option value="incremental">Incremental</option>
+        <option value="full">Full</option>
+      </select>
+    </label>
+    <label>From <input type="date" name="from" value="${formatDateForInput(startOfDay(new Date()))}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>To <input type="date" name="to" value="${formatDateForInput(addDays(startOfDay(new Date()), 30))}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Prepare sync jobs</button>
+  </div>
+</form>`
+      : "<p class=\"muted\" style=\"margin-top:10px\">Seed or create a BOOKING_COM integration connection first.</p>"
+  }
+  <h4 style="margin-top:12px">Prepared Booking.com jobs</h4>
+  <table>
+    <thead><tr><th>Action</th><th>Status</th><th>Created</th></tr></thead>
+    <tbody>${bookingComJobs || '<tr><td colspan="3">No Booking.com prep jobs yet.</td></tr>'}</tbody>
+  </table>
+</section>`;
 
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/integrations/booking-com/prepare-sync", requireAuth, async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: { integrations: true }
+  });
+  if (!hotel) {
+    res.redirect("/admin/integrations");
+    return;
+  }
+
+  const integration = hotel.integrations.find((i) => i.provider === "BOOKING_COM");
+  if (!integration) {
+    res.redirect("/admin/integrations");
+    return;
+  }
+
+  const modeRaw = String(req.body.mode ?? "incremental").toLowerCase();
+  const mode: BookingComSyncMode = modeRaw === "full" ? "full" : "incremental";
+  const from = formatDateForInput(parseDateInput(req.body.from, startOfDay(new Date())));
+  const to = formatDateForInput(parseDateInput(req.body.to, addDays(startOfDay(new Date()), 30)));
+
+  const rawDomains = req.body.domains;
+  const selectedRaw = Array.isArray(rawDomains) ? rawDomains : rawDomains ? [rawDomains] : [];
+  const selectedDomains = selectedRaw
+    .map((v) => String(v))
+    .filter((v): v is BookingComSyncDomain => bookingComDomains.includes(v as BookingComSyncDomain));
+  const domains = selectedDomains.length ? selectedDomains : bookingComDomains;
+
+  const plan = buildBookingComSyncPlan({
+    mode,
+    window: { from, to },
+    domains
+  });
+
+  await prisma.$transaction(
+    plan.map((item) =>
+      prisma.syncJob.create({
+        data: {
+          integrationConnectionId: integration.id,
+          action: item.action,
+          status: "QUEUED"
+        }
+      })
+    )
+  );
+  await prisma.integrationConnection.update({
+    where: { id: integration.id },
+    data: { lastSyncedAt: new Date() }
+  });
+
+  res.redirect("/admin/integrations");
 });
 
 adminRouter.get("/setup", requireAuth, async (req, res) => {
@@ -2471,7 +10500,21 @@ ${errorNotice}
         <input type="text" name="whatsappPhone" value="${escapeHtml(hotel.whatsappPhone ?? "")}" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
       </label>
       <label>WhatsApp Phone Number ID (Cloud API)
-        <input type="text" name="whatsappPhoneNumberId" value="${escapeHtml(config.whatsappPhoneNumberId)}" placeholder="e.g. 1002161622980212" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+        <input type="text" name="whatsappPhoneNumberId" value="${escapeHtml(config.whatsappPhoneNumberId)}" placeholder="Phone number ID from Meta → WhatsApp → API setup" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <h4 style="margin:16px 0 8px">Outlet order alerts (WhatsApp)</h4>
+      <p class="muted" style="font-size:13px;margin:0 0 8px">Digits only (include country code). <strong>Restaurant / café:</strong> one grouped WhatsApp per outlet per posting (dining in or room service without a dedicated RS number below). <strong>Room service number:</strong> if set, <em>room service</em> menu posts send <strong>one combined</strong> message here (all items). Folio charges still use restaurant / café / room-service / activity numbers by line type.</p>
+      <label>Restaurant / kitchen
+        <input type="text" name="outletRestaurantWhatsAppE164" value="${escapeHtml(config.outletRestaurantWhatsAppE164)}" placeholder="e.g. 968XXXXXXXXX" autocomplete="off" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <label>Coffee shop / café
+        <input type="text" name="outletCoffeeShopWhatsAppE164" value="${escapeHtml(config.outletCoffeeShopWhatsAppE164)}" placeholder="e.g. 968XXXXXXXXX" autocomplete="off" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <label>Room service prep (optional; folio room-service charges)
+        <input type="text" name="outletRoomServiceWhatsAppE164" value="${escapeHtml(config.outletRoomServiceWhatsAppE164)}" placeholder="Leave blank to use restaurant number" autocomplete="off" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <label>Activity desk (optional)
+        <input type="text" name="outletActivityWhatsAppE164" value="${escapeHtml(config.outletActivityWhatsAppE164)}" placeholder="e.g. 968XXXXXXXXX" autocomplete="off" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
       </label>
       <label>Hotel description
         <textarea name="hotelDescription" rows="4" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">${escapeHtml(
@@ -2703,6 +10746,10 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
     hotelDescription: String(req.body.hotelDescription ?? "").trim(),
     amenitiesSummary: String(req.body.amenitiesSummary ?? "").trim(),
     whatsappPhoneNumberId: String(req.body.whatsappPhoneNumberId ?? "").trim(),
+    outletRestaurantWhatsAppE164: String(req.body.outletRestaurantWhatsAppE164 ?? "").trim(),
+    outletCoffeeShopWhatsAppE164: String(req.body.outletCoffeeShopWhatsAppE164 ?? "").trim(),
+    outletRoomServiceWhatsAppE164: String(req.body.outletRoomServiceWhatsAppE164 ?? "").trim(),
+    outletActivityWhatsAppE164: String(req.body.outletActivityWhatsAppE164 ?? "").trim(),
     aiEnabled: req.body.aiEnabled === "1",
     aiTone:
       req.body.aiTone === "premium" || req.body.aiTone === "concise"

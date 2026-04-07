@@ -1,0 +1,69 @@
+[
+  {
+    "id": "49cc302d-7e50-4956-a44a-891952e9472c",
+    "code": "TOUR_OPERATOR_15",
+    "title": "Tour Operator 15%",
+    "type": "PERCENTAGE_DISCOUNT",
+    "discountPercent": 15,
+    "isActive": true,
+    "createdAt": "2026-03-26T13:41:51.782Z",
+    "updatedAt": "2026-03-26T13:41:51.782Z"
+  },
+  {
+    "id": "282960ae-c405-4c6a-87d5-ffdcea46a6fc",
+    "code": "STAY_3_GET_1",
+    "title": "Stay 3 Nights Get 1 Free",
+    "type": "STAY_X_GET_Y_FREE",
+    "discountPercent": 25,
+    "stayX": 3,
+    "stayY": 1,
+    "isActive": true,
+    "createdAt": "2026-03-26T13:41:51.782Z",
+    "updatedAt": "2026-03-26T13:41:51.782Z"
+  },
+  {
+    "id": "cb47ef50-c254-47ad-9cf8-350a80056466",
+    "code": "EARLY_BIRD_10",
+    "title": "Early Booking 10%",
+    "type": "EARLY_BOOKING",
+    "discountPercent": 10,
+    "minDaysBeforeCheckIn": 21,
+    "isActive": true,
+    "createdAt": "2026-03-26T13:41:51.782Z",
+    "updatedAt": "2026-03-26T13:41:51.782Z"
+  },
+  {
+    "id": "5ef5a0c0-821c-4df0-99f6-405b3759cd0e",
+    "code": "LONG_STAY_12",
+    "title": "Long Stay 12%",
+    "type": "LONG_STAY",
+    "discountPercent": 12,
+    "minNights": 7,
+    "isActive": true,
+    "createdAt": "2026-03-26T13:41:51.782Z",
+    "updatedAt": "2026-03-26T13:41:51.782Z"
+  },
+  {
+    "id": "a25cc95f-f10e-4076-989c-937a63908091",
+    "code": "SUMMER_18",
+    "title": "Seasonal Summer 18%",
+    "type": "SEASONAL",
+    "discountPercent": 18,
+    "seasonStart": "2026-06-01",
+    "seasonEnd": "2026-08-31",
+    "isActive": true,
+    "createdAt": "2026-03-26T13:41:51.782Z",
+    "updatedAt": "2026-03-26T13:41:51.782Z"
+  },
+  {
+    "id": "78b0e30b-5708-46bb-9abb-a9c72d1cbfee",
+    "code": "CORP_20",
+    "title": "Corporate Rate 20%",
+    "type": "CORPORATE_RATE",
+    "discountPercent": 20,
+    "corporateOnly": true,
+    "isActive": true,
+    "createdAt": "2026-03-26T13:41:51.782Z",
+    "updatedAt": "2026-03-26T13:41:51.782Z"
+  }
+]

@@ -304,7 +304,7 @@ whatsappWebhookRouter.post("/", async (req, res) => {
 
 import { Router } from "express";
 import { extractSingleDates, parseGuestMessage } from "../core/parse";
-import { ConversationState, MessageDirection } from "@prisma/client";
+import { ChannelProvider, ConversationState, MessageDirection } from "@prisma/client";
 import { prisma } from "../db";
 import {
   findAvailableRoomType as findAvailableRoomTypeShared,
@@ -312,6 +312,7 @@ import {
   getAvailableCheckOutDates as getAvailableCheckOutDatesShared
 } from "../core/availability";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
+import { mergeGuestProfileFromBooking } from "../core/guestProfile";
 import { applyPartnerTemplate, loadPartnerSetupConfig } from "../core/partnerSetup";
 import { createCalendarSessionLink, loadConversationSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send";
@@ -740,6 +741,8 @@ async function findAvailableRoomType(params: {
   checkOut: Date;
   guests: number;
   rooms: number;
+  adults?: number;
+  children?: number;
 }): Promise<{
   roomTypeId: string;
   roomTypeName: string;
@@ -1799,6 +1802,11 @@ whatsappWebhookRouter.post("/", async (req, res) => {
         session.stage = "WAITING_BOOKING_DETAILS";
         return res.sendStatus(200);
       }
+      await mergeGuestProfileFromBooking({
+        guestId: guest.id,
+        fullName: session.guestName,
+        localeHint: session.language
+      });
       const booking = await createConfirmedBookingAtomic({
         hotelId: hotel.id,
         guestId: guest.id,
@@ -1807,7 +1815,8 @@ whatsappWebhookRouter.post("/", async (req, res) => {
         checkOut: session.checkOut,
         guests: session.guestCount,
         rooms: session.roomCount,
-        currency: hotel.currency
+        currency: hotel.currency,
+        source: ChannelProvider.WHATSAPP
       });
       const confirmationTemplate = applyPartnerTemplate(config.instantConfirmationTemplate, {
         hotel_name: hotel.displayName,
@@ -1853,8 +1862,8 @@ whatsappWebhookRouter.post("/", async (req, res) => {
     const parsedRoomCount = parseRoomCount(text);
     const roomCount = parsedRoomCount ?? session.roomCount ?? 1;
     const guestName = parseGuestName(text) ?? session.guestName;
-    if (guestName && guestName !== guest.fullName) {
-      await prisma.guest.update({ where: { id: guest.id }, data: { fullName: guestName } });
+    if (guestName) {
+      await mergeGuestProfileFromBooking({ guestId: guest.id, fullName: guestName, localeHint: session.language });
     }
     const effectiveCheckIn = parsed.checkIn ?? session.checkIn;
     const effectiveCheckOut = parsed.checkOut ?? session.checkOut;
