@@ -109,9 +109,8 @@ function isGlobalResetMessage(text: string): boolean {
   const n = normalizeText(text);
   if (GLOBAL_RESET_NORMALIZED.includes(n)) return true;
   if (isGreeting(text)) return true;
-  if (isMenuChoiceBookStay(text)) return true;
-  if (isMenuChoiceAskQuestion(text)) return true;
-  if (isMenuChoiceTalkToAgent(text)) return true;
+  // Do NOT treat main-menu button payloads (Book / Questions / Reception) as reset — they are routed below
+  // to BOOKING_MODE, QUESTION_MODE, and AGENT_MODE. Including them here re-sent the welcome menu on every tap.
   return false;
 }
 
@@ -201,16 +200,20 @@ const BOOKING_NAV_HINT = "\n\nTip: reply *back* for the previous step, or *menu*
 const QUESTION_MODE_ENTRY =
   "You can ask me anything about the hotel: rooms, amenities, check-in times, policies, location, and more. What would you like to know?\n\nReply *menu* anytime to return to the main menu.";
 
+function normalizeMenuButtonInput(text: string): string {
+  return text.replace(/[\u200B-\u200D\uFEFF\u2060]/g, "").trim().normalize("NFC");
+}
+
 function isMenuChoiceBookStay(text: string): boolean {
-  const t = text.trim().toLowerCase();
+  const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "book_a_stay" || t === "book a stay" || t === "book";
 }
 function isMenuChoiceAskQuestion(text: string): boolean {
-  const t = text.trim().toLowerCase();
+  const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "ask_question" || t === "ask a question" || t === "ask the chatbot" || t === "ask" || t === "questions";
 }
 function isMenuChoiceTalkToAgent(text: string): boolean {
-  const t = text.trim().toLowerCase();
+  const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "talk_to_agent" || t === "talk to an agent" || t === "chat with a receptionist" || t === "agent" || t === "reception";
 }
 
