@@ -1,4 +1,4 @@
-import { ChannelProvider, ConversationState as DbConversationState, MessageDirection } from "@prisma/client";
+import { ChannelProvider, ConversationState as DbConversationState, MessageDirection, Prisma } from "@prisma/client";
 import { parseGuestMessage, validateParsedBookingInput } from "../core/parse";
 import { findAvailableRoomType, findAvailableRoomTypes } from "../core/availability";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
@@ -214,9 +214,15 @@ function isMenuChoiceTalkToAgent(text: string): boolean {
   return t === "talk_to_agent" || t === "talk to an agent" || t === "chat with a receptionist" || t === "agent" || t === "reception";
 }
 
+/** Normalize button/title text from WhatsApp (NFC, strip invisible) so language taps match reliably. */
+function normalizeLanguageButtonText(text: string): string {
+  return text.replace(/[\u200B-\u200D\uFEFF\u2060]/g, "").trim().normalize("NFC");
+}
+
 function isLanguageChoice(text: string): "ar" | "en" | null {
-  const t = text.trim().toLowerCase();
-  if (t === "lang_ar" || t === "arabic" || t === "ar" || t === "العربية") return "ar";
+  const nfc = normalizeLanguageButtonText(text);
+  const t = nfc.toLowerCase();
+  if (t === "lang_ar" || t === "arabic" || t === "ar" || nfc === "العربية") return "ar";
   if (t === "lang_en" || t === "english" || t === "en") return "en";
   return null;
 }
@@ -678,8 +684,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       data: { hotelId: hotel.id, guestId: guest.id, state: DbConversationState.NEW, lastMessageAt: new Date() }
     }));
 
-  await prisma.message
-    .create({
+  try {
+    await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
@@ -687,8 +693,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         direction: MessageDirection.INBOUND,
         body: input.text
       }
-    })
-    .catch(() => undefined);
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return;
+    }
+    throw err;
+  }
   await logWhatsAppMessage({
     conversationId: conversation.id,
     phoneNumber: normalizedPhone,
@@ -744,6 +755,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       });
       const menuBody = getMainMenuBody(hotel.displayName, lang);
       const fallbackBody = buildMainMenuMessage(hotel.displayName, lang);
+      let outboundRecordedBody = menuBody;
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
@@ -754,6 +766,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         });
       } catch (err) {
         console.error("WhatsApp menu buttons send failed after language selection:", err instanceof Error ? err.message : String(err));
+        outboundRecordedBody = fallbackBody;
         await sendWhatsAppText({
           to: normalizedPhone,
           body: fallbackBody,
@@ -766,7 +779,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: fallbackBody,
+          body: outboundRecordedBody,
           aiIntent: "LANGUAGE_SELECTED_MAIN_MENU",
           aiConfidence: 0.98
         }

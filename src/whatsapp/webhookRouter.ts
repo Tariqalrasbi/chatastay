@@ -5,23 +5,28 @@ import { WhatsAppWebhookPayload } from "./types";
 export const whatsappWebhookRouter = Router();
 
 function extractInboundText(message: Record<string, unknown>): string | undefined {
+  // Prefer interactive replies first so taps are never mistaken for plain text/context (fixes language + menu buttons).
+  const interactive = message.interactive as
+    | { button_reply?: { title?: unknown; id?: unknown }; list_reply?: { title?: unknown; id?: unknown } }
+    | undefined;
+  if (interactive?.button_reply) {
+    const buttonId = interactive.button_reply.id;
+    if (typeof buttonId === "string" && buttonId.trim()) return buttonId.trim();
+    const buttonTitle = interactive.button_reply.title;
+    if (typeof buttonTitle === "string" && buttonTitle.trim()) return buttonTitle.trim();
+  }
+  if (interactive?.list_reply) {
+    const listId = interactive.list_reply.id;
+    if (typeof listId === "string" && listId.trim()) return listId.trim();
+    const listTitle = interactive.list_reply.title;
+    if (typeof listTitle === "string" && listTitle.trim()) return listTitle.trim();
+  }
+
   const textBody = (message.text as { body?: unknown } | undefined)?.body;
   if (typeof textBody === "string" && textBody.trim()) return textBody.trim();
 
   const buttonText = (message.button as { text?: unknown } | undefined)?.text;
   if (typeof buttonText === "string" && buttonText.trim()) return buttonText.trim();
-
-  const interactive = message.interactive as
-    | { button_reply?: { title?: unknown; id?: unknown }; list_reply?: { title?: unknown; id?: unknown } }
-    | undefined;
-  const buttonId = interactive?.button_reply?.id;
-  if (typeof buttonId === "string" && buttonId.trim()) return buttonId.trim();
-  const buttonTitle = interactive?.button_reply?.title;
-  if (typeof buttonTitle === "string" && buttonTitle.trim()) return buttonTitle.trim();
-  const listId = interactive?.list_reply?.id;
-  if (typeof listId === "string" && listId.trim()) return listId.trim();
-  const listTitle = interactive?.list_reply?.title;
-  if (typeof listTitle === "string" && listTitle.trim()) return listTitle.trim();
 
   const imageCaption = (message.image as { caption?: unknown } | undefined)?.caption;
   if (typeof imageCaption === "string" && imageCaption.trim()) return imageCaption.trim();
