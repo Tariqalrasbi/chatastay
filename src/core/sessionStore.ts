@@ -229,7 +229,8 @@ function parseFbCartDraft(raw: unknown): FbCartDraftState | undefined {
     step !== "qty" &&
     step !== "add_more" &&
     step !== "service" &&
-    step !== "time"
+    step !== "time" &&
+    step !== "confirm"
   ) {
     return undefined;
   }

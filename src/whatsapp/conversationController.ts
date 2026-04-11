@@ -182,6 +182,82 @@ const MENU_BUTTONS: Array<{ id: string; title: string }> = [
   { id: "talk_to_agent", title: "Reception" }
 ];
 
+/** When guest has an active stay, main menu is a list (4 rows) so we can add Food & drinks without exceeding reply-button limits. */
+const MAIN_MENU_LIST_CTA = "Menu";
+
+async function sendMainMenuForGuest(params: {
+  hotel: { id: string; displayName: string; phoneNumberId?: string };
+  guestId: string;
+  to: string;
+  conversationId: string;
+  menuBody: string;
+  fallbackBody: string;
+}): Promise<{ recordedBody: string }> {
+  const stay = await findGuestActiveStayBooking(params.hotel.id, params.guestId);
+  if (stay) {
+    try {
+      await sendWhatsAppList({
+        to: params.to,
+        body: params.menuBody,
+        buttonText: MAIN_MENU_LIST_CTA,
+        sections: [
+          {
+            title: "Choose",
+            rows: [
+              { id: "book_a_stay", title: "Book", description: "New reservation" },
+              { id: "order_food_stay", title: "Order food / drinks", description: "Restaurant / room service" },
+              { id: "ask_question", title: "Questions", description: "Hotel information" },
+              { id: "talk_to_agent", title: "Reception", description: "Speak with staff" }
+            ]
+          }
+        ],
+        phoneNumberId: params.hotel.phoneNumberId,
+        conversationId: params.conversationId
+      });
+      return { recordedBody: params.menuBody };
+    } catch (err) {
+      console.error("WhatsApp main menu list send failed:", err instanceof Error ? err.message : String(err));
+      try {
+        await sendWhatsAppButtons({
+          to: params.to,
+          body: params.menuBody,
+          buttons: MENU_BUTTONS,
+          phoneNumberId: params.hotel.phoneNumberId,
+          conversationId: params.conversationId
+        });
+        return { recordedBody: params.menuBody };
+      } catch {
+        await sendWhatsAppText({
+          to: params.to,
+          body: params.fallbackBody,
+          phoneNumberId: params.hotel.phoneNumberId,
+          conversationId: params.conversationId
+        });
+        return { recordedBody: params.fallbackBody };
+      }
+    }
+  }
+  try {
+    await sendWhatsAppButtons({
+      to: params.to,
+      body: params.menuBody,
+      buttons: MENU_BUTTONS,
+      phoneNumberId: params.hotel.phoneNumberId,
+      conversationId: params.conversationId
+    });
+    return { recordedBody: params.menuBody };
+  } catch (err) {
+    console.error("WhatsApp main menu buttons send failed:", err instanceof Error ? err.message : String(err));
+    await sendWhatsAppText({
+      to: params.to,
+      body: params.fallbackBody,
+      phoneNumberId: params.hotel.phoneNumberId,
+      conversationId: params.conversationId
+    });
+    return { recordedBody: params.fallbackBody };
+  }
+}
+
 const LANGUAGE_SELECT_PROMPT = "Please choose your language:";
 const LANGUAGE_SELECT_FALLBACK = "Please choose your language:\n• العربية\n• English";
 const LANGUAGE_BUTTONS: Array<{ id: string; title: string }> = [
@@ -654,8 +730,13 @@ function inferEvent(state: ConversationState, text: string, parsed: ReturnType<t
   return "message_received";
 }
 
-async function resolveHotel(inboundPhoneNumberId?: string): Promise<{ id: string; displayName: string; currency: string; phoneNumberId?: string }> {
-  const hotels = await prisma.hotel.findMany({ orderBy: { createdAt: "asc" } });
+async function resolveHotel(
+  inboundPhoneNumberId?: string
+): Promise<{ id: string; displayName: string; currency: string; timezone: string; phoneNumberId?: string }> {
+  const hotels = await prisma.hotel.findMany({
+    orderBy: { createdAt: "asc" },
+    select: { id: true, displayName: true, currency: true, timezone: true }
+  });
   if (!hotels.length) {
     throw new Error("No hotels configured");
   }
@@ -663,7 +744,13 @@ async function resolveHotel(inboundPhoneNumberId?: string): Promise<{ id: string
     for (const hotel of hotels) {
       const config = loadPartnerSetupConfig(hotel.id);
       if (config.whatsappPhoneNumberId && config.whatsappPhoneNumberId === inboundPhoneNumberId) {
-        return { id: hotel.id, displayName: hotel.displayName, currency: hotel.currency, phoneNumberId: config.whatsappPhoneNumberId };
+        return {
+          id: hotel.id,
+          displayName: hotel.displayName,
+          currency: hotel.currency,
+          timezone: hotel.timezone,
+          phoneNumberId: config.whatsappPhoneNumberId
+        };
       }
     }
   }
@@ -679,6 +766,7 @@ async function resolveHotel(inboundPhoneNumberId?: string): Promise<{ id: string
     id: fallback.id,
     displayName: fallback.displayName,
     currency: fallback.currency,
+    timezone: fallback.timezone,
     phoneNumberId: outboundPhoneNumberId
   };
 }
@@ -908,10 +996,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     return;
   }
 
+  const orderFoodStayTap = normalizeMenuButtonInput(input.text).toLowerCase() === "order_food_stay";
   if (
     !persisted.fbCartDraft &&
     (conversationMode === "IDLE" || conversationMode === "QUESTION_MODE") &&
-    isStayFoodIntent(input.text) &&
+    (isStayFoodIntent(input.text) || orderFoodStayTap) &&
     !isGlobalResetMessage(input.text)
   ) {
     const stay = await findGuestActiveStayBooking(hotel.id, guest.id);
@@ -978,7 +1067,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       hotelId: hotel.id,
       currency: hotel.currency,
       text: input.text,
-      draft: persisted.fbCartDraft
+      draft: persisted.fbCartDraft,
+      hotelTimezone: hotel.timezone,
+      now: new Date()
     });
 
     if (adv.stayFinished) {
@@ -1234,25 +1325,14 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       });
       const menuBody = getMainMenuBody(hotel.displayName, lang);
       const fallbackBody = buildMainMenuMessage(hotel.displayName, lang);
-      let outboundRecordedBody = menuBody;
-      try {
-        await sendWhatsAppButtons({
-          to: normalizedPhone,
-          body: menuBody,
-          buttons: MENU_BUTTONS,
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      } catch (err) {
-        console.error("WhatsApp menu buttons send failed after language selection:", err instanceof Error ? err.message : String(err));
-        outboundRecordedBody = fallbackBody;
-        await sendWhatsAppText({
-          to: normalizedPhone,
-          body: fallbackBody,
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      }
+      const { recordedBody: outboundRecordedBody } = await sendMainMenuForGuest({
+        hotel,
+        guestId: guest.id,
+        to: normalizedPhone,
+        conversationId: conversation.id,
+        menuBody,
+        fallbackBody
+      });
       await prisma.message.create({
         data: {
           hotelId: hotel.id,
@@ -1395,29 +1475,20 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     const lang = effectiveLang(persisted.language);
     const menuBody = getMainMenuBody(hotel.displayName, lang);
     const fallbackBody = buildMainMenuMessage(hotel.displayName, lang);
-    try {
-      await sendWhatsAppButtons({
-        to: normalizedPhone,
-        body: menuBody,
-        buttons: MENU_BUTTONS,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    } catch (err) {
-      console.error("WhatsApp main menu after global reset failed:", err instanceof Error ? err.message : String(err));
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body: fallbackBody,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    }
+    const { recordedBody: resetMenuRecorded } = await sendMainMenuForGuest({
+      hotel,
+      guestId: guest.id,
+      to: normalizedPhone,
+      conversationId: conversation.id,
+      menuBody,
+      fallbackBody
+    });
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: fallbackBody,
+        body: resetMenuRecorded,
         aiIntent: "GLOBAL_RESET_MAIN_MENU",
         aiConfidence: 0.98
       }
@@ -3614,29 +3685,20 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
       const menuBody = getMainMenuBody(hotel.displayName, effectiveLang(persisted.language));
       const fallbackBody = buildMainMenuMessage(hotel.displayName, effectiveLang(persisted.language));
-      try {
-        await sendWhatsAppButtons({
-          to: normalizedPhone,
-          body: menuBody,
-          buttons: MENU_BUTTONS,
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      } catch (err) {
-        console.error("WhatsApp greeting buttons send failed (reset from My booking), using text:", err instanceof Error ? err.message : String(err));
-        await sendWhatsAppText({
-          to: normalizedPhone,
-          body: fallbackBody,
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      }
+      const { recordedBody: myBookingMenuRecorded } = await sendMainMenuForGuest({
+        hotel,
+        guestId: guest.id,
+        to: normalizedPhone,
+        conversationId: conversation.id,
+        menuBody,
+        fallbackBody
+      });
       await prisma.message.create({
         data: {
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: fallbackBody,
+          body: myBookingMenuRecorded,
           aiIntent: "GLOBAL_RESET_FROM_MY_BOOKING",
           aiConfidence: 0.98
         }
@@ -3986,30 +4048,20 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
     const menuBody = getMainMenuBody(hotel.displayName, effectiveLang(persisted.language));
     const fallbackBody = buildMainMenuMessage(hotel.displayName, effectiveLang(persisted.language));
-    try {
-      await sendWhatsAppButtons({
-        to: normalizedPhone,
-        body: menuBody,
-        buttons: MENU_BUTTONS,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    } catch (err) {
-      console.error("WhatsApp greeting buttons send failed, using text fallback:", err instanceof Error ? err.message : String(err));
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body: fallbackBody,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    }
-    const responseBody = fallbackBody;
+    const { recordedBody: greetingMenuRecorded } = await sendMainMenuForGuest({
+      hotel,
+      guestId: guest.id,
+      to: normalizedPhone,
+      conversationId: conversation.id,
+      menuBody,
+      fallbackBody
+    });
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: responseBody,
+        body: greetingMenuRecorded,
         aiIntent: "GREETING_MENU",
         aiConfidence: 0.98
       }
@@ -4159,30 +4211,20 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
     const menuBody = getMainMenuBody(hotel.displayName, effectiveLang(persisted.language));
     const fallbackBody = buildMainMenuMessage(hotel.displayName, effectiveLang(persisted.language));
-    try {
-      await sendWhatsAppButtons({
-        to: normalizedPhone,
-        body: menuBody,
-        buttons: MENU_BUTTONS,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    } catch (err) {
-      console.error("WhatsApp menu fallback buttons send failed, using text fallback:", err instanceof Error ? err.message : String(err));
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body: fallbackBody,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    }
-    const responseBody = fallbackBody;
+    const { recordedBody: fallbackMenuRecorded } = await sendMainMenuForGuest({
+      hotel,
+      guestId: guest.id,
+      to: normalizedPhone,
+      conversationId: conversation.id,
+      menuBody,
+      fallbackBody
+    });
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: responseBody,
+        body: fallbackMenuRecorded,
         aiIntent: "MENU_FALLBACK",
         aiConfidence: 0.7
       }

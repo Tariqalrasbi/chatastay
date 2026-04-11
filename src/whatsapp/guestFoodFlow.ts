@@ -2,6 +2,7 @@ import { FbServiceMode } from "@prisma/client";
 import { prisma } from "../db";
 import type { FbCartDraftState, FbCartLine, FbCartPurpose } from "./foodTypes";
 import { buildResolvedMenuItemMap, findCategoryById, getAbrCategories, menuItemKey } from "./menuCatalog";
+import { validateMealServiceTime } from "./restaurantHours";
 
 export type { FbCartDraftState, FbCartLine } from "./foodTypes";
 
@@ -117,10 +118,10 @@ function buildItemList(
 }
 
 function parseQty(text: string): number | null {
-  const m = text.trim().match(/^(\d)$/);
+  const m = text.trim().match(/^([1-9]\d?)$/);
   if (!m) return null;
   const n = parseInt(m[1], 10);
-  return n >= 1 && n <= 9 ? n : null;
+  return n >= 1 && n <= 99 ? n : null;
 }
 
 function parseService(text: string): FbServiceMode | null {
@@ -149,13 +150,28 @@ function cartSummaryLines(cart: FbCartLine[], currency: string): string {
     .join("\n");
 }
 
+function cartSubtotal(cart: FbCartLine[]): number {
+  return cart.reduce((s, l) => s + l.unitPrice * l.qty, 0);
+}
+
+function cartSummaryWithSubtotal(cart: FbCartLine[], currency: string): string {
+  const lines = cartSummaryLines(cart, currency);
+  const sub = cartSubtotal(cart);
+  return `${lines}\n\n*Subtotal:* ${sub.toFixed(2)} ${currency}`;
+}
+
 export async function advanceFbCartDraft(params: {
   hotelId: string;
   currency: string;
   text: string;
   draft: FbCartDraftState;
+  /** Hotel IANA timezone for dining-hour checks (e.g. Asia/Muscat). */
+  hotelTimezone?: string;
+  now?: Date;
 }): Promise<FoodFlowAdvanceResult> {
   const { hotelId, currency, text } = params;
+  const hotelTz = params.hotelTimezone ?? "Asia/Muscat";
+  const nowClock = params.now ?? new Date();
   const resolved = await buildResolvedMenuItemMap(hotelId);
   let draft: FbCartDraftState = {
     ...params.draft,
@@ -203,6 +219,22 @@ export async function advanceFbCartDraft(params: {
 
   // --- back navigation (order flows) ---
   if (isBack(raw)) {
+    if (draft.step === "confirm") {
+      draft = { ...draft, step: "time", timeNote: undefined };
+      return {
+        draft,
+        outbound: [
+          {
+            kind: "buttons",
+            body: "When would you like this prepared/served?",
+            buttons: [
+              { id: "fb_time_asap", title: "ASAP / Now" },
+              { id: "fb_time_type", title: "Type HH:MM" }
+            ]
+          }
+        ]
+      };
+    }
     if (draft.step === "time") {
       draft = { ...draft, step: "service", timeNote: undefined };
       return {
@@ -226,7 +258,7 @@ export async function advanceFbCartDraft(params: {
         outbound: [
           {
             kind: "buttons",
-            body: `Your items:\n${cartSummaryLines(draft.cart, currency)}\n\nAdd another line item?`,
+            body: `Your items:\n${cartSummaryWithSubtotal(draft.cart, currency)}\n\nAdd another line item?`,
             buttons: [
               { id: "fb_add_yes", title: "Add item" },
               { id: "fb_add_no", title: "Continue" }
@@ -259,7 +291,7 @@ export async function advanceFbCartDraft(params: {
           pendingName: last.name,
           pendingUnitPrice: last.unitPrice
         };
-        return { draft, outbound: [{ kind: "text", body: `How many *${last.name}*? (1–9)` }] };
+        return { draft, outbound: [{ kind: "text", body: `How many *${last.name}*? Reply with a number (1–99).` }] };
       }
       draft = { ...draft, step: "category" };
       return { draft, outbound: [buildCategoryList(draft.purpose)] };
@@ -295,13 +327,13 @@ export async function advanceFbCartDraft(params: {
       pendingName: row.name,
       pendingUnitPrice: row.unitPrice
     };
-    return { draft, outbound: [{ kind: "text", body: `How many *${row.name}*? Reply 1–9.` }] };
+    return { draft, outbound: [{ kind: "text", body: `How many *${row.name}*? Reply with a number (1–99).` }] };
   }
 
   if (draft.step === "qty") {
     const q = parseQty(raw);
     if (q === null) {
-      return { draft, outbound: [{ kind: "text", body: "Reply with one digit 1–9." }] };
+      return { draft, outbound: [{ kind: "text", body: "Reply with a whole number from 1 to 99." }] };
     }
     if (!draft.pendingMenuItemId || draft.pendingUnitPrice === undefined || !draft.pendingName) {
       return { draft: null, outbound: [{ kind: "text", body: "Session expired." }] };
@@ -327,7 +359,7 @@ export async function advanceFbCartDraft(params: {
       outbound: [
         {
           kind: "buttons",
-          body: `Cart:\n${cartSummaryLines(nextCart, currency)}\n\nAdd another item?`,
+          body: `Cart:\n${cartSummaryWithSubtotal(nextCart, currency)}\n\nAdd another item?`,
           buttons: [
             { id: "fb_add_yes", title: "Add item" },
             { id: "fb_add_no", title: "Continue" }
@@ -411,12 +443,16 @@ export async function advanceFbCartDraft(params: {
 
   if (draft.step === "time") {
     if (raw.includes("fb_time_type")) {
+      const diningHint =
+        draft.serviceMode === "DINING_IN"
+          ? " Restaurant dining: *12:00–15:00* or *18:30–22:00* (hotel local time)."
+          : "";
       return {
         draft,
         outbound: [
           {
             kind: "text",
-            body: "Type the time as *HH:MM* (24h), e.g. *20:30*, or *YYYY-MM-DD HH:MM* for a specific evening."
+            body: "Type the time as *HH:MM* (24h), e.g. *13:00* or *20:00*." + diningHint
           }
         ]
       };
@@ -441,7 +477,80 @@ export async function advanceFbCartDraft(params: {
       };
     }
     const sm = draft.serviceMode ?? "ROOM_SERVICE";
+    const validated = validateMealServiceTime({
+      serviceMode: sm,
+      timeNote: note,
+      now: nowClock,
+      hotelTimezone: hotelTz
+    });
+    if (!validated.ok) {
+      return { draft, outbound: [{ kind: "text", body: validated.message }] };
+    }
+
+    draft = { ...draft, step: "confirm", timeNote: note };
+    const grand = cartSubtotal(draft.cart);
+    const svcLabel = sm === "ROOM_SERVICE" ? "Room service" : "Restaurant dining";
+    const timeLabel = note === "ASAP" ? "ASAP / now" : note;
+    const summaryText = [
+      "*Review your order*",
+      cartSummaryWithSubtotal(draft.cart, currency),
+      "",
+      `*Total:* ${grand.toFixed(2)} ${currency}`,
+      `*Service:* ${svcLabel}`,
+      `*Requested time:* ${timeLabel}`,
+      "",
+      "Tap *Confirm order* to send to the hotel, or *Cancel*."
+    ].join("\n");
+    return {
+      draft,
+      outbound: [
+        { kind: "text", body: summaryText },
+        {
+          kind: "buttons",
+          body: "Ready to confirm?",
+          buttons: [
+            { id: "fb_order_confirm", title: "Confirm order" },
+            { id: "fb_order_cancel", title: "Cancel" }
+          ]
+        }
+      ]
+    };
+  }
+
+  if (draft.step === "confirm") {
+    const sm = draft.serviceMode ?? "ROOM_SERVICE";
+    const note = draft.timeNote ?? "ASAP";
     const lines = draft.cart.map((c) => ({ menuItemId: c.menuItemId, qty: c.qty }));
+
+    if (raw.includes("fb_order_cancel") || /^(cancel|stop|no)\b/i.test(raw.trim())) {
+      return { draft: null, outbound: [{ kind: "text", body: "Order cancelled. Reply *menu* anytime." }] };
+    }
+
+    if (!raw.includes("fb_order_confirm") && !/^(yes|confirm|ok|proceed)\b/i.test(raw.trim())) {
+      const grand = cartSubtotal(draft.cart);
+      const summaryText = [
+        "*Review your order*",
+        cartSummaryWithSubtotal(draft.cart, currency),
+        "",
+        `*Total:* ${grand.toFixed(2)} ${currency}`,
+        `Service: ${sm === "ROOM_SERVICE" ? "Room service" : "Restaurant dining"}`,
+        `Time: ${note === "ASAP" ? "ASAP" : note}`
+      ].join("\n");
+      return {
+        draft,
+        outbound: [
+          { kind: "text", body: summaryText },
+          {
+            kind: "buttons",
+            body: "Tap *Confirm order* to submit.",
+            buttons: [
+              { id: "fb_order_confirm", title: "Confirm order" },
+              { id: "fb_order_cancel", title: "Cancel" }
+            ]
+          }
+        ]
+      };
+    }
 
     if (draft.purpose === "booking_prebook") {
       return {
@@ -451,18 +560,13 @@ export async function advanceFbCartDraft(params: {
       };
     }
     if (draft.purpose === "stay" && draft.stayBookingId) {
+      const grand = cartSubtotal(draft.cart);
       return {
         draft: null,
         outbound: [
           {
             kind: "text",
-            body: [
-              "*Order summary*",
-              cartSummaryLines(draft.cart, currency),
-              "",
-              `Service: ${sm === "ROOM_SERVICE" ? "Room service" : "Restaurant dining"}`,
-              `Requested time: ${note}`
-            ].join("\n")
+            body: `Order received — *total ${grand.toFixed(2)} ${currency}*. The team has been notified.`
           }
         ],
         stayFinished: { bookingId: draft.stayBookingId, lines, serviceMode: sm, timeNote: note }
