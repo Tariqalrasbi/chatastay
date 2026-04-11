@@ -2,6 +2,7 @@ import type { Request } from "express";
 import type { RoomType, RoomUnit } from "@prisma/client";
 import { loadFrontDeskPricing } from "../core/frontDeskPricing";
 import { MANUAL_CHECK_IN_NATIONALITY_OPTIONS } from "./manualCheckInNationalities";
+import type { ManualCheckInRoomSelectionSnapshot } from "./manualCheckInRoomSelection";
 
 export type ManualCheckInFormValues = {
   guestFullName: string;
@@ -30,6 +31,17 @@ export type ManualCheckInFormValues = {
 };
 
 type RoomTypeWithUnits = RoomType & { roomUnits: RoomUnit[] };
+
+export function resolveRoomTypeIdForUnit(
+  roomTypes: Array<{ id: string; roomUnits: Array<{ id: string }> }>,
+  unitId: string | undefined | null
+): string | null {
+  if (!unitId) return null;
+  for (const rt of roomTypes) {
+    if (rt.roomUnits.some((u) => u.id === unitId)) return rt.id;
+  }
+  return null;
+}
 
 function escapeHtml(input: string): string {
   return input
@@ -91,7 +103,13 @@ export function buildManualCheckInPageHtml(
   hotel: { displayName: string; currency: string },
   roomTypes: RoomTypeWithUnits[],
   fdPricing: ReturnType<typeof loadFrontDeskPricing>,
-  options: { defaultDay: Date; errorMsg?: string; form?: ManualCheckInFormValues }
+  options: {
+    defaultDay: Date;
+    errorMsg?: string;
+    form?: ManualCheckInFormValues;
+    roomSelection: ManualCheckInRoomSelectionSnapshot;
+    selectedRoomTypeId?: string | null;
+  }
 ): string {
   const { formatMoney, formatDateForInput, parseDateInput, addDays } = deps;
   const form = options.form;
@@ -106,22 +124,37 @@ export function buildManualCheckInPageHtml(
   const returnBoardHidden = form?.returnBoardDate?.trim() || defaultCheckIn;
   const errorMsg = options.errorMsg?.trim() ?? "";
 
-  const unitOptgroups = roomTypes
-    .map((rt) => {
-      const opts = rt.roomUnits
-        .map(
-          (u) =>
-            `<option value="${escapeHtml(u.id)}" data-nightly="${String(rt.baseNightlyRate)}"${
-              form?.roomUnitId === u.id ? " selected" : ""
-            }>${escapeHtml(u.name)}</option>`
-        )
-        .join("");
-      return opts
-        ? `<optgroup label="${escapeHtml(`${rt.name} — ${formatMoney(rt.baseNightlyRate, hotel.currency)}/night`)}">${opts}</optgroup>`
+  const { roomSelection, selectedRoomTypeId: selectedRoomTypeIdOpt } = options;
+  const selectableIds = new Set(roomSelection.selectableRoomTypes.map((r) => r.id));
+  const resolvedTypeId = resolveRoomTypeIdForUnit(roomTypes, form?.roomUnitId);
+  const initialRoomTypeId =
+    selectedRoomTypeIdOpt && selectableIds.has(selectedRoomTypeIdOpt)
+      ? selectedRoomTypeIdOpt
+      : resolvedTypeId && selectableIds.has(resolvedTypeId)
+        ? resolvedTypeId
         : "";
+
+  const roomTypeOptionsHtml = roomSelection.selectableRoomTypes
+    .map((rt) => {
+      const sel = rt.id === initialRoomTypeId ? " selected" : "";
+      return `<option value="${escapeHtml(rt.id)}" data-nightly="${String(rt.baseNightlyRate)}"${sel}>${escapeHtml(
+        `${rt.name} — ${formatMoney(rt.baseNightlyRate, hotel.currency)}/night`
+      )}</option>`;
     })
-    .filter(Boolean)
     .join("");
+
+  const initialUnits = initialRoomTypeId ? (roomSelection.availableUnitsByRoomTypeId[initialRoomTypeId] ?? []) : [];
+  const unitOptionsHtml = initialUnits
+    .map((u) => {
+      const sel = form?.roomUnitId === u.id ? " selected" : "";
+      const nightly =
+        roomSelection.selectableRoomTypes.find((r) => r.id === initialRoomTypeId)?.baseNightlyRate ?? 0;
+      return `<option value="${escapeHtml(u.id)}" data-nightly="${String(nightly)}"${sel}>${escapeHtml(u.name)}</option>`;
+    })
+    .join("");
+
+  const roomPaxWarnVisible = roomSelection.selectableRoomTypes.length === 0;
+  const roomPaxWarnHtml = `<p id="fd-room-pax-warn" class="badge" role="alert" style="display:${roomPaxWarnVisible ? "block" : "none"};margin-top:8px;background:#fef3c7;color:#92400e;border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.4">No room category is available for this guest mix and stay dates (occupancy, inventory, or all physical units are taken). Adjust dates, guest counts, or try another category later.</p>`;
 
   const extrasCheckboxes = fdPricing.extras
     .map((ex) => {
@@ -358,13 +391,21 @@ ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991
       <span class="fd-req">*</span>
     </div>
     <div class="fd-field">
-      <label for="fd-room-unit">Assign unit</label>
-      <select id="fd-room-unit" name="roomUnitId" required class="fd-input" aria-describedby="fd-room-summary fd-room-rules">
-        <option value="" data-nightly="0">— Choose room —</option>${unitOptgroups}
+      <label for="fd-room-type">Room category <span class="fd-req">*</span></label>
+      <select id="fd-room-type" name="manualRoomCategory" class="fd-input" required aria-describedby="fd-room-summary fd-room-pax-warn fd-room-rules fd-room-fetch-err">
+        <option value="" data-nightly="0">— Choose category —</option>${roomTypeOptionsHtml}
       </select>
     </div>
-    <p id="fd-room-summary" class="fd-room-summary fd-room-summary--empty" role="status" aria-live="polite">Select a room unit before confirming.</p>
-    <p id="fd-room-rules" class="fd-hint">Occupancy: Superior / Executive — max 2 adults &amp; 2 children; Suite — max 2 &amp; 3; Apartment — max 2 &amp; 4, or 4 adults with no children.</p>
+    <div class="fd-field">
+      <label for="fd-room-unit">Room unit <span class="fd-req">*</span></label>
+      <select id="fd-room-unit" name="roomUnitId" class="fd-input" required ${initialRoomTypeId ? "" : "disabled"} aria-describedby="fd-room-summary fd-room-pax-warn fd-room-rules fd-room-fetch-err">
+        <option value="" data-nightly="0">${initialRoomTypeId ? "— Choose unit —" : "— First choose a category —"}</option>${unitOptionsHtml}
+      </select>
+    </div>
+    <p id="fd-room-fetch-err" class="badge" role="alert" style="display:none;margin-top:8px;background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px;font-size:13px"></p>
+    <p id="fd-room-summary" class="fd-room-summary fd-room-summary--empty" role="status" aria-live="polite">Select a category, then a room unit.</p>
+    ${roomPaxWarnHtml}
+    <p id="fd-room-rules" class="fd-hint">Pick a <strong>category</strong> first (only types that fit adults/children and have availability appear). Then pick a <strong>unit</strong> that is free for these dates. Superior/Executive — max 2 adults &amp; 2 children; Suite — max 2 &amp; 3; Apartment — max 2 &amp; 4, or 4 adults with no children.</p>
   </section>
   <section class="fd-sec fd-sec--extras" aria-labelledby="fd-sec-extras-title">
     <div class="fd-sec-head">
@@ -440,6 +481,7 @@ ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991
   </div>
 <script>
 window.__FD_PRICING__ = ${JSON.stringify({ mealPlans: fdPricing.mealPlans, extras: fdPricing.extras })};
+window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
 (function () {
   var cur = "${escapeHtml(hotel.currency)}";
   function parseDay(s) {
@@ -467,21 +509,133 @@ window.__FD_PRICING__ = ${JSON.stringify({ mealPlans: fdPricing.mealPlans, extra
       co.value = iso;
     }
   }
+  function fillRoomTypeOptions(snap) {
+    var rtSel = document.getElementById("fd-room-type");
+    if (!rtSel) return;
+    var prev = rtSel.value;
+    while (rtSel.options.length > 1) rtSel.remove(1);
+    (snap.selectableRoomTypes || []).forEach(function (rt) {
+      var o = document.createElement("option");
+      o.value = rt.id;
+      o.setAttribute("data-nightly", String(rt.baseNightlyRate));
+      o.textContent = rt.name + " — " + Number(rt.baseNightlyRate).toFixed(2) + " " + cur + "/night";
+      rtSel.appendChild(o);
+    });
+    if (prev && [].some.call(rtSel.options, function (x) { return x.value === prev; })) {
+      rtSel.value = prev;
+    }
+  }
+  function fillUnitOptionsForType(roomTypeId) {
+    var uSel = document.getElementById("fd-room-unit");
+    var snap = window.__FD_ROOM_SNAPSHOT__;
+    if (!uSel || !snap) return;
+    while (uSel.options.length > 1) uSel.remove(1);
+    var nightly = "0";
+    var rtMeta = (snap.selectableRoomTypes || []).filter(function (r) { return r.id === roomTypeId; })[0];
+    if (rtMeta) nightly = String(rtMeta.baseNightlyRate);
+    var units = (snap.availableUnitsByRoomTypeId && snap.availableUnitsByRoomTypeId[roomTypeId]) || [];
+    units.forEach(function (u) {
+      var o = document.createElement("option");
+      o.value = u.id;
+      o.setAttribute("data-nightly", nightly);
+      o.textContent = u.name;
+      uSel.appendChild(o);
+    });
+    uSel.disabled = !roomTypeId || units.length === 0;
+    var ph = uSel.options[0];
+    if (ph) {
+      ph.textContent = roomTypeId ? "— Choose unit —" : "— First choose a category —";
+    }
+  }
+  function onRoomTypeChange() {
+    var rtSel = document.getElementById("fd-room-type");
+    var uSel = document.getElementById("fd-room-unit");
+    if (!rtSel || !uSel) return;
+    var rid = rtSel.value;
+    uSel.value = "";
+    fillUnitOptionsForType(rid);
+    updateRoomSummary();
+    recalc();
+  }
+  var refreshTimer = null;
+  function scheduleRefreshRoomSnapshot() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshRoomSnapshot, 320);
+  }
+  function refreshRoomSnapshot() {
+    var ci = document.getElementById("fd-check-in");
+    var co = document.getElementById("fd-check-out");
+    var aEl = document.getElementById("fd-adults");
+    var cEl = document.getElementById("fd-children");
+    var errEl = document.getElementById("fd-room-fetch-err");
+    if (!ci || !co || !aEl || !cEl) return;
+    var q =
+      "?checkIn=" + encodeURIComponent(ci.value) +
+      "&checkOut=" + encodeURIComponent(co.value) +
+      "&adults=" + encodeURIComponent(aEl.value) +
+      "&children=" + encodeURIComponent(cEl.value);
+    if (errEl) {
+      errEl.style.display = "none";
+      errEl.textContent = "";
+    }
+    fetch("/admin/front-desk/check-in/room-options" + q, { credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("Could not load room options.");
+        return r.json();
+      })
+      .then(function (snap) {
+        window.__FD_ROOM_SNAPSHOT__ = snap;
+        var rtSel = document.getElementById("fd-room-type");
+        var uSel = document.getElementById("fd-room-unit");
+        var prevRt = rtSel ? rtSel.value : "";
+        var prevU = uSel ? uSel.value : "";
+        fillRoomTypeOptions(snap);
+        if (prevRt && rtSel && [].some.call(rtSel.options, function (o) { return o.value === prevRt; })) {
+          rtSel.value = prevRt;
+          fillUnitOptionsForType(prevRt);
+          if (prevU && uSel && [].some.call(uSel.options, function (o) { return o.value === prevU; })) {
+            uSel.value = prevU;
+          }
+        } else if (rtSel) {
+          rtSel.value = "";
+          fillUnitOptionsForType("");
+        }
+        var warn = document.getElementById("fd-room-pax-warn");
+        if (warn) {
+          warn.style.display = (snap.selectableRoomTypes && snap.selectableRoomTypes.length) ? "none" : "block";
+        }
+        updateRoomSummary();
+        recalc();
+      })
+      .catch(function (e) {
+        if (errEl) {
+          errEl.style.display = "block";
+          errEl.textContent = e && e.message ? e.message : "Could not refresh room list.";
+        }
+      });
+  }
   function updateRoomSummary() {
+    var rtSel = document.getElementById("fd-room-type");
     var sel = document.getElementById("fd-room-unit");
     var box = document.getElementById("fd-room-summary");
     if (!sel || !box) return;
+    var rtLabel = "";
+    if (rtSel && rtSel.selectedOptions[0] && rtSel.value) {
+      rtLabel = (rtSel.selectedOptions[0].textContent || "").replace(/\\s+/g, " ").trim();
+    }
     var opt = sel.selectedOptions[0];
-    if (!opt || !opt.value) {
-      box.textContent = "Select a room unit before confirming.";
+    if (!rtSel || !rtSel.value) {
+      box.textContent = "Choose a room category that fits your guests, then pick an available unit.";
       box.className = "fd-room-summary fd-room-summary--empty";
       return;
     }
-    var og = "";
-    var par = opt.parentElement;
-    if (par && par.tagName === "OPTGROUP") og = par.label || "";
+    if (!opt || !opt.value) {
+      box.textContent = "Category: " + rtLabel + ". Now select a physical unit.";
+      box.className = "fd-room-summary fd-room-summary--empty";
+      return;
+    }
     var unitLabel = (opt.textContent || "").replace(/\\s+/g, " ").trim();
-    box.textContent = "Assigning: " + unitLabel + (og ? " · " + og : "");
+    box.textContent = "Assigning: " + unitLabel + " · " + rtLabel;
     box.className = "fd-room-summary fd-room-summary--ok";
   }
   function recalc() {
@@ -539,21 +693,62 @@ window.__FD_PRICING__ = ${JSON.stringify({ mealPlans: fdPricing.mealPlans, extra
   }
   var ciEl = document.getElementById("fd-check-in");
   if (ciEl) {
-    ciEl.addEventListener("change", syncCheckoutMin);
-    ciEl.addEventListener("input", syncCheckoutMin);
+    ciEl.addEventListener("change", function () {
+      syncCheckoutMin();
+      scheduleRefreshRoomSnapshot();
+      recalc();
+    });
+    ciEl.addEventListener("input", function () {
+      syncCheckoutMin();
+      scheduleRefreshRoomSnapshot();
+      recalc();
+    });
   }
   syncCheckoutMin();
-  ["fd-check-in","fd-check-out","fd-adults","fd-children","fd-meal-plan","fd-room-unit","fd-adjustment"].forEach(function (id) {
+  var coEl = document.getElementById("fd-check-out");
+  if (coEl) {
+    coEl.addEventListener("change", function () {
+      scheduleRefreshRoomSnapshot();
+      recalc();
+    });
+    coEl.addEventListener("input", function () {
+      scheduleRefreshRoomSnapshot();
+      recalc();
+    });
+  }
+  ["fd-meal-plan","fd-adjustment"].forEach(function (id) {
     var el = document.getElementById(id);
-    if (el) el.addEventListener("change", recalc);
-    if (el) el.addEventListener("input", recalc);
+    if (el) {
+      el.addEventListener("change", recalc);
+      el.addEventListener("input", recalc);
+    }
   });
+  ["fd-adults","fd-children"].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) {
+      el.addEventListener("change", function () {
+        scheduleRefreshRoomSnapshot();
+        recalc();
+      });
+      el.addEventListener("input", function () {
+        scheduleRefreshRoomSnapshot();
+        recalc();
+      });
+    }
+  });
+  var rtEl = document.getElementById("fd-room-type");
+  if (rtEl) rtEl.addEventListener("change", onRoomTypeChange);
   var ru = document.getElementById("fd-room-unit");
   if (ru) {
-    ru.addEventListener("change", updateRoomSummary);
-    ru.addEventListener("input", updateRoomSummary);
+    ru.addEventListener("change", function () {
+      updateRoomSummary();
+      recalc();
+    });
+    ru.addEventListener("input", function () {
+      updateRoomSummary();
+      recalc();
+    });
   }
-  updateRoomSummary();
   document.querySelectorAll(".fd-extra").forEach(function (cb) {
     cb.addEventListener("change", recalc);
   });
@@ -561,6 +756,7 @@ window.__FD_PRICING__ = ${JSON.stringify({ mealPlans: fdPricing.mealPlans, extra
     el.addEventListener("change", recalc);
     el.addEventListener("input", recalc);
   });
+  updateRoomSummary();
   recalc();
 })();
 </script>

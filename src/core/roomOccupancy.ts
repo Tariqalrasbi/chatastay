@@ -53,3 +53,29 @@ export function roomTypeAllowsOccupancy(roomTypeCode: string, adults: number, ch
       return { ok: true, message: "" };
   }
 }
+
+/** Room types that use adult/child rules in {@link roomTypeAllowsOccupancy}. */
+const MANUAL_CHECK_IN_DETAIL_CODES = new Set(["STD_SUPERIOR", "STD_EXEC", "SUITE", "APARTMENT"]);
+
+/**
+ * Manual check-in / front desk: whether guest counts fit this room type.
+ * Known codes use full adult/child rules; others use total pax vs `capacity` only.
+ */
+export function manualCheckInFitsRoomType(
+  rt: { code: string; capacity: number },
+  adults: number,
+  children: number
+): { ok: boolean; message: string } {
+  if (MANUAL_CHECK_IN_DETAIL_CODES.has(rt.code)) {
+    return roomTypeAllowsOccupancy(rt.code, adults, children);
+  }
+  const a = Math.max(0, Math.floor(adults));
+  const c = Math.max(0, Math.floor(children));
+  if (a + c > rt.capacity) {
+    return {
+      ok: false,
+      message: `This room type allows up to ${rt.capacity} guests total. Choose a different room or adjust guest counts.`
+    };
+  }
+  return { ok: true, message: "" };
+}

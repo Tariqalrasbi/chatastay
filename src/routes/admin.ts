@@ -49,9 +49,10 @@ import {
 } from "../core/folioService";
 import { computeRoomUnitFolioSummary, mapChargeCategoryToFolio, parsePostingTarget, round2 } from "../core/roomUnitFolio";
 import { DEFAULT_FB_MENU_2026, appendMissingFbMenuItems } from "../core/defaultFbMenuSeed";
-import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
+import { manualCheckInFitsRoomType } from "../core/roomOccupancy";
 import { allocateBookingReferenceCode, displayBookingReference } from "../core/bookingReference";
-import { buildManualCheckInPageHtml, manualCheckInFormFromBody } from "./manualCheckInForm";
+import { buildManualCheckInPageHtml, manualCheckInFormFromBody, resolveRoomTypeIdForUnit } from "./manualCheckInForm";
+import { computeManualCheckInRoomSelection } from "./manualCheckInRoomSelection";
 import { sendWhatsAppDocument, sendWhatsAppText, trySendWhatsAppText } from "../whatsapp/send";
 import {
   bookingComDomains,
@@ -2714,13 +2715,32 @@ async function respondManualCheckInValidationError(
     orderBy: { name: "asc" },
     include: { roomUnits: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
   });
+  const checkIn = form.checkIn.trim()
+    ? startOfDay(parseDateInput(form.checkIn, startOfDay(new Date())))
+    : startOfDay(new Date());
+  const checkOut = form.checkOut.trim()
+    ? startOfDay(parseDateInput(form.checkOut, addDays(checkIn, 1)))
+    : addDays(checkIn, 1);
+  const adultsParsed = parseInt(String(form.adults ?? "2"), 10);
+  const adultsNum = Number.isFinite(adultsParsed) ? Math.min(12, Math.max(1, adultsParsed)) : 2;
+  const childrenParsed = parseInt(String(form.children ?? "0"), 10);
+  const childrenNum = Number.isFinite(childrenParsed) ? Math.min(8, Math.max(0, childrenParsed)) : 0;
+  const roomSelection = await computeManualCheckInRoomSelection({
+    hotelId: hotel.id,
+    checkIn,
+    checkOut,
+    adults: adultsNum,
+    children: childrenNum,
+    roomTypes
+  });
+  const selectedRoomTypeId = resolveRoomTypeIdForUnit(roomTypes, form.roomUnitId || null);
   const fdPricing = loadFrontDeskPricing();
   const content = buildManualCheckInPageHtml(
     { formatMoney, formatDateForInput, parseDateInput, addDays },
     hotel,
     roomTypes,
     fdPricing,
-    { defaultDay, errorMsg, form }
+    { defaultDay, errorMsg, form, roomSelection, selectedRoomTypeId }
   );
   res.status(200).type("html").send(renderLayout(content, true));
 }
@@ -2742,15 +2762,54 @@ adminRouter.get("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"),
     orderBy: { name: "asc" },
     include: { roomUnits: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
   });
+  const checkIn0 = startOfDay(defaultDay);
+  const checkOut0 = addDays(checkIn0, 1);
+  const roomSelection = await computeManualCheckInRoomSelection({
+    hotelId: hotel.id,
+    checkIn: checkIn0,
+    checkOut: checkOut0,
+    adults: 2,
+    children: 0,
+    roomTypes
+  });
   const fdPricing = loadFrontDeskPricing();
   const content = buildManualCheckInPageHtml(
     { formatMoney, formatDateForInput, parseDateInput, addDays },
     hotel,
     roomTypes,
     fdPricing,
-    { defaultDay, errorMsg: errorMsg || undefined }
+    { defaultDay, errorMsg: errorMsg || undefined, roomSelection }
   );
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/front-desk/check-in/room-options", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true }
+  });
+  if (!hotel) {
+    res.status(404).json({ error: "Hotel not found" });
+    return;
+  }
+  const checkIn = startOfDay(parseDateInput(req.query.checkIn, startOfDay(new Date())));
+  const checkOut = startOfDay(parseDateInput(req.query.checkOut, addDays(checkIn, 1)));
+  const adults = clamp(parseIntegerInput(req.query.adults, 2), 1, 12);
+  const children = clamp(parseIntegerInput(req.query.children, 0), 0, 8);
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: { roomUnits: { where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+  });
+  const roomSelection = await computeManualCheckInRoomSelection({
+    hotelId: hotel.id,
+    checkIn,
+    checkOut,
+    adults,
+    children,
+    roomTypes
+  });
+  res.json(roomSelection);
 });
 
 adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
@@ -2843,15 +2902,9 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
     await fail("Room type is inactive.");
     return;
   }
-  const knownOccupancyCodes = new Set(["STD_SUPERIOR", "STD_EXEC", "SUITE", "APARTMENT"]);
-  if (knownOccupancyCodes.has(rt.code)) {
-    const occ = roomTypeAllowsOccupancy(rt.code, adults, children);
-    if (!occ.ok) {
-      await fail(occ.message);
-      return;
-    }
-  } else if (adults + children > rt.capacity) {
-    await fail(`Guest count exceeds room capacity (${rt.capacity}).`);
+  const occ = manualCheckInFitsRoomType(rt, adults, children);
+  if (!occ.ok) {
+    await fail(occ.message);
     return;
   }
 
