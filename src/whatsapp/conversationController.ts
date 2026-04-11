@@ -34,6 +34,7 @@ import {
 } from "./knowledgeBase";
 import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send";
 import { guestReceptionistHandoffMessage } from "./guestNotifications";
+import { handleGuestJourneyInboundReply } from "./preArrivalGuestReplyNotify";
 import {
   buildCheckInListSections,
   buildCheckOutListSections,
@@ -957,21 +958,38 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       data: { hotelId: hotel.id, guestId: guest.id, state: DbConversationState.NEW, lastMessageAt: new Date() }
     }));
 
+  let inboundMessageId: string | undefined;
   try {
-    await prisma.message.create({
+    const createdInbound = await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
         providerMessageId: input.messageId,
         direction: MessageDirection.INBOUND,
         body: input.text
-      }
+      },
+      select: { id: true }
     });
+    inboundMessageId = createdInbound.id;
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return;
     }
     throw err;
+  }
+  if (inboundMessageId) {
+    try {
+      await handleGuestJourneyInboundReply({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        prismaMessageId: inboundMessageId,
+        messageBody: input.text,
+        providerMessageId: input.messageId
+      });
+    } catch (e) {
+      console.error("guest journey reply notify:", e instanceof Error ? e.message : String(e));
+    }
   }
   await logWhatsAppMessage({
     conversationId: conversation.id,

@@ -1,8 +1,9 @@
 import { Router } from "express";
 import Stripe from "stripe";
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, FolioPostingTarget, FolioTxnSourceType, PaymentStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { recordBookingStatusChange } from "../core/bookingStatusHistory";
+import { ensureActiveFolio, postPaymentToFolio } from "../core/folioService";
 import { handleIncomingWhatsAppMessage } from "../whatsapp/conversationController";
 import { buildBookingInvoicePdf } from "../core/invoicePdf";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
@@ -61,6 +62,10 @@ async function upsertPaymentTransaction(params: {
   });
 }
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 async function applyPaymentStatus(
   localPaymentIntentId: string,
   status: "SUCCEEDED" | "FAILED",
@@ -81,26 +86,51 @@ async function applyPaymentStatus(
     }
   });
   if (!paymentIntent) return;
-  const wasSucceeded = paymentIntent.status === "SUCCEEDED";
+
+  if (status === "SUCCEEDED" && paymentIntent.status === PaymentStatus.SUCCEEDED) {
+    return;
+  }
+
+  const wasSucceeded = paymentIntent.status === PaymentStatus.SUCCEEDED;
+
+  const nextPiStatus = status === "SUCCEEDED" ? PaymentStatus.SUCCEEDED : PaymentStatus.FAILED;
 
   await prisma.paymentIntent.update({
     where: { id: paymentIntent.id },
     data: {
-      status,
+      status: nextPiStatus,
       metadataJson: providerPayload ?? paymentIntent.metadataJson ?? undefined
     }
   });
 
-  if (paymentIntent.bookingId) {
-    const prevBookingStatus = paymentIntent.booking?.status ?? null;
+  if (paymentIntent.bookingId && paymentIntent.booking) {
+    const booking = paymentIntent.booking;
+    const prevBookingStatus = booking.status;
+    const paid = round2(paymentIntent.amount);
+    const totalDue = round2(booking.totalAmount);
+    const fullySettled = paid >= totalDue - 0.01;
+
+    const nextBookingPayment: PaymentStatus =
+      status === "FAILED"
+        ? PaymentStatus.FAILED
+        : fullySettled
+          ? PaymentStatus.SUCCEEDED
+          : PaymentStatus.PENDING;
+
     await prisma.booking.update({
-      where: { id: paymentIntent.bookingId },
-      data: { paymentStatus: status, ...(status === "SUCCEEDED" ? { status: "CONFIRMED" } : {}) }
+      where: { id: booking.id },
+      data: {
+        paymentStatus: nextBookingPayment,
+        ...(status === "SUCCEEDED" && prevBookingStatus !== BookingStatus.CONFIRMED
+          ? { status: BookingStatus.CONFIRMED }
+          : {})
+      }
     });
-    if (status === "SUCCEEDED" && prevBookingStatus && prevBookingStatus !== BookingStatus.CONFIRMED) {
+
+    if (status === "SUCCEEDED" && prevBookingStatus !== BookingStatus.CONFIRMED) {
       await recordBookingStatusChange(prisma, {
         hotelId: paymentIntent.hotelId,
-        bookingId: paymentIntent.bookingId,
+        bookingId: booking.id,
         fromStatus: prevBookingStatus,
         toStatus: BookingStatus.CONFIRMED,
         source: "STRIPE_WEBHOOK"
@@ -118,7 +148,42 @@ async function applyPaymentStatus(
     providerPayload
   });
 
-  if (!wasSucceeded && status === "SUCCEEDED" && paymentIntent.booking && paymentIntent.booking.status === "CONFIRMED") {
+  if (!wasSucceeded && status === "SUCCEEDED" && paymentIntent.bookingId && paymentIntent.booking) {
+    const booking = paymentIntent.booking;
+
+    try {
+      await ensureActiveFolio(prisma, {
+        hotelId: paymentIntent.hotelId,
+        bookingId: booking.id,
+        guestId: booking.guestId,
+        roomUnitId: booking.roomUnitId,
+        currency: booking.currency,
+        staffId: null
+      });
+      await postPaymentToFolio(prisma, {
+        hotelId: paymentIntent.hotelId,
+        bookingId: booking.id,
+        guestId: booking.guestId,
+        roomUnitId: booking.roomUnitId,
+        roomTypeId: booking.roomTypeId,
+        currency: paymentIntent.currency,
+        amount: round2(paymentIntent.amount),
+        folioPaymentMethod: "Stripe / card (Checkout)",
+        postingTarget: FolioPostingTarget.GUEST_FOLIO,
+        chargeDate: new Date(),
+        referenceNumber: externalTxnId ?? paymentIntent.externalIntentId ?? null,
+        notes: `Stripe Checkout · local PaymentIntent ${paymentIntent.id}`,
+        sourceType: FolioTxnSourceType.API,
+        allocateFifo: true,
+        staffId: null
+      });
+    } catch (err) {
+      console.error(
+        "[stripe webhook] folio payment post failed:",
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+
     let invoiceId = paymentIntent.invoiceId ?? null;
     if (!invoiceId) {
       const invoice = await prisma.invoice.create({
@@ -139,7 +204,6 @@ async function applyPaymentStatus(
       });
     }
 
-    const booking = paymentIntent.booking;
     const invoicePdf = await buildBookingInvoicePdf({
       documentKind: "receipt",
       invoiceNumber: `RCP-${booking.id}`,
@@ -497,12 +561,24 @@ apiRouter.post("/payments/webhook/stripe", async (req, res) => {
       const localPaymentIntentId =
         session.client_reference_id ?? session.metadata?.paymentIntentId ?? undefined;
       if (localPaymentIntentId) {
-        await applyPaymentStatus(
-          localPaymentIntentId,
-          "FAILED",
-          typeof session.payment_intent === "string" ? session.payment_intent : session.id,
-          JSON.stringify(session)
-        );
+        const pi = await prisma.paymentIntent.findUnique({ where: { id: localPaymentIntentId } });
+        if (pi && pi.status !== PaymentStatus.SUCCEEDED) {
+          let merged: Record<string, unknown> = {};
+          try {
+            merged = pi.metadataJson ? (JSON.parse(pi.metadataJson) as Record<string, unknown>) : {};
+          } catch {
+            merged = {};
+          }
+          merged.checkoutSessionExpired = true;
+          merged.expiredAt = new Date().toISOString();
+          await prisma.paymentIntent.update({
+            where: { id: pi.id },
+            data: {
+              status: PaymentStatus.PENDING,
+              metadataJson: JSON.stringify(merged)
+            }
+          });
+        }
       }
     } else if (event.type === "payment_intent.payment_failed") {
       const failedIntent = event.data.object as Stripe.PaymentIntent;

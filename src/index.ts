@@ -7,6 +7,7 @@ import { guestRouter } from "./routes/guest";
 import { ownerRouter } from "./routes/owner";
 import { whatsappWebhookRouter } from "./whatsapp/webhookRouter";
 import { logWhatsAppStartupHints } from "./whatsapp/send";
+import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
 
 const app = express();
 const rawPort = process.env.PORT ?? "3000";
@@ -37,6 +38,7 @@ const server = app.listen(port, host, () => {
   console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
   console.log(`(Keep this terminal open while you use the app.)`);
   logWhatsAppStartupHints();
+  startPreArrivalReminderScheduler();
 });
 
 server.on("error", (err: NodeJS.ErrnoException) => {

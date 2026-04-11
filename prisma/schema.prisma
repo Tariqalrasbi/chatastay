@@ -83,6 +83,27 @@ enum ChannelProvider {
   REFERRAL
 }
 
+/// Hospitality CRM-style guest labels; combined with SegmentTagSource for manual vs rules engine.
+enum SegmentTagKind {
+  REPEAT_GUEST
+  FAMILY
+  CORPORATE
+  LONG_STAY
+  HIGH_SPENDER
+  OTA_GUEST
+  DIRECT_GUEST
+  WHATSAPP_GUEST
+  WALK_IN
+  PHONE_BOOKING
+  REFERRAL
+  OTHER
+}
+
+enum SegmentTagSource {
+  MANUAL
+  AUTO
+}
+
 enum SyncStatus {
   QUEUED
   RUNNING
@@ -260,6 +281,7 @@ model Hotel {
   paymentAllocations PaymentAllocation[]
   bookingStatusHistories BookingStatusHistory[]
   notifications         Notification[]
+  marketingCampaigns    MarketingCampaign[]
 }
 
 model HotelUser {
@@ -353,6 +375,13 @@ model Guest {
   /// ISO nationality / country of passport (optional; front desk & reporting).
   nationality    String?
   locale         String?        @default("en")
+  /// Guest journey: last REPEAT_GUEST_PROMO sent (cooldown across bookings at this hotel).
+  journeyLastRepeatPromoAt DateTime?
+  /// Staff-marked VIP; used for badges and future differentiated handling.
+  isVip          Boolean        @default(false)
+  /// Short internal note shown with VIP (preferences, recognition cues).
+  vipNote        String?
+  segmentTags    GuestSegmentTag[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   conversations  Conversation[]
@@ -365,8 +394,61 @@ model Guest {
   folioTransactions FolioTransaction[]
   folios         Folio[]
   notifications  Notification[]
+  marketingCampaignRecipients MarketingCampaignRecipient[]
 
   @@unique([hotelId, phoneE164])
+}
+
+/// Targeted WhatsApp campaign (filters JSON + aggregates + per-guest outcomes).
+model MarketingCampaign {
+  id                  String   @id @default(cuid())
+  hotelId             String
+  hotel               Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name                String
+  purposeNote         String?
+  filtersJson         String
+  messageBody         String
+  linkedOfferId       String?
+  channel             String   @default("WHATSAPP")
+  /// DRAFT | SENT | FAILED
+  status              String   @default("DRAFT")
+  audienceCount       Int      @default(0)
+  attemptedCount      Int      @default(0)
+  sentOkCount         Int      @default(0)
+  sentFailedCount     Int      @default(0)
+  skippedNoPhoneCount Int      @default(0)
+  createdAt           DateTime @default(now())
+  sentAt              DateTime?
+  recipients          MarketingCampaignRecipient[]
+
+  @@index([hotelId, createdAt])
+}
+
+model MarketingCampaignRecipient {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  guestId     String
+  guest       Guest    @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  outcome     String
+  errorDetail String?
+  createdAt   DateTime @default(now())
+
+  @@unique([campaignId, guestId])
+  @@index([campaignId])
+}
+
+/// One row per guest per tag; unique (guestId, tag). MANUAL rows are preserved; AUTO rows refreshed by rules.
+model GuestSegmentTag {
+  id        String           @id @default(cuid())
+  guestId   String
+  guest     Guest            @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  tag       SegmentTagKind
+  source    SegmentTagSource
+  createdAt DateTime         @default(now())
+
+  @@unique([guestId, tag])
+  @@index([guestId])
 }
 
 model Conversation {
@@ -433,6 +515,18 @@ model Booking {
   referenceCode  String?
   /// Meal package chosen in WhatsApp / desk: NONE, BREAKFAST, HALF_BOARD, FULL_BOARD.
   mealPlan       String?
+  /// When the automated pre-arrival WhatsApp reminder was successfully sent (dedupes retries). Legacy; prefer guestJourneyPreArrival24hSentAt.
+  preArrivalReminderSentAt DateTime?
+  /// Guest journey: PRE_ARRIVAL_24H WhatsApp sent (once per booking).
+  guestJourneyPreArrival24hSentAt DateTime?
+  /// Guest journey: CHECKIN_DAY WhatsApp sent (once per booking).
+  guestJourneyCheckinDaySentAt DateTime?
+  /// Guest journey: POST_CHECKOUT_THANK_YOU WhatsApp sent (once per booking).
+  guestJourneyPostCheckoutThankYouSentAt DateTime?
+  /// Guest journey: REVIEW_REQUEST WhatsApp sent (once per booking).
+  guestJourneyReviewRequestSentAt DateTime?
+  /// Guest journey: REPEAT_GUEST_PROMO WhatsApp sent (once per booking; guest-level cooldown also applies).
+  guestJourneyRepeatPromoSentAt DateTime?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   paymentIntents PaymentIntent[]
@@ -841,6 +935,8 @@ model PaymentIntent {
   currency          String         @default("OMR")
   status            PaymentStatus  @default(PENDING)
   paymentLinkUrl    String?
+  /// When the payment link was sent to the guest (e.g. WhatsApp); audit only.
+  paymentLinkSentAt DateTime?
   metadataJson      String?
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt

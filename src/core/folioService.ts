@@ -222,7 +222,8 @@ export type PostPaymentInput = {
   roomUnitId?: string | null;
   roomTypeId?: string | null;
   currency: string;
-  staffId: string;
+  /** Front-desk user; omit for automated provider-settled payments (e.g. Stripe webhook). */
+  staffId?: string | null;
   amount: number;
   folioPaymentMethod: string;
   postingTarget: FolioPostingTarget;
@@ -241,7 +242,7 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
     guestId: input.guestId,
     roomUnitId: input.roomUnitId,
     currency: input.currency,
-    staffId: input.staffId
+    staffId: input.staffId ?? undefined
   });
 
   const gross = round2(input.amount);
@@ -273,7 +274,7 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
       chargeDate: input.chargeDate,
       postedAt: new Date(),
       notes: input.notes ?? undefined,
-      createdByUserId: input.staffId,
+      createdByUserId: input.staffId ?? undefined,
       isVoided: false
     }
   });

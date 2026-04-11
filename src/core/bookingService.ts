@@ -3,6 +3,7 @@ import { recordBookingStatusChange } from "./bookingStatusHistory";
 import { allocateBookingReferenceCode } from "./bookingReference";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma } from "../db";
+import { refreshGuestSegmentTagsForGuest } from "./guestSegmentation";
 import { ensureActiveFolio } from "./folioService";
 import { addDays, findAvailableRoomType, startOfDay } from "./availability";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
@@ -267,6 +268,10 @@ export async function createConfirmedBookingAtomic(params: {
       data: { status: "CONFIRMED", bookingId }
     });
   });
+
+  await refreshGuestSegmentTagsForGuest(params.guestId).catch((err) =>
+    console.error("[guest-segmentation] refresh after confirm failed:", err instanceof Error ? err.message : String(err))
+  );
 
   return {
     bookingId,

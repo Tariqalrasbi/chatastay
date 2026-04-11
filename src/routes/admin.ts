@@ -18,7 +18,9 @@ import {
   MessageDirection,
   OutletTicketSource,
   OutletTicketStatus,
-  PaymentStatus
+  PaymentStatus,
+  SegmentTagKind,
+  SegmentTagSource
 } from "@prisma/client";
 import Stripe from "stripe";
 import nodemailer from "nodemailer";
@@ -51,6 +53,21 @@ import { computeRoomUnitFolioSummary, mapChargeCategoryToFolio, parsePostingTarg
 import { DEFAULT_FB_MENU_2026, appendMissingFbMenuItems } from "../core/defaultFbMenuSeed";
 import { manualCheckInFitsRoomType } from "../core/roomOccupancy";
 import { allocateBookingReferenceCode, displayBookingReference } from "../core/bookingReference";
+import {
+  formatGuestVipAndTagsHtml,
+  refreshGuestSegmentTagsForGuest,
+  SEGMENT_TAG_LABELS
+} from "../core/guestSegmentation";
+import {
+  deserializeCampaignFilters,
+  isCampaignFiltersEmpty,
+  parseCampaignFiltersFromBody,
+  resolveCampaignAudience,
+  serializeCampaignFilters
+} from "../core/campaignAudience";
+import { sendMarketingCampaignWhatsApp } from "../core/campaignSend";
+import { renderCampaignComposePage } from "./campaignCenterHtml";
+import { loadManagementKpis, parseKpiPreset } from "../core/managementKpiDashboard";
 import { buildManualCheckInPageHtml, manualCheckInFormFromBody, resolveRoomTypeIdForUnit } from "./manualCheckInForm";
 import { computeManualCheckInRoomSelection } from "./manualCheckInRoomSelection";
 import { sendWhatsAppDocument, sendWhatsAppText, trySendWhatsAppText } from "../whatsapp/send";
@@ -555,6 +572,7 @@ function renderLayout(content: string, authenticated: boolean): string {
         '<a href="/admin/rooms">Room Rate</a>',
         '<a href="/admin/inventory">Room Availability</a>',
         '<a href="/admin/offers">Offers</a>',
+        '<a href="/admin/campaigns">Campaigns</a>',
         "</div>",
         '<div class="section-tabs" data-section="account">',
         '<a href="/admin/profile">Hotel Profile</a>',
@@ -566,6 +584,7 @@ function renderLayout(content: string, authenticated: boolean): string {
         "</div>",
         '<div class="section-tabs" data-section="insights">',
         '<a href="/admin/reports-center">Reports</a>',
+        '<a href="/admin/management-kpi">Management KPI</a>',
         '<a href="/admin/ai-analytics">AI Analytics</a>',
         '<a href="/admin/booking-funnel">Booking Funnel</a>',
         '<a href="/admin/routing-health">Routing Health</a>',
@@ -601,6 +620,18 @@ function escapeHtml(input: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function parseManualSegmentTagsFromBody(body: Record<string, unknown>): SegmentTagKind[] {
+  const raw = body.manualTags;
+  const arr = Array.isArray(raw) ? raw : raw != null && String(raw).length > 0 ? [String(raw)] : [];
+  const allowed = new Set<string>(Object.values(SegmentTagKind));
+  const out = new Set<SegmentTagKind>();
+  for (const r of arr) {
+    const s = String(r);
+    if (allowed.has(s)) out.add(s as SegmentTagKind);
+  }
+  return Array.from(out);
 }
 
 function formatDate(input: Date | null | undefined): string {
@@ -1061,6 +1092,11 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
     const message = error instanceof Error ? error.message : "Failed to send payment link via WhatsApp.";
     return { sent: false, skipped: false, error: message };
   }
+
+  await prisma.paymentIntent.update({
+    where: { id: paymentIntent.id },
+    data: { paymentLinkSentAt: new Date() }
+  });
 
   await logAudit({
     hotelId: hotel.id,
@@ -3027,6 +3063,14 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         rooms: 1
       });
     });
+
+    const segGuestId = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { guestId: true }
+    });
+    if (segGuestId) {
+      await refreshGuestSegmentTagsForGuest(segGuestId.guestId).catch(() => undefined);
+    }
 
     const dateKey = formatDateForInput(checkIn);
     await logAudit({
@@ -5780,6 +5824,290 @@ adminRouter.post("/offers/:id/toggle", requirePermission("ROOMS", "EDIT"), async
   res.redirect("/admin/offers?toggled=1");
 });
 
+adminRouter.get("/campaigns", requirePermission("BOOKINGS", "VIEW"), async (_req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Campaigns</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const campaigns = await prisma.marketingCampaign.findMany({
+    where: { hotelId: hotel.id },
+    orderBy: { createdAt: "desc" },
+    take: 80
+  });
+
+  const rows = campaigns
+    .map(
+      (c) => `<tr>
+  <td><a class="inline-link" href="/admin/campaigns/${encodeURIComponent(c.id)}">${escapeHtml(c.name)}</a></td>
+  <td>${formatDateTime(c.createdAt)}</td>
+  <td><span class="badge ${c.status === "SENT" ? "ok" : c.status === "FAILED" ? "alert" : "pending"}">${escapeHtml(c.status)}</span></td>
+  <td>${c.audienceCount}</td>
+  <td>${c.sentOkCount}</td>
+  <td>${c.sentFailedCount}</td>
+  <td>${c.skippedNoPhoneCount}</td>
+</tr>`
+    )
+    .join("");
+
+  const content = `
+<h2>Campaign center</h2>
+<p class="muted">Targeted WhatsApp campaigns using guest tags, VIP, and booking history. <a class="inline-link" href="/admin/campaigns/new">Compose new campaign</a></p>
+<table>
+  <thead><tr><th>Name</th><th>Created</th><th>Status</th><th>Audience</th><th>Sent</th><th>Failed</th><th>No phone</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="7">No campaigns yet.</td></tr>'}</tbody>
+</table>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/campaigns/new", requirePermission("BOOKINGS", "VIEW"), async (_req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const [roomTypes, offers] = await Promise.all([
+    prisma.roomType.findMany({
+      where: { hotelId: hotel.id, isActive: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true }
+    }),
+    Promise.resolve(readOffers())
+  ]);
+
+  const inner = renderCampaignComposePage({
+    hotelDisplayName: hotel.displayName,
+    roomTypes,
+    offers,
+    body: {},
+    previewCount: null,
+    errorMsg: null
+  });
+
+  res.type("html").send(renderLayout(inner, true));
+});
+
+adminRouter.post("/campaigns/new", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/campaigns");
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const action = String(body._action ?? "");
+  const filters = parseCampaignFiltersFromBody(body);
+  const ackBroad = body.ackBroadAudience === "1" || body.ackBroadAudience === "on";
+
+  const [roomTypes, offers] = await Promise.all([
+    prisma.roomType.findMany({
+      where: { hotelId: hotel.id, isActive: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true }
+    }),
+    Promise.resolve(readOffers())
+  ]);
+
+  const renderForm = (previewCount: number | null, errorMsg: string | null) => {
+    const inner = renderCampaignComposePage({
+      hotelDisplayName: hotel.displayName,
+      roomTypes,
+      offers,
+      body,
+      previewCount,
+      errorMsg
+    });
+    res.type("html").send(renderLayout(inner, true));
+  };
+
+  if (isCampaignFiltersEmpty(filters) && !ackBroad) {
+    renderForm(
+      null,
+      "Select at least one audience filter, or tick the acknowledgement to include all guests with a phone number."
+    );
+    return;
+  }
+
+  const { guests, count } = await resolveCampaignAudience(hotel.id, filters);
+
+  if (action === "preview") {
+    renderForm(count, null);
+    return;
+  }
+
+  if (action !== "send") {
+    renderForm(null, "Unknown action.");
+    return;
+  }
+
+  const campaignName = String(body.campaignName ?? "").trim();
+  const messageBody = String(body.messageBody ?? "").trim();
+  const purposeNote = String(body.purposeNote ?? "").trim() || null;
+  const linkedOfferIdRaw = String(body.linkedOfferId ?? "").trim();
+  const linkedOfferId = linkedOfferIdRaw.length ? linkedOfferIdRaw : null;
+
+  if (!campaignName) {
+    renderForm(count, "Campaign name is required to send.");
+    return;
+  }
+  if (!messageBody) {
+    renderForm(count, "Message body is required to send.");
+    return;
+  }
+  if (count === 0) {
+    renderForm(count, "No guests match these filters. Adjust filters and preview again.");
+    return;
+  }
+
+  const campaign = await prisma.marketingCampaign.create({
+    data: {
+      hotelId: hotel.id,
+      name: campaignName,
+      purposeNote,
+      filtersJson: serializeCampaignFilters(filters),
+      messageBody,
+      linkedOfferId,
+      channel: "WHATSAPP",
+      status: "SENDING",
+      audienceCount: count,
+      attemptedCount: 0,
+      sentOkCount: 0,
+      sentFailedCount: 0,
+      skippedNoPhoneCount: 0
+    }
+  });
+
+  const offerDef = linkedOfferId ? offers.find((o) => o.id === linkedOfferId && o.isActive) : undefined;
+  const offerSnip = offerDef ? { title: offerDef.title, code: offerDef.code } : null;
+
+  try {
+    const result = await sendMarketingCampaignWhatsApp({
+      hotelId: hotel.id,
+      hotelDisplayName: hotel.displayName,
+      campaignId: campaign.id,
+      guests,
+      messageBody,
+      offer: offerSnip
+    });
+
+    const failedAll = result.attempted > 0 && result.sentOk === 0;
+    await prisma.marketingCampaign.update({
+      where: { id: campaign.id },
+      data: {
+        status: failedAll ? "FAILED" : "SENT",
+        attemptedCount: result.attempted,
+        sentOkCount: result.sentOk,
+        sentFailedCount: result.sentFailed,
+        skippedNoPhoneCount: result.skippedNoPhone,
+        sentAt: new Date()
+      }
+    });
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "MARKETING_CAMPAIGN_SENT",
+      entityType: "MarketingCampaign",
+      entityId: campaign.id,
+      metadata: {
+        name: campaignName,
+        audienceCount: count,
+        sentOk: result.sentOk,
+        sentFailed: result.sentFailed,
+        skippedNoPhone: result.skippedNoPhone
+      }
+    });
+  } catch (err) {
+    await prisma.marketingCampaign.update({
+      where: { id: campaign.id },
+      data: { status: "FAILED" }
+    });
+    throw err;
+  }
+
+  res.redirect(`/admin/campaigns/${encodeURIComponent(campaign.id)}?sent=1`);
+});
+
+adminRouter.get("/campaigns/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const id = String(req.params.id ?? "");
+  const campaign = await prisma.marketingCampaign.findFirst({
+    where: { id, hotelId: hotel.id },
+    include: {
+      recipients: {
+        orderBy: { createdAt: "desc" },
+        take: 40,
+        include: { guest: { select: { fullName: true, phoneE164: true } } }
+      }
+    }
+  });
+
+  if (!campaign) {
+    res.status(404).type("html").send(renderLayout("<h2>Campaign not found</h2>", true));
+    return;
+  }
+
+  const sentNotice = req.query.sent ? '<p class="badge ok">Campaign processed.</p>' : "";
+  const filters = deserializeCampaignFilters(campaign.filtersJson);
+  const filterSummary = escapeHtml(JSON.stringify(filters, null, 2).slice(0, 2000));
+
+  const sampleRows = campaign.recipients
+    .map(
+      (r) => `<tr>
+  <td>${escapeHtml(r.guest.fullName ?? "—")}</td>
+  <td>${escapeHtml(r.guest.phoneE164)}</td>
+  <td><span class="badge ${r.outcome === "SENT" ? "ok" : r.outcome === "NO_PHONE" ? "pending" : "alert"}">${escapeHtml(r.outcome)}</span></td>
+  <td>${r.errorDetail ? escapeHtml(r.errorDetail.slice(0, 120)) : "—"}</td>
+</tr>`
+    )
+    .join("");
+
+  const content = `
+<h2>${escapeHtml(campaign.name)}</h2>
+${sentNotice}
+<p class="muted">Created ${formatDateTime(campaign.createdAt)}${campaign.sentAt ? ` · Sent ${formatDateTime(campaign.sentAt)}` : ""}</p>
+<div class="grid-2" style="align-items:start">
+  <section>
+    <h3>Summary</h3>
+    <table>
+      <tbody>
+        <tr><th>Status</th><td>${escapeHtml(campaign.status)}</td></tr>
+        <tr><th>Audience (matched)</th><td>${campaign.audienceCount}</td></tr>
+        <tr><th>Attempted</th><td>${campaign.attemptedCount}</td></tr>
+        <tr><th>Sent (WhatsApp)</th><td>${campaign.sentOkCount}</td></tr>
+        <tr><th>Failed</th><td>${campaign.sentFailedCount}</td></tr>
+        <tr><th>Skipped (no phone)</th><td>${campaign.skippedNoPhoneCount}</td></tr>
+        <tr><th>Channel</th><td>${escapeHtml(campaign.channel)}</td></tr>
+        <tr><th>Linked offer ID</th><td>${campaign.linkedOfferId ? escapeHtml(campaign.linkedOfferId) : "—"}</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Purpose</h3>
+    <p>${campaign.purposeNote ? escapeHtml(campaign.purposeNote) : '<span class="muted">—</span>'}</p>
+    <h3>Message body</h3>
+    <pre style="white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:8px;border:1px solid var(--border);font-size:13px">${escapeHtml(campaign.messageBody)}</pre>
+  </section>
+</div>
+<h3>Filters (JSON)</h3>
+<pre style="white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:8px;border:1px solid var(--border);font-size:12px;max-height:220px;overflow:auto">${filterSummary}</pre>
+<h3>Recent delivery sample (up to 40)</h3>
+<table>
+  <thead><tr><th>Guest</th><th>Phone</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <tbody>${sampleRows || '<tr><td colspan="4">No recipient rows (campaign may not have been sent yet).</td></tr>'}</tbody>
+</table>
+<p><a class="btn-link" href="/admin/campaigns">All campaigns</a></p>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
 adminRouter.get("/booking-funnel", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
   if (!hotel) {
@@ -6441,7 +6769,11 @@ adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async
             return or;
           })()
         },
-        include: { roomType: true, guest: true, roomUnit: { select: { name: true } } },
+        include: {
+          roomType: true,
+          guest: { select: { id: true, fullName: true, phoneE164: true, isVip: true } },
+          roomUnit: { select: { name: true } }
+        },
         orderBy: [{ checkIn: "desc" }],
         take: 50
       })
@@ -6469,7 +6801,7 @@ adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async
     .map(
       (b) => `<tr>
       <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(b.id)}</a></td>
-      <td>${escapeHtml(b.guest.fullName ?? "—")}</td>
+      <td>${b.guest.isVip ? '<span class="badge" style="background:#d97706;color:#fff;border:0;font-weight:700" title="VIP">VIP</span> ' : ""}${escapeHtml(b.guest.fullName ?? "—")}</td>
       <td>${escapeHtml(b.guest.phoneE164)}</td>
       <td>${escapeHtml(b.roomType.name)}</td>
       <td>${b.roomUnit?.name ? escapeHtml(b.roomUnit.name) : '<span class="badge pending">—</span>'}</td>
@@ -6505,6 +6837,179 @@ ${
       : '<p class="muted">Tip: paste the WhatsStay booking ID, type part of the guest name, or enter mobile digits (with or without country code).</p>'
 }`;
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Guest</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const guestId = String(req.params.guestId ?? "");
+  const g = await prisma.guest.findFirst({
+    where: { id: guestId, hotelId: hotel.id },
+    include: {
+      segmentTags: { orderBy: { tag: "asc" } },
+      bookings: {
+        orderBy: { checkIn: "desc" },
+        take: 24,
+        select: {
+          id: true,
+          referenceCode: true,
+          checkIn: true,
+          checkOut: true,
+          status: true,
+          source: true,
+          nights: true
+        }
+      }
+    }
+  });
+
+  if (!g) {
+    res.status(404).type("html").send(renderLayout("<h2>Guest not found</h2><p>Check the link or open the guest from a booking.</p>", true));
+    return;
+  }
+
+  const savedNotice = req.query.saved ? '<p class="badge ok">Profile saved.</p>' : "";
+  const manualSet = new Set(
+    g.segmentTags.filter((t) => t.source === SegmentTagSource.MANUAL).map((t) => t.tag)
+  );
+  const tagCheckboxes = (Object.keys(SEGMENT_TAG_LABELS) as SegmentTagKind[])
+    .map(
+      (tag) => `<label style="display:flex;align-items:center;gap:8px;margin:4px 0;font-size:14px">
+  <input type="checkbox" name="manualTags" value="${escapeHtml(tag)}" ${manualSet.has(tag) ? "checked" : ""} />
+  <span>${escapeHtml(SEGMENT_TAG_LABELS[tag])}</span>
+</label>`
+    )
+    .join("");
+
+  const summaryHtml = formatGuestVipAndTagsHtml({
+    guestId: g.id,
+    isVip: g.isVip,
+    vipNote: g.vipNote,
+    tags: g.segmentTags,
+    showProfileLink: false
+  });
+
+  const bookingRows = g.bookings
+    .map(
+      (b) => `<tr>
+  <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(b.id)}</a></td>
+  <td>${escapeHtml(b.referenceCode ?? "—")}</td>
+  <td>${formatDate(b.checkIn)}</td>
+  <td>${formatDate(b.checkOut)}</td>
+  <td>${b.nights}</td>
+  <td>${escapeHtml(b.source)}</td>
+  <td><span class="badge ${getBadgeClass(b.status)}">${escapeHtml(b.status)}</span></td>
+</tr>`
+    )
+    .join("");
+
+  const content = `
+<h2>Guest profile</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Segmentation, VIP, and recent bookings.</p>
+${savedNotice}
+<div class="actions">
+  <a class="btn-link" href="/admin/bookings/search">Find booking</a>
+  <a class="btn-link" href="/admin/bookings">Booking report</a>
+  <a class="btn-link" href="/admin/conversations">Conversations</a>
+</div>
+
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
+  <h3 style="margin-top:0">Current labels</h3>
+  <div style="line-height:1.7">${summaryHtml}</div>
+  <p class="muted" style="margin:12px 0 0;font-size:13px">Automatic tags refresh from booking history after saves and when bookings change. Manual tags are chosen below.</p>
+</section>
+
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
+  <h3 style="margin-top:0">Guest details</h3>
+  <table>
+    <tbody>
+      <tr><th>Name</th><td>${escapeHtml(g.fullName ?? "—")}</td></tr>
+      <tr><th>Phone</th><td>${escapeHtml(g.phoneE164)}</td></tr>
+      <tr><th>Email</th><td>${escapeHtml(g.email ?? "—")}</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
+  <h3 style="margin-top:0">VIP &amp; manual tags</h3>
+  <form method="post" action="/admin/guests/${encodeURIComponent(g.id)}" style="display:grid; gap:12px; max-width:560px">
+    <label style="display:flex; align-items:center; gap:10px; font-weight:600">
+      <input type="checkbox" name="isVip" value="1" ${g.isVip ? "checked" : ""} /> Mark as VIP
+    </label>
+    <label>VIP / service note (internal)
+      <textarea name="vipNote" rows="3" placeholder="Preferences, anniversaries, recognition…" style="width:100%; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:inherit">${escapeHtml(g.vipNote ?? "")}</textarea>
+    </label>
+    <div>
+      <p class="muted" style="margin:0 0 8px;font-size:13px">Manual segment tags (in addition to automatic rules)</p>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:4px">${tagCheckboxes}</div>
+    </div>
+    <button type="submit" style="padding:10px 16px; border:0; border-radius:10px; background:#128c7e; color:#fff; font-weight:700; width:fit-content">Save</button>
+  </form>
+</section>
+
+<section style="margin:16px 0; max-width:920px">
+  <h3>Recent bookings</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Reference</th><th>Check-in</th><th>Check-out</th><th>Nights</th><th>Source</th><th>Status</th></tr></thead>
+    <tbody>${bookingRows || '<tr><td colspan="7">No bookings yet.</td></tr>'}</tbody>
+  </table>
+</section>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/guests/:guestId", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+
+  const guestId = String(req.params.guestId ?? "");
+  const existing = await prisma.guest.findFirst({
+    where: { id: guestId, hotelId: hotel.id },
+    select: { id: true }
+  });
+  if (!existing) {
+    res.status(404).type("html").send(renderLayout("<h2>Guest not found</h2>", true));
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const isVip = body.isVip === "1" || body.isVip === "on";
+  const vipNote = String(body.vipNote ?? "").trim().slice(0, 500) || null;
+  const manual = parseManualSegmentTagsFromBody(body);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.guest.update({
+      where: { id: guestId },
+      data: { isVip, vipNote }
+    });
+    await tx.guestSegmentTag.deleteMany({
+      where: { guestId, source: SegmentTagSource.MANUAL }
+    });
+    if (manual.length) {
+      await tx.guestSegmentTag.createMany({
+        data: manual.map((tag) => ({ guestId, tag, source: SegmentTagSource.MANUAL }))
+      });
+    }
+  });
+  await refreshGuestSegmentTagsForGuest(guestId);
+  await logAudit({
+    hotelId: hotel.id,
+    action: "GUEST_SEGMENTATION_UPDATED",
+    entityType: "Guest",
+    entityId: guestId,
+    metadata: { isVip, manualTags: manual }
+  });
+  res.redirect(`/admin/guests/${encodeURIComponent(guestId)}?saved=1`);
 });
 
 adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
@@ -6572,13 +7077,16 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       (booking) => {
         const sourceLabel = booking.conversationId ? "WhatsApp" : booking.source;
         const guestName = booking.guest.fullName ?? "-";
+        const vipMark = booking.guest.isVip
+          ? '<span class="badge" style="background:#d97706;color:#fff;border:0;font-weight:700;margin-right:6px" title="VIP guest">VIP</span>'
+          : "";
         const rowClass = booking.status === "CONFIRMED" && sourceLabel === "WhatsApp" ? ' class="booking-whatsapp-confirmed"' : "";
         const unitAssignmentBadge = booking.roomUnitId
           ? `<span class="badge ok">Unit assigned${booking.roomUnit?.name ? ` (${escapeHtml(booking.roomUnit.name)})` : ""}</span>`
           : '<span class="badge pending">Pending assignment</span>';
         return `<tr${rowClass}>
       <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">${escapeHtml(displayBookingReference(booking))}</a></td>
-      <td>${escapeHtml(guestName)}</td>
+      <td>${vipMark}${escapeHtml(guestName)} <a class="inline-link" style="font-size:12px" href="/admin/guests/${encodeURIComponent(booking.guest.id)}" title="Guest profile">Profile</a></td>
       <td>${escapeHtml(booking.guest.phoneE164)}</td>
       <td>${escapeHtml(booking.roomType.name)}</td>
       <td>${formatDate(booking.checkIn)}</td>
@@ -6589,7 +7097,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       <td><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td>
       <td><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td>
       <td>${unitAssignmentBadge}</td>
-      <td><span class="badge ${sourceLabel === "WhatsApp" ? "ok" : "pending"}">${escapeHtml(sourceLabel)}</span></td>
+      <td><span class="badge ${sourceLabel === "WhatsApp" ? "ok" : "pending"}">${escapeHtml(String(sourceLabel))}</span></td>
       <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Open details</a></td>
       </tr>`
       }
@@ -6745,6 +7253,178 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
 
 adminRouter.get("/reports", requirePermission("REPORTS", "VIEW"), (_req, res) => {
   res.redirect("/admin/reports-center");
+});
+
+adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: { roomTypes: { where: { isActive: true }, select: { id: true, totalInventory: true } } }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Management KPI</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const presetRaw = typeof req.query.preset === "string" ? req.query.preset : "today";
+  const customStart = parseDateInput(req.query.start, startOfDay(new Date()));
+  const customEnd = parseDateInput(req.query.end, startOfDay(new Date()));
+  const { rangeStart, rangeEndExclusive, presetLabel } = parseKpiPreset(
+    presetRaw,
+    presetRaw === "custom" ? customStart : undefined,
+    presetRaw === "custom" ? customEnd : undefined
+  );
+
+  const kpi = await loadManagementKpis({
+    hotelId: hotel.id,
+    currency: hotel.currency,
+    rangeStart,
+    rangeEndExclusive,
+    roomTypes: hotel.roomTypes
+  });
+
+  const srcRows = kpi.bookingSources
+    .map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td></tr>`)
+    .join("");
+  const folioPayRows = kpi.paymentFolioBuckets
+    .map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td><td>${formatMoney(r.amount, hotel.currency)}</td></tr>`)
+    .join("");
+  const bookingPayRows = kpi.bookingPaymentStatusMix
+    .map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td></tr>`)
+    .join("");
+
+  const content = `
+<h2>Management KPI dashboard</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — ${escapeHtml(presetLabel)} · <strong>${escapeHtml(kpi.rangeLabel)}</strong>. ${escapeHtml(kpi.operationalDayNote)}</p>
+<p class="muted" style="font-size:12px;max-width:900px">
+  Bookings and room revenue use stays with <strong>check-in</strong> in the selected range (same idea as the booking report).
+  Total revenue adds posted F&amp;B orders and folio charge lines in the range. Folio desk <strong>payments</strong> are grouped by payment method for the same period.
+  Occupancy / ADR / RevPAR use room-type inventory × days in range (simplified PMS-style view).
+</p>
+
+<form method="get" action="/admin/management-kpi" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:16px">
+  <label>Quick range
+    <select name="preset" style="padding:8px;border:1px solid var(--border);border-radius:8px;margin-top:4px;display:block">
+      <option value="today" ${presetRaw === "today" ? "selected" : ""}>Today</option>
+      <option value="week" ${presetRaw === "week" ? "selected" : ""}>This week</option>
+      <option value="month" ${presetRaw === "month" ? "selected" : ""}>This month</option>
+      <option value="custom" ${presetRaw === "custom" ? "selected" : ""}>Custom</option>
+    </select>
+  </label>
+  <label>From <input type="date" name="start" value="${escapeHtml(formatDateForInput(customStart))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
+  <label>To <input type="date" name="end" value="${escapeHtml(formatDateForInput(customEnd))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
+  <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:#075e54;color:#fff;font-weight:700">Apply</button>
+</form>
+
+<div class="grid-4">
+  <article class="stat"><h3>Occupancy (range)</h3><p>${kpi.occupancyRatePct.toFixed(1)}%</p><p class="muted" style="font-size:12px;margin:0">Booked nights / capacity nights</p></article>
+  <article class="stat"><h3>Room revenue</h3><p>${formatMoney(kpi.roomRevenue, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">Confirmed stays, check-in in range</p></article>
+  <article class="stat"><h3>Total revenue (approx.)</h3><p>${formatMoney(kpi.totalRevenueApprox, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">Room + F&amp;B posted + folio charges</p></article>
+  <article class="stat"><h3>Bookings</h3><p>${kpi.bookingsTotal}</p><p class="muted" style="font-size:12px;margin:0">Check-in in range (all statuses)</p></article>
+</div>
+
+<div class="grid-4" style="margin-top:12px">
+  <article class="stat"><h3>Conversations</h3><p>${kpi.conversationsTotal}</p><p class="muted" style="font-size:12px;margin:0">New threads in range</p></article>
+  <article class="stat"><h3>ADR</h3><p>${formatMoney(kpi.adr, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">Room revenue / booked nights</p></article>
+  <article class="stat"><h3>RevPAR</h3><p>${formatMoney(kpi.revpar, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">Room revenue / capacity nights</p></article>
+  <article class="stat"><h3>Messages</h3><p>${kpi.messagesInbound + kpi.messagesOutbound}</p><p class="muted" style="font-size:12px;margin:0">In ${kpi.messagesInbound} · Out ${kpi.messagesOutbound}</p></article>
+</div>
+
+<div class="grid-2" style="margin-top:18px;align-items:start">
+  <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin-top:0">Operational snapshot</h3>
+    <p class="muted" style="font-size:13px">Arrivals, departures, and stayovers on the snapshot day described above.</p>
+    <table>
+      <tbody>
+        <tr><th>Active room units</th><td>${kpi.totalRoomUnits}</td></tr>
+        <tr><th>Inactive / off-sale units</th><td>${kpi.inactiveRoomUnits}</td></tr>
+        <tr><th>Arrivals</th><td>${kpi.arrivalsOnSnapshot}</td></tr>
+        <tr><th>Departures</th><td>${kpi.departuresOnSnapshot}</td></tr>
+        <tr><th>Stayovers (in-house)</th><td>${kpi.stayoversOnSnapshot}</td></tr>
+        <tr><th>Capacity nights (range)</th><td>${kpi.totalRoomNightsCapacity}</td></tr>
+        <tr><th>Booked nights (range)</th><td>${kpi.bookedRoomNightsInPeriod}</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin-top:0">Booking pipeline</h3>
+    <table>
+      <tbody>
+        <tr><th>Confirmed</th><td>${kpi.bookingsConfirmed}</td></tr>
+        <tr><th>Pending</th><td>${kpi.bookingsPending}</td></tr>
+        <tr><th>Cancelled</th><td>${kpi.bookingsCancelled}</td></tr>
+        <tr><th>No-show</th><td>${kpi.bookingsNoShow}</td></tr>
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<div class="grid-2" style="margin-top:18px;align-items:start">
+  <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin-top:0">Revenue mix</h3>
+    <table>
+      <tbody>
+        <tr><th>Room (confirmed)</th><td>${formatMoney(kpi.roomRevenue, hotel.currency)}</td></tr>
+        <tr><th>F&amp;B (posted orders)</th><td>${formatMoney(kpi.fbRevenue, hotel.currency)}</td></tr>
+        <tr><th>Folio charges (excl. payments)</th><td>${formatMoney(kpi.folioExtraRevenue, hotel.currency)}</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin-top:0">Guest messaging</h3>
+    <table>
+      <tbody>
+        <tr><th>Conversations (new in range)</th><td>${kpi.conversationsTotal}</td></tr>
+        <tr><th>With at least one booking</th><td>${kpi.conversationsWithBooking}</td></tr>
+        <tr><th>Human handoff</th><td>${kpi.conversationsHumanHandoff}</td></tr>
+        <tr><th>Inbound messages</th><td>${kpi.messagesInbound}</td></tr>
+        <tr><th>Outbound messages</th><td>${kpi.messagesOutbound}</td></tr>
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<div class="grid-2" style="margin-top:18px;align-items:start">
+  <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin-top:0">Booking source (check-in in range)</h3>
+    <table>
+      <thead><tr><th>Source</th><th>Bookings</th></tr></thead>
+      <tbody>${srcRows || '<tr><td colspan="2">No data</td></tr>'}</tbody>
+    </table>
+  </section>
+  <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin-top:0">Booking payment status</h3>
+    <table>
+      <thead><tr><th>Status</th><th>Count</th></tr></thead>
+      <tbody>${bookingPayRows || '<tr><td colspan="2">No data</td></tr>'}</tbody>
+    </table>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">Stripe prepayments appear when payment status is updated on the booking; folio desk payments are broken out below.</p>
+  </section>
+</div>
+
+<section style="margin-top:18px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+  <h3 style="margin-top:0">Folio desk payments (by method)</h3>
+  <p class="muted" style="font-size:13px">Posted folio payment lines with charge date in range. Labels are derived from <code>folioPaymentMethod</code>.</p>
+  <table>
+    <thead><tr><th>Bucket</th><th>Lines</th><th>Amount</th></tr></thead>
+    <tbody>${folioPayRows || '<tr><td colspan="3">No folio payments in range</td></tr>'}</tbody>
+  </table>
+</section>
+
+<section style="margin-top:18px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+  <h3 style="margin-top:0">Campaigns (marketing)</h3>
+  <table>
+    <tbody>
+      <tr><th>Campaigns created</th><td>${kpi.campaignsInPeriod}</td></tr>
+      <tr><th>Audience seats (sum)</th><td>${kpi.campaignAudienceReached}</td></tr>
+      <tr><th>WhatsApp sent (ok)</th><td>${kpi.campaignSentOk}</td></tr>
+      <tr><th>WhatsApp failed</th><td>${kpi.campaignSentFailed}</td></tr>
+    </tbody>
+  </table>
+  <p class="muted" style="font-size:12px;margin:8px 0 0"><a class="inline-link" href="/admin/campaigns">Open campaign center</a></p>
+</section>
+`;
+
+  res.type("html").send(renderLayout(content, true));
 });
 
 adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (req, res) => {
@@ -8259,7 +8939,7 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
   const booking = await prisma.booking.findFirst({
     where: { id: bookingId, hotelId: hotel.id },
     include: {
-      guest: true,
+      guest: { include: { segmentTags: { orderBy: { tag: "asc" } } } },
       roomType: true,
       property: true,
       conversation: true,
@@ -8320,6 +9000,7 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
       <td>${formatMoney(payment.amount, payment.currency)}</td>
       <td>${escapeHtml(payment.kind)}</td>
       <td><span class="badge ${getBadgeClass(payment.status)}">${escapeHtml(payment.status)}</span></td>
+      <td>${payment.paymentLinkSentAt ? formatDateTime(payment.paymentLinkSentAt) : '<span class="muted">—</span>'}</td>
       <td>${formatDateTime(payment.createdAt)}</td>
       </tr>`
     )
@@ -8367,7 +9048,13 @@ ${noUnitWarning}
     <h3>Booking Summary</h3>
     <table>
       <tbody>
-        <tr><th>Guest</th><td>${escapeHtml(booking.guest.fullName ?? "-")} (${escapeHtml(booking.guest.phoneE164)})</td></tr>
+        <tr><th>Guest</th><td>${escapeHtml(booking.guest.fullName ?? "-")} (${escapeHtml(booking.guest.phoneE164)}) <a class="inline-link" style="font-size:12px;margin-left:6px" href="/admin/guests/${encodeURIComponent(booking.guest.id)}">Profile</a></td></tr>
+        <tr><th>VIP &amp; segments</th><td style="line-height:1.7">${formatGuestVipAndTagsHtml({
+          guestId: booking.guest.id,
+          isVip: booking.guest.isVip,
+          vipNote: booking.guest.vipNote,
+          tags: booking.guest.segmentTags
+        })}</td></tr>
         <tr><th>Phone Number</th><td>${escapeHtml(booking.guest.phoneE164)}</td></tr>
         <tr><th>Property</th><td>${escapeHtml(booking.property.name)}</td></tr>
         <tr><th>Room type</th><td>${escapeHtml(booking.roomType.name)}</td></tr>
@@ -8456,8 +9143,8 @@ ${noUnitWarning}
 <section style="margin-top:14px">
   <h3>Payment Intent History</h3>
   <table>
-    <thead><tr><th>ID</th><th>Amount</th><th>Kind</th><th>Status</th><th>Created</th></tr></thead>
-    <tbody>${paymentRows || '<tr><td colspan="5">No payment intents for this booking yet.</td></tr>'}</tbody>
+    <thead><tr><th>ID</th><th>Amount</th><th>Kind</th><th>Status</th><th>Link sent (WhatsApp)</th><th>Created</th></tr></thead>
+    <tbody>${paymentRows || '<tr><td colspan="6">No payment intents for this booking yet.</td></tr>'}</tbody>
   </table>
 </section>`;
 
@@ -9058,6 +9745,13 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
       force: false
     });
   }
+  const guestForSeg = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    select: { guestId: true }
+  });
+  if (guestForSeg) {
+    await refreshGuestSegmentTagsForGuest(guestForSeg.guestId).catch(() => undefined);
+  }
   const query = new URLSearchParams({ updated: "1" });
   if (autoInvoiceResult?.sent) query.set("invoiceSent", "1");
   if (autoInvoiceResult?.error) query.set("invoiceError", autoInvoiceResult.error);
@@ -9364,15 +10058,21 @@ adminRouter.get(
       const category = classifyConversationActivity(conv.state, hasBooking);
       const guestLabel = conv.guest.fullName ?? conv.guest.phoneE164;
       const preview = m.body.slice(0, 140);
-      const title =
-        category === "booking" ? `Booking message (${guestLabel})` : `Guest message (${guestLabel})`;
+      const bookingRef = conv.bookings[0]?.id;
+      let title: string;
+      if (m.aiIntent === "PRE_ARRIVAL_GUEST_REPLY" || m.aiIntent === "GUEST_JOURNEY_REPLY") {
+        title = `Guest journey reply · ${guestLabel}${bookingRef ? ` · ${bookingRef.slice(0, 10)}` : ""}`;
+      } else {
+        title = category === "booking" ? `Booking message (${guestLabel})` : `Guest message (${guestLabel})`;
+      }
+      const journeyIntent = m.aiIntent === "PRE_ARRIVAL_GUEST_REPLY" || m.aiIntent === "GUEST_JOURNEY_REPLY";
       events.push({
         type: "guest_message",
         conversationId: m.conversationId,
         sortKey: m.createdAt.toISOString(),
         title,
         preview,
-        category
+        category: category === "booking" || journeyIntent ? "booking" : category
       });
     }
 
@@ -9542,7 +10242,7 @@ adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW")
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, hotelId: hotel.id },
     include: {
-      guest: true,
+      guest: { include: { segmentTags: { orderBy: { tag: "asc" } } } },
       property: true,
       messages: { orderBy: { createdAt: "asc" } },
       bookings: { orderBy: { createdAt: "desc" }, include: { roomType: true } }
@@ -9613,9 +10313,18 @@ ${replyError}
 <div class="chat-layout" style="display:grid; grid-template-columns:1fr 280px; gap:16px; align-items:start; max-width:1200px;">
   <div class="chat-main" data-chat-conversation-id="${escapeHtml(conversation.id)}" data-chat-last-msg-at="${escapeHtml(lastMsgAt)}" style="background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:420px;">
     <div class="chat-header" style="padding:12px 16px; border-bottom:1px solid var(--border); background:#f8fafc; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-      <div>
-        <strong style="font-size:15px;">${escapeHtml(conversation.guest.fullName ?? "Guest")}</strong>
-        <span class="muted" style="font-size:13px; margin-left:8px;">${escapeHtml(conversation.guest.phoneE164)}</span>
+      <div style="flex:1; min-width:200px">
+        <div>
+          <strong style="font-size:15px;">${escapeHtml(conversation.guest.fullName ?? "Guest")}</strong>
+          <span class="muted" style="font-size:13px; margin-left:8px;">${escapeHtml(conversation.guest.phoneE164)}</span>
+        </div>
+        <div style="margin-top:8px; font-size:12px; line-height:1.55">${formatGuestVipAndTagsHtml({
+          guestId: conversation.guest.id,
+          isVip: conversation.guest.isVip,
+          vipNote: conversation.guest.vipNote,
+          tags: conversation.guest.segmentTags,
+          showProfileLink: true
+        })}</div>
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
         <span class="badge ${getConversationBadgeClass(conversation.state)}" style="margin:0;">${escapeHtml(conversation.state)}</span>
@@ -10114,6 +10823,8 @@ adminRouter.post("/conversations/:id/create-booking", requirePermission("BOOKING
       currency: hotel.currency
     }
   });
+
+  await refreshGuestSegmentTagsForGuest(conversation.guestId).catch(() => undefined);
 
   res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}/select-unit`);
 });

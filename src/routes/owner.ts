@@ -5,6 +5,9 @@ import path from "node:path";
 import { InvoiceStatus, MessageDirection, SubscriptionStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerSetup";
+import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
+import { parseKpiPreset } from "../core/managementKpiDashboard";
+import { filterPlatformAlerts, loadPlatformAlerts } from "../core/ownerPlatformAlerts";
 
 export const ownerRouter = Router();
 
@@ -193,6 +196,38 @@ function formatMoney(amount: number, currency: string): string {
   return new Intl.NumberFormat("en", { style: "currency", currency, maximumFractionDigits: 2 }).format(amount);
 }
 
+/** Local YYYY-MM-DD for owner dashboard date filters (avoids UTC shift). */
+function formatDateForOwnerInput(input: Date | null | undefined): string {
+  if (!input) return "";
+  const y = input.getFullYear();
+  const m = input.getMonth() + 1;
+  const d = input.getDate();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${y}-${pad(m)}-${pad(d)}`;
+}
+
+function ownerStartOfDay(input: Date): Date {
+  const date = new Date(input);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+/** Parse YYYY-MM-DD as local calendar date. */
+function parseOwnerDateInput(raw: unknown, fallback: Date): Date {
+  if (typeof raw !== "string" || !raw.trim()) return fallback;
+  const s = raw.trim();
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
+  if (match) {
+    const y = Number(match[1]);
+    const m = Number(match[2]) - 1;
+    const d = Number(match[3]);
+    const parsed = new Date(y, m, d);
+    if (parsed.getFullYear() === y && parsed.getMonth() === m && parsed.getDate() === d) return parsed;
+  }
+  const legacy = new Date(s);
+  return Number.isNaN(legacy.getTime()) ? fallback : ownerStartOfDay(legacy);
+}
+
 function toCsvCell(value: string): string {
   const escaped = value.replaceAll('"', '""');
   return `"${escaped}"`;
@@ -353,6 +388,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
   const navHtml = authenticated
     ? [
         '<a href="/owner/dashboard">Platform Dashboard</a>',
+        '<a href="/owner/alerts">Alerts</a>',
         '<a href="/owner/hotels">Hotels</a>',
         '<a href="/owner/subscriptions">Subscriptions</a>',
       '<a href="/owner/billing">Billing</a>',
@@ -777,39 +813,100 @@ ownerRouter.post("/logout", (req, res) => {
   res.redirect("/owner/login");
 });
 
-ownerRouter.get("/dashboard", requireOwnerAuth, async (_req, res) => {
-  const now = new Date();
-  const last30 = new Date(now);
-  last30.setDate(last30.getDate() - 30);
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
+  const presetRaw = typeof req.query.preset === "string" ? req.query.preset : "month";
+  const nowSd = ownerStartOfDay(new Date());
+  const customStart = parseOwnerDateInput(req.query.start, nowSd);
+  const customEnd = parseOwnerDateInput(req.query.end, nowSd);
+  const { rangeStart, rangeEndExclusive, presetLabel } = parseKpiPreset(
+    presetRaw,
+    presetRaw === "custom" ? customStart : undefined,
+    presetRaw === "custom" ? customEnd : undefined
+  );
 
-  const [
-    hotelsTotal,
-    hotelsActive,
-    hotelsInactive,
-    bookingsLast30,
-    conversationsMonth,
-    failedSyncJobs,
-    pendingPayments,
-    subscriptionsActive,
-    allBookings
-  ] = await Promise.all([
-    prisma.hotel.count(),
-    prisma.hotel.count({ where: { isActive: true } }),
-    prisma.hotel.count({ where: { isActive: false } }),
-    prisma.booking.count({ where: { createdAt: { gte: last30 } } }),
-    prisma.conversation.count({ where: { createdAt: { gte: monthStart } } }),
+  const [kpi, failedSyncJobs, pendingPayments] = await Promise.all([
+    loadOwnerPortfolioKpis({ rangeStart, rangeEndExclusive, presetLabel }),
     prisma.syncJob.count({ where: { status: "FAILED" } }),
-    prisma.paymentIntent.count({ where: { status: { in: ["PENDING", "REQUIRES_ACTION"] } } }),
-    prisma.subscription.count({ where: { status: { in: ["ACTIVE", "TRIALING"] } } }),
-    prisma.booking.findMany({ where: { createdAt: { gte: last30 } }, select: { totalAmount: true } })
+    prisma.paymentIntent.count({ where: { status: { in: ["PENDING", "REQUIRES_ACTION"] } } })
   ]);
 
-  const revenueLast30 = allBookings.reduce((sum, booking) => sum + booking.totalAmount, 0);
+  const trialingSubs =
+    kpi.subscriptionsByStatus.find((s) => s.status === "TRIALING")?.count ?? 0;
+  const planByHotelCount = new Map<string, number>();
+  for (const h of kpi.hotelRows) {
+    const label = h.planName?.trim() || "No plan";
+    planByHotelCount.set(label, (planByHotelCount.get(label) ?? 0) + 1);
+  }
+  const planRows = Array.from(planByHotelCount.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, n]) => `<tr><td>${escapeHtml(name)}</td><td>${n}</td></tr>`)
+    .join("");
+  const hotelRowsSorted = [...kpi.hotelRows].sort(
+    (a, b) => b.roomRevenue + b.fbRevenue - (a.roomRevenue + a.fbRevenue)
+  );
+  const cancellationsTotal = kpi.hotelRows.reduce((sum, r) => sum + r.bookingsCancelled, 0);
+
+  const roomRevLines = kpi.portfolioRoomRevenueByCurrency.length
+    ? kpi.portfolioRoomRevenueByCurrency
+        .map((x) => `${formatMoney(x.amount, x.currency)} room`)
+        .join(" · ")
+    : "—";
+  const fbRevLines = kpi.portfolioFbRevenueByCurrency.length
+    ? kpi.portfolioFbRevenueByCurrency
+        .map((x) => `${formatMoney(x.amount, x.currency)} F&amp;B`)
+        .join(" · ")
+    : "";
+
+  const attentionBlock =
+    kpi.attentionNotes.length > 0
+      ? `<div style="margin:14px 0;padding:12px 14px;border-radius:12px;border:1px solid #fbbf24;background:#fffbeb">
+  <strong style="color:#92400e">Attention</strong>
+  <ul style="margin:8px 0 0 18px;padding:0;color:#78350f;font-size:13px">
+    ${kpi.attentionNotes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}
+  </ul>
+</div>`
+      : "";
+
+  const subRows = kpi.subscriptionsByStatus
+    .map((r) => `<tr><td>${escapeHtml(r.status)}</td><td>${r.count}</td></tr>`)
+    .join("");
+
+  const sourceRows = kpi.bookingSourceSummary
+    .map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td></tr>`)
+    .join("");
+
+  const hotelTableRows = hotelRowsSorted
+    .map((h) => {
+      const statusBadge = h.isActive
+        ? '<span class="badge ok">Active</span>'
+        : '<span class="badge alert">Suspended</span>';
+      const subBadge =
+        h.subscriptionStatus === "PAST_DUE"
+          ? '<span class="badge alert">Past due</span>'
+          : h.subscriptionStatus === "TRIALING"
+            ? '<span class="badge pending">Trial</span>'
+            : h.subscriptionStatus === "ACTIVE"
+              ? '<span class="badge ok">Active</span>'
+              : h.subscriptionStatus
+                ? `<span class="badge pending">${escapeHtml(h.subscriptionStatus)}</span>`
+                : "—";
+      return `<tr>
+  <td><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a><div class="muted" style="font-size:11px">${escapeHtml(h.slug)}</div></td>
+  <td>${statusBadge}</td>
+  <td>${escapeHtml(h.planName ?? "—")}<div style="margin-top:4px">${subBadge}</div></td>
+  <td>${h.bookingsTotal} <span class="muted">(${h.bookingsConfirmed} conf · ${h.bookingsCancelled} canc)</span></td>
+  <td>${formatMoney(h.roomRevenue, h.currency)}</td>
+  <td>${formatMoney(h.fbRevenue, h.currency)}</td>
+  <td>${h.conversations}</td>
+  <td>${h.campaigns} <span class="muted">(${h.campaignSentOk} sent)</span></td>
+  <td>${h.openInvoiceCount > 0 ? `${formatMoney(h.openInvoiceTotal, h.currency)} (${h.openInvoiceCount})` : "—"}</td>
+</tr>`;
+    })
+    .join("");
 
   const content = `
-<h2>Platform Dashboard</h2>
-<p class="muted">Owner-level view across all hotels, subscriptions, and platform health.</p>
+<h2>Platform dashboard</h2>
+<p class="muted">Multi-hotel portfolio: compare performance, subscriptions, and messaging across every property. Quick actions below; metrics respect the date range.</p>
 <div class="actions">
   <a class="btn-link primary" href="/owner/hotels">Manage Hotels</a>
   <a class="btn-link" href="/owner/subscriptions">Manage Subscriptions</a>
@@ -817,18 +914,161 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (_req, res) => {
   <a class="btn-link" href="/owner/users">Owner Users</a>
   <a class="btn-link" href="/owner/health">System Health</a>
 </div>
+
+<form method="get" action="/owner/dashboard" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:16px">
+  <label>Quick range
+    <select name="preset" style="padding:8px;border:1px solid var(--border);border-radius:8px;margin-top:4px;display:block">
+      <option value="today" ${presetRaw === "today" ? "selected" : ""}>Today</option>
+      <option value="week" ${presetRaw === "week" ? "selected" : ""}>This week</option>
+      <option value="month" ${presetRaw === "month" ? "selected" : ""}>This month</option>
+      <option value="custom" ${presetRaw === "custom" ? "selected" : ""}>Custom</option>
+    </select>
+  </label>
+  <label>From <input type="date" name="start" value="${escapeHtml(formatDateForOwnerInput(customStart))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
+  <label>To <input type="date" name="end" value="${escapeHtml(formatDateForOwnerInput(customEnd))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
+  <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:var(--brand);color:#fff;font-weight:700">Apply</button>
+</form>
+<p class="muted" style="font-size:13px;margin-top:-8px"><strong>${escapeHtml(
+    kpi.presetLabel
+  )}</strong> · Stay window <strong>${escapeHtml(kpi.rangeStart)}</strong> → <strong>${escapeHtml(
+    kpi.rangeEndInclusive
+  )}</strong> (inclusive). Bookings and room revenue use <strong>check-in</strong> in this window. F&amp;B and conversations use <strong>created</strong> time in the same window.</p>
+<p class="muted" style="font-size:12px;margin-top:-4px">Portfolio revenue mixes hotel currencies; use per-hotel columns for apples-to-apples comparison.</p>
+
+${attentionBlock}
+
 <div class="grid-4">
-  <article class="stat"><h3>Total Hotels</h3><p>${hotelsTotal}</p></article>
-  <article class="stat"><h3>Active / Inactive Hotels</h3><p>${hotelsActive} / ${hotelsInactive}</p></article>
-  <article class="stat"><h3>Bookings (Last 30 Days)</h3><p>${bookingsLast30}</p></article>
-  <article class="stat"><h3>Revenue (Last 30 Days)</h3><p>${formatMoney(revenueLast30, "OMR")}</p></article>
+  <article class="stat"><h3>Total hotels</h3><p>${kpi.hotelsTotal}</p></article>
+  <article class="stat"><h3>Active hotels</h3><p>${kpi.hotelsActive}</p><p class="muted" style="font-size:12px;margin:0">Inactive: ${kpi.hotelsInactive}</p></article>
+  <article class="stat"><h3>Active subscriptions</h3><p>${kpi.subscriptionsActiveOrTrial}</p><p class="muted" style="font-size:12px;margin:0">Trialing: ${trialingSubs} · Cancelled (all time): ${kpi.subscriptionsCancelled}</p></article>
+  <article class="stat"><h3>Room revenue (range)</h3><p style="font-size:16px;line-height:1.35">${roomRevLines}</p>${fbRevLines ? `<p class="muted" style="font-size:12px;margin:6px 0 0">${fbRevLines}</p>` : ""}</article>
 </div>
+
 <div class="grid-4" style="margin-top:12px">
-  <article class="stat"><h3>Conversations (This Month)</h3><p>${conversationsMonth}</p></article>
-  <article class="stat"><h3>Active Subscriptions</h3><p>${subscriptionsActive}</p></article>
-  <article class="stat"><h3>Pending Payments</h3><p>${pendingPayments}</p></article>
-  <article class="stat"><h3>Failed Sync Jobs</h3><p>${failedSyncJobs}</p></article>
-</div>`;
+  <article class="stat"><h3>Bookings (check-in in range)</h3><p>${kpi.portfolioBookingsTotal}</p><p class="muted" style="font-size:12px;margin:0">Confirmed: ${kpi.portfolioBookingsConfirmed}</p></article>
+  <article class="stat"><h3>Cancellations (range)</h3><p>${cancellationsTotal}</p></article>
+  <article class="stat"><h3>New conversations</h3><p>${kpi.portfolioConversations}</p></article>
+  <article class="stat"><h3>Campaigns</h3><p>${kpi.portfolioCampaigns}</p><p class="muted" style="font-size:12px;margin:0">Sent OK: ${kpi.portfolioCampaignSentOk} · Audience: ${kpi.portfolioCampaignAudience}</p></article>
+</div>
+
+<div class="grid-4" style="margin-top:12px">
+  <article class="stat"><h3>Subscriptions renewing ≤14d</h3><p>${kpi.subscriptionsExpiring14d}</p></article>
+  <article class="stat"><h3>Past-due subscriptions</h3><p>${kpi.pastDueSubscriptions}</p></article>
+  <article class="stat"><h3>Open invoices (attention)</h3><p>${kpi.openInvoicesAttention}</p><p class="muted" style="font-size:12px;margin:0">Open with overdue or no due date</p></article>
+  <article class="stat"><h3>Platform pulse</h3><p style="font-size:15px">Sync failures: ${failedSyncJobs}</p><p class="muted" style="font-size:12px;margin:0">Pending payment intents: ${pendingPayments}</p></article>
+</div>
+
+<h3 style="margin-top:22px">Subscription status (all hotels)</h3>
+<table>
+  <thead><tr><th>Status</th><th>Count</th></tr></thead>
+  <tbody>${subRows}</tbody>
+</table>
+
+<h3 style="margin-top:18px">Plans in use (latest subscription per hotel)</h3>
+<p class="muted" style="font-size:12px;margin-top:-6px">Each hotel is counted once by its most recent subscription record.</p>
+<table>
+  <thead><tr><th>Plan</th><th>Hotels</th></tr></thead>
+  <tbody>${planRows}</tbody>
+</table>
+
+<h3 style="margin-top:22px">Booking source (range, portfolio)</h3>
+<table>
+  <thead><tr><th>Source</th><th>Bookings</th></tr></thead>
+  <tbody>${sourceRows.length ? sourceRows : `<tr><td colspan="2" class="muted">No bookings in range</td></tr>`}</tbody>
+</table>
+
+<h3 style="margin-top:22px">Hotel comparison</h3>
+<table>
+  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
+  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="9" class="muted">No hotels</td></tr>`}</tbody>
+</table>`;
+
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.get("/alerts", requireOwnerAuth, async (req, res) => {
+  const snapshot = await loadPlatformAlerts();
+  const sevRaw = typeof req.query.severity === "string" ? req.query.severity : "all";
+  const catRaw = typeof req.query.category === "string" ? req.query.category : "all";
+  const q = typeof req.query.q === "string" ? req.query.q : "";
+  const severity =
+    sevRaw === "critical" || sevRaw === "warning" || sevRaw === "info" ? sevRaw : "all";
+  const category =
+    catRaw === "billing" ||
+    catRaw === "activity" ||
+    catRaw === "messaging" ||
+    catRaw === "inventory" ||
+    catRaw === "financial" ||
+    catRaw === "system"
+      ? catRaw
+      : "all";
+
+  const filtered = filterPlatformAlerts(snapshot, { severity, category, q });
+
+  function severityBadge(s: string): string {
+    if (s === "critical") return '<span class="badge alert">Critical</span>';
+    if (s === "warning") return '<span class="badge pending">Warning</span>';
+    return '<span class="badge" style="background:#e0e7ff;color:#312e81">Info</span>';
+  }
+
+  const rows = filtered
+    .map(
+      (a) => `<tr>
+  <td>${severityBadge(a.severity)}</td>
+  <td>${escapeHtml(a.category)}</td>
+  <td><strong>${escapeHtml(a.hotelName)}</strong><div class="muted" style="font-size:11px">${escapeHtml(a.slug)}</div></td>
+  <td>${escapeHtml(a.title)}<div class="muted" style="font-size:12px;margin-top:4px">${escapeHtml(a.detail)}</div></td>
+  <td>${a.value ? escapeHtml(String(a.value)) : "—"}</td>
+  <td><a class="btn-link" href="${escapeHtml(a.href)}">Investigate</a></td>
+</tr>`
+    )
+    .join("");
+
+  const content = `
+<h2>Platform alerts</h2>
+<p class="muted">Exception-focused view across hotels — subscription health, engagement, messaging backlog, inventory gaps, payments, and channel sync. Thresholds are tuned to reduce noise; refine rules in code as operations mature.</p>
+
+<div class="grid-4" style="margin-bottom:14px">
+  <article class="stat"><h3>Critical</h3><p>${snapshot.counts.critical}</p></article>
+  <article class="stat"><h3>Warning</h3><p>${snapshot.counts.warning}</p></article>
+  <article class="stat"><h3>Info</h3><p>${snapshot.counts.info}</p></article>
+  <article class="stat"><h3>Showing</h3><p>${filtered.length}</p><p class="muted" style="font-size:12px;margin:0">of ${snapshot.counts.total} total</p></article>
+</div>
+
+<form method="get" action="/owner/alerts" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:16px">
+  <label>Severity
+    <select name="severity" style="padding:8px;border:1px solid var(--border);border-radius:8px;margin-top:4px;display:block">
+      <option value="all" ${severity === "all" ? "selected" : ""}>All</option>
+      <option value="critical" ${severity === "critical" ? "selected" : ""}>Critical</option>
+      <option value="warning" ${severity === "warning" ? "selected" : ""}>Warning</option>
+      <option value="info" ${severity === "info" ? "selected" : ""}>Info</option>
+    </select>
+  </label>
+  <label>Category
+    <select name="category" style="padding:8px;border:1px solid var(--border);border-radius:8px;margin-top:4px;display:block">
+      <option value="all" ${category === "all" ? "selected" : ""}>All</option>
+      <option value="billing" ${category === "billing" ? "selected" : ""}>Billing</option>
+      <option value="activity" ${category === "activity" ? "selected" : ""}>Activity</option>
+      <option value="messaging" ${category === "messaging" ? "selected" : ""}>Messaging</option>
+      <option value="inventory" ${category === "inventory" ? "selected" : ""}>Inventory</option>
+      <option value="financial" ${category === "financial" ? "selected" : ""}>Financial</option>
+      <option value="system" ${category === "system" ? "selected" : ""}>System</option>
+    </select>
+  </label>
+  <label style="min-width:200px">Search
+    <input type="search" name="q" value="${escapeHtml(q)}" placeholder="Hotel, title…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;margin-top:4px" />
+  </label>
+  <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:var(--brand);color:#fff;font-weight:700">Apply</button>
+</form>
+
+<table>
+  <thead><tr><th>Severity</th><th>Category</th><th>Hotel</th><th>Alert</th><th>Value</th><th>Action</th></tr></thead>
+  <tbody>${rows.length ? rows : `<tr><td colspan="6" class="muted">No alerts match the current filters.</td></tr>`}</tbody>
+</table>
+
+<p class="muted" style="font-size:12px;margin-top:16px;max-width:900px">
+  <strong>Notes:</strong> “Threads awaiting reply” uses the last message direction per conversation (SQLite window functions). “In-house without unit” checks overlapping stays for today. Daily cash close / folio carry-forward is not modeled here. Guest payment failures count Stripe-style <code>FAILED</code> intents in the lookback window.
+</p>`;
 
   res.type("html").send(ownerLayout(content, true));
 });
