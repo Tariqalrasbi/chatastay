@@ -1846,10 +1846,9 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
       const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
 
       let status: RoomBoardStatus;
-      if (hasConfirmed) {
-        status = "OCCUPIED";
-      } else if (hasPending) {
-        status = "RESERVED";
+      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus });
+      if (fromBooking !== null) {
+        status = fromBooking;
       } else if (closedOut) {
         status = "MAINTENANCE";
       } else if (manualStatus) {
@@ -1883,10 +1882,9 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
       const hasConfirmed = b.status === "CONFIRMED";
       const hasPending = b.status === "PENDING";
       let status: RoomBoardStatus;
-      if (hasConfirmed) {
-        status = "OCCUPIED";
-      } else if (hasPending) {
-        status = "RESERVED";
+      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
+      if (fromBooking !== null) {
+        status = fromBooking;
       } else {
         status = "RESERVED";
       }
@@ -2078,6 +2076,68 @@ function getRoomBoardStatusClass(status: RoomBoardStatus): string {
     case "MAINTENANCE": return "room-status-maintenance";
     default: return "room-status-available";
   }
+}
+
+/** Total stay length in nights; prefers PMS `booking.nights`, else calendar nights between check-in and check-out. */
+function totalNightsForRoomBoard(checkIn: Date, checkOut: Date, bookingNights: number | null | undefined): number {
+  if (typeof bookingNights === "number" && bookingNights >= 1 && Number.isFinite(bookingNights)) {
+    return Math.floor(bookingNights);
+  }
+  const span = Math.round((startOfDay(checkOut).getTime() - startOfDay(checkIn).getTime()) / 86400000);
+  return Math.max(1, span);
+}
+
+/**
+ * Which night of the stay the board date falls on (1-based), capped at total nights (e.g. departure day).
+ * Example: check-in Apr 12, check-out Apr 14, 2 nights → Apr 12 = 1/2, Apr 13 = 2/2, Apr 14 = 2/2.
+ */
+function roomBoardNightIndexForBoardDate(boardDate: Date, checkIn: Date, totalNights: number): number {
+  const offsetDays = Math.round((startOfDay(boardDate).getTime() - startOfDay(checkIn).getTime()) / 86400000);
+  if (offsetDays < 0) return 1;
+  return Math.min(offsetDays + 1, Math.max(1, totalNights));
+}
+
+/** Compact adults/children + Night x/y for room status cards when a booking is attached. */
+function formatRoomBoardStayDetailHtml(params: {
+  bookingId: string | null;
+  adults: number | null | undefined;
+  children: number | null | undefined;
+  boardDate: Date;
+  checkIn: Date | null;
+  checkOut: Date | null;
+  bookingNights: number | null | undefined;
+}): string {
+  if (!params.bookingId || !params.checkIn || !params.checkOut) return "";
+  const adults = Math.max(0, Number(params.adults ?? 0));
+  const children = Math.max(0, Number(params.children ?? 0));
+  const total = totalNightsForRoomBoard(params.checkIn, params.checkOut, params.bookingNights);
+  const nightIdx = roomBoardNightIndexForBoardDate(params.boardDate, params.checkIn, total);
+  const childPart =
+    children > 0
+      ? ` <span title="Children">👶 ${children}</span>`
+      : "";
+  return `<div class="room-board-stay-detail" style="margin-top:4px;font-size:10px;line-height:1.35">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap" aria-label="Party size"><span title="Adults">👤 ${adults}</span>${childPart}</div>
+  <div style="font-weight:650;margin-top:2px;letter-spacing:0.02em" title="Stay progression for this board date">Night ${nightIdx}/${total}</div>
+</div>`;
+}
+
+/**
+ * PENDING/CONFIRMED bookings show as RESERVED on the board (future or same-day reservation).
+ * OCCUPIED is only shown after front desk sets the room unit to OCCUPIED (stored in unit notes).
+ * CLEANING / MAINTENANCE in notes still win when staff set them explicitly.
+ */
+function roomBoardStatusFromBookingOverlap(params: {
+  hasConfirmed: boolean;
+  hasPending: boolean;
+  manualStatus: RoomBoardStatus | null;
+}): RoomBoardStatus | null {
+  if (!params.hasConfirmed && !params.hasPending) return null;
+  if (params.manualStatus === "OCCUPIED") return "OCCUPIED";
+  if (params.manualStatus === "CLEANING" || params.manualStatus === "MAINTENANCE") {
+    return params.manualStatus;
+  }
+  return "RESERVED";
 }
 
 function parseManualRoomStatusFromNotes(notes: string | null | undefined): RoomBoardStatus | null {
@@ -2376,6 +2436,9 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
     checkOut: Date | null;
     bookingId: string | null;
     isUnassignedBooking: boolean;
+    adults: number | null;
+    children: number | null;
+    bookingNights: number | null;
   }
 
   const cards: RoomCard[] = [];
@@ -2414,13 +2477,11 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
       const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
       const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
 
-      // Bookings are the source of truth. Staff manual status (dropdown / notes) overrides only when
-      // there is no overlapping booking — otherwise inventory/inactive rules would ignore the form.
+      // Confirmed/pending bookings show as RESERVED until front desk sets OCCUPIED on the unit.
       let status: RoomBoardStatus;
-      if (hasConfirmed) {
-        status = "OCCUPIED";
-      } else if (hasPending) {
-        status = "RESERVED";
+      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus });
+      if (fromBooking !== null) {
+        status = fromBooking;
       } else if (closedOut) {
         status = "MAINTENANCE";
       } else if (manualStatus) {
@@ -2448,7 +2509,10 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
         checkIn: firstBooking?.checkIn ?? null,
         checkOut: firstBooking?.checkOut ?? null,
         bookingId: firstBooking?.id ?? null,
-        isUnassignedBooking: false
+        isUnassignedBooking: false,
+        adults: firstBooking ? firstBooking.adults : null,
+        children: firstBooking ? firstBooking.children : null,
+        bookingNights: firstBooking ? firstBooking.nights : null
       });
     }
 
@@ -2459,10 +2523,9 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
       const hasConfirmed = b.status === "CONFIRMED";
       const hasPending = b.status === "PENDING";
       let status: RoomBoardStatus;
-      if (hasConfirmed) {
-        status = "OCCUPIED";
-      } else if (hasPending) {
-        status = "RESERVED";
+      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
+      if (fromBooking !== null) {
+        status = fromBooking;
       } else {
         status = "RESERVED";
       }
@@ -2477,7 +2540,10 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
         checkIn: b.checkIn,
         checkOut: b.checkOut,
         bookingId: b.id,
-        isUnassignedBooking: true
+        isUnassignedBooking: true,
+        adults: b.adults,
+        children: b.children,
+        bookingNights: b.nights
       });
     }
   }
@@ -2521,11 +2587,24 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
       <button type="submit" style="padding:4px 8px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; font-size:12px">Set</button>
     </form>`
             : "";
+        const stayDetailHtml =
+          c.bookingId && c.checkIn && c.checkOut
+            ? formatRoomBoardStayDetailHtml({
+                bookingId: c.bookingId,
+                adults: c.adults,
+                children: c.children,
+                boardDate: dateStart,
+                checkIn: c.checkIn,
+                checkOut: c.checkOut,
+                bookingNights: c.bookingNights
+              })
+            : "";
         return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px;">
   <div style="font-weight:700; font-size:0.92rem; margin-bottom:2px;">${escapeHtml(c.unitName)}${c.isUnassignedBooking ? ' <span class="badge pending" style="font-size:10px">no unit</span>' : ""}</div>
   <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">${escapeHtml(c.name)}</div>
   <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
   ${c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
+  ${stayDetailHtml}
   ${c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
   <div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
     <a class="inline-link" href="${detailUrl}">${c.isUnassignedBooking ? "booking" : "details"}</a>
@@ -3558,10 +3637,9 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   }
 
   let status: RoomBoardStatus;
-  if (hasConfirmed) {
-    status = "OCCUPIED";
-  } else if (hasPending) {
-    status = "RESERVED";
+  const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus });
+  if (fromBooking !== null) {
+    status = fromBooking;
   } else if (closedOut) {
     status = "MAINTENANCE";
   } else if (manualStatus) {

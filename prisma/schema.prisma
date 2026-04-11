@@ -431,6 +431,8 @@ model Booking {
   paymentStatus  PaymentStatus @default(PENDING)
   /// Human-friendly ref for staff & guests (e.g. WA-260404-001). Routes/APIs still use `id`.
   referenceCode  String?
+  /// Meal package chosen in WhatsApp / desk: NONE, BREAKFAST, HALF_BOARD, FULL_BOARD.
+  mealPlan       String?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   paymentIntents PaymentIntent[]

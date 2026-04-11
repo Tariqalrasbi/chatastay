@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export type MealPlanCode = "NONE" | "BREAKFAST" | "HALF_BOARD";
+export type MealPlanCode = "NONE" | "BREAKFAST" | "HALF_BOARD" | "FULL_BOARD";
 
 export type FrontDeskExtra = {
   id: string;
@@ -29,7 +29,8 @@ const defaults: FrontDeskPricingConfig = {
   mealPlans: {
     NONE: { perPersonPerNight: 0 },
     BREAKFAST: { perPersonPerNight: 4 },
-    HALF_BOARD: { perPersonPerNight: 15 }
+    HALF_BOARD: { perPersonPerNight: 15 },
+    FULL_BOARD: { perPersonPerNight: 28 }
   },
   extras: [
     { id: "airport_transfer", label: "Airport transfer (one-way)", amount: 25, applyPerNight: false, applyPerHour: false },
@@ -67,7 +68,7 @@ function sanitizeConfig(raw: unknown): FrontDeskPricingConfig {
       : defaults.extras
   };
   if (mealPlans && typeof mealPlans === "object") {
-    for (const key of ["NONE", "BREAKFAST", "HALF_BOARD"] as const) {
+    for (const key of ["NONE", "BREAKFAST", "HALF_BOARD", "FULL_BOARD"] as const) {
       const m = (mealPlans as Record<string, unknown>)[key];
       if (m && typeof m === "object" && typeof (m as { perPersonPerNight?: unknown }).perPersonPerNight === "number") {
         next.mealPlans[key] = {
@@ -144,4 +145,17 @@ export function computeManualCheckInTotal(params: ManualCheckInTotalInput): {
   extrasSubtotal = Number(extrasSubtotal.toFixed(2));
   const total = Number((roomSubtotal + mealSubtotal + extrasSubtotal).toFixed(2));
   return { roomSubtotal, mealSubtotal, extrasSubtotal, total, breakdown };
+}
+
+/** Meal-plan add-on for WhatsApp quotes (room total is separate). */
+export function computeMealPlanSurchargeForStay(params: {
+  mealPlan: MealPlanCode;
+  adults: number;
+  children: number;
+  nights: number;
+}): number {
+  const pricing = loadFrontDeskPricing();
+  const pax = Math.max(0, params.adults) + Math.max(0, params.children);
+  const rate = pricing.mealPlans[params.mealPlan]?.perPersonPerNight ?? 0;
+  return Number((rate * pax * Math.max(1, params.nights)).toFixed(2));
 }

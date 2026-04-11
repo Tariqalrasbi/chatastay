@@ -2,7 +2,8 @@
   "mealPlans": {
     "NONE": { "perPersonPerNight": 0 },
     "BREAKFAST": { "perPersonPerNight": 4 },
-    "HALF_BOARD": { "perPersonPerNight": 15 }
+    "HALF_BOARD": { "perPersonPerNight": 15 },
+    "FULL_BOARD": { "perPersonPerNight": 28 }
   },
   "extras": [
     {
