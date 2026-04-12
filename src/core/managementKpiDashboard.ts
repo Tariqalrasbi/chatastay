@@ -1,6 +1,10 @@
 import { BookingStatus, ChannelProvider, FbOrderStatus, FolioTransactionType, MessageDirection } from "@prisma/client";
 import { prisma } from "../db";
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 export type ManagementKpiResult = {
   rangeLabel: string;
   rangeStart: string;
@@ -18,6 +22,14 @@ export type ManagementKpiResult = {
   roomRevenue: number;
   fbRevenue: number;
   folioExtraRevenue: number;
+  /** F&amp;B charges posted to in-house guest folios (ledger), same date window. */
+  folioFnbGuestChargesNet: number;
+  /** Walk-in / direct F&amp;B ledger lines (no booking), e.g. cashier POS. */
+  folioFnbDirectChargesNet: number;
+  folioActivityChargesNet: number;
+  folioOtherServiceChargesNet: number;
+  /** Adjustments + discounts (net; may be negative). */
+  folioAdjustmentsAndDiscountsNet: number;
   totalRevenueApprox: number;
   bookingsTotal: number;
   bookingsConfirmed: number;
@@ -26,6 +38,9 @@ export type ManagementKpiResult = {
   bookingsNoShow: number;
   bookingSources: { label: string; count: number }[];
   paymentFolioBuckets: { label: string; amount: number; count: number }[];
+  /** Desk payments linked to a stay vs walk-in (no booking), same period. */
+  folioPaymentsGuestBooking: { amount: number; count: number };
+  folioPaymentsWalkIn: { amount: number; count: number };
   bookingPaymentStatusMix: { label: string; count: number }[];
   arrivalsOnSnapshot: number;
   departuresOnSnapshot: number;
@@ -183,28 +198,90 @@ export async function loadManagementKpis(params: {
   const adr = bookedRoomNights > 0 ? roomRevenue / bookedRoomNights : 0;
   const revpar = totalRoomNightsCapacity > 0 ? roomRevenue / totalRoomNightsCapacity : 0;
 
-  const fbAgg = await prisma.fbOrder.aggregate({
-    where: {
-      hotelId,
-      status: FbOrderStatus.POSTED,
-      createdAt: { gte: rangeStart, lt: rangeEndExclusive }
-    },
-    _sum: { totalAmount: true }
-  });
+  const [
+    fbAgg,
+    folioChargeAgg,
+    aggFnbGuest,
+    aggFnbDirect,
+    aggActivity,
+    aggOtherSvc,
+    aggAdjDisc
+  ] = await Promise.all([
+    prisma.fbOrder.aggregate({
+      where: {
+        hotelId,
+        status: FbOrderStatus.POSTED,
+        createdAt: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { totalAmount: true }
+    }),
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: { notIn: [FolioTransactionType.PAYMENT, FolioTransactionType.REFUND] },
+        chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true }
+    }),
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.FNB_CHARGE,
+        bookingId: { not: null },
+        chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true }
+    }),
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.FNB_CHARGE,
+        bookingId: null,
+        chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true }
+    }),
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.ACTIVITY_CHARGE,
+        chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true }
+    }),
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.OTHER_SERVICE_CHARGE,
+        chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true }
+    }),
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: { in: [FolioTransactionType.ADJUSTMENT, FolioTransactionType.DISCOUNT] },
+        chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true }
+    })
+  ]);
+
   const fbRevenue = fbAgg._sum.totalAmount ?? 0;
+  const folioExtraRevenue = round2(folioChargeAgg._sum.netAmount ?? 0);
+  const folioFnbGuestChargesNet = round2(aggFnbGuest._sum.netAmount ?? 0);
+  const folioFnbDirectChargesNet = round2(aggFnbDirect._sum.netAmount ?? 0);
+  const folioActivityChargesNet = round2(aggActivity._sum.netAmount ?? 0);
+  const folioOtherServiceChargesNet = round2(aggOtherSvc._sum.netAmount ?? 0);
+  const folioAdjustmentsAndDiscountsNet = round2(aggAdjDisc._sum.netAmount ?? 0);
 
-  const folioChargeAgg = await prisma.folioTransaction.aggregate({
-    where: {
-      hotelId,
-      isVoided: false,
-      transactionType: { notIn: [FolioTransactionType.PAYMENT, FolioTransactionType.REFUND] },
-      chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
-    },
-    _sum: { netAmount: true }
-  });
-  const folioExtraRevenue = folioChargeAgg._sum.netAmount ?? 0;
-
-  const totalRevenueApprox = roomRevenue + fbRevenue + folioExtraRevenue;
+  const totalRevenueApprox = round2(roomRevenue + fbRevenue + folioExtraRevenue);
 
   const folioPayments = await prisma.folioTransaction.findMany({
     where: {
@@ -213,11 +290,22 @@ export async function loadManagementKpis(params: {
       transactionType: FolioTransactionType.PAYMENT,
       chargeDate: { gte: rangeStart, lt: rangeEndExclusive }
     },
-    select: { grossAmount: true, folioPaymentMethod: true }
+    select: { grossAmount: true, folioPaymentMethod: true, bookingId: true }
   });
 
+  let folioPayGuestAmt = 0;
+  let folioPayWalkAmt = 0;
+  let folioPayGuestCnt = 0;
+  let folioPayWalkCnt = 0;
   const payBuckets = new Map<string, { amount: number; count: number }>();
   for (const p of folioPayments) {
+    if (p.bookingId) {
+      folioPayGuestAmt += p.grossAmount;
+      folioPayGuestCnt += 1;
+    } else {
+      folioPayWalkAmt += p.grossAmount;
+      folioPayWalkCnt += 1;
+    }
     const key = bucketFolioPaymentMethod(p.folioPaymentMethod);
     const cur = payBuckets.get(key) ?? { amount: 0, count: 0 };
     cur.amount += p.grossAmount;
@@ -226,7 +314,7 @@ export async function loadManagementKpis(params: {
   }
 
   const paymentFolioBuckets = Array.from(payBuckets.entries())
-    .map(([label, v]) => ({ label, amount: v.amount, count: v.count }))
+    .map(([label, v]) => ({ label, amount: round2(v.amount), count: v.count }))
     .sort((a, b) => b.amount - a.amount);
 
   const bookingPaymentStatusMix = Array.from(payStatMap.entries())
@@ -336,6 +424,11 @@ export async function loadManagementKpis(params: {
     roomRevenue,
     fbRevenue,
     folioExtraRevenue,
+    folioFnbGuestChargesNet,
+    folioFnbDirectChargesNet,
+    folioActivityChargesNet,
+    folioOtherServiceChargesNet,
+    folioAdjustmentsAndDiscountsNet,
     totalRevenueApprox,
     bookingsTotal,
     bookingsConfirmed: confirmed,
@@ -344,6 +437,14 @@ export async function loadManagementKpis(params: {
     bookingsNoShow: noShow,
     bookingSources,
     paymentFolioBuckets,
+    folioPaymentsGuestBooking: {
+      amount: round2(folioPayGuestAmt),
+      count: folioPayGuestCnt
+    },
+    folioPaymentsWalkIn: {
+      amount: round2(folioPayWalkAmt),
+      count: folioPayWalkCnt
+    },
     bookingPaymentStatusMix,
     arrivalsOnSnapshot,
     departuresOnSnapshot,

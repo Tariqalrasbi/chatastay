@@ -1567,6 +1567,31 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (isMenuChoiceBookStay(input.text)) {
+    if (persisted.bookingStep) {
+      const lang = effectiveLang(persisted.language);
+      const body =
+        lang === "ar"
+          ? "أنت في منتصف خطوات الحجز. تابع بإجابة السؤال الحالي، أو اكتب *قائمة* أو *menu* للعودة للقائمة الرئيسية وبدء حجز جديد."
+          : "You're already in the booking flow. Reply with what this step asks for, or type *menu* to return to the main menu and start over.";
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body,
+          aiIntent: "BOOKING_STEP_IGNORE_DUPLICATE_BOOK_TAP",
+          aiConfidence: 0.95
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
     try {
       await sendWhatsAppList({
         to: normalizedPhone,
@@ -4120,7 +4145,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   const knowledgeReply = answerFromKnowledge(input.text);
-  const skipKnowledgeForBookingIntent = conversationMode === "IDLE" && isBookingIntent(normalizedInputText);
+  /** While choosing dates/guests/room, phrases like "I want to book" should continue the flow, not open FAQ. */
+  const skipKnowledgeForBookingIntent =
+    isBookingIntent(normalizedInputText) &&
+    (conversationMode === "IDLE" || conversationMode === "BOOKING_MODE");
   if (knowledgeReply.isKnowledgeQuery && !skipKnowledgeForBookingIntent) {
     const responseBody = knowledgeReply.found ? knowledgeReply.answer! : buildKnowledgeFallbackMessage();
     await sendWhatsAppText({

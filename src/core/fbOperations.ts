@@ -10,6 +10,7 @@ import {
   FolioTxnSourceType
 } from "@prisma/client";
 import { prisma } from "../db";
+import { bucketFolioPaymentMethod } from "./shiftCloseReport";
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -58,12 +59,38 @@ export async function listInHouseBookingsForHotelDay(hotelId: string, day: Date)
 export type FbOperationsSummary = {
   fbOrderFolioTotal: number;
   fbOrderFolioCount: number;
+  /** In-house F&B ledger lines (booking-linked), distinct from FbOrder totals. */
+  folioGuestFnChargesNet: number;
+  folioGuestFnChargeLineCount: number;
   directFnChargesNet: number;
   directFnChargeLineCount: number;
+  /** Direct F&B without booking — restaurant. */
+  directFnRestaurantNet: number;
+  /** Direct F&B without booking — café. */
+  directFnCafeNet: number;
+  /** Direct F&B without booking — other classification. */
+  directFnOtherNet: number;
+  /** Subtotal from quick cashier panel only (POS_WALK_IN_CASHIER marker). */
+  walkInCashierFnNet: number;
+  /** Activity charges in range (ledger). */
+  activityChargesNet: number;
+  activityFolioLinkedNet: number;
+  activityDirectNet: number;
   walkInPaymentTotal: number;
   walkInPaymentsByMethod: { method: string; amount: number }[];
   expenseTotal: number;
 };
+
+function classifyDirectFnOutlet(row: {
+  revenueCategory: FolioRevenueCategory | null;
+  outletCategory: FolioOutletCategory;
+}): "RESTAURANT" | "CAFE" | "OTHER" {
+  const rc = row.revenueCategory;
+  const oc = row.outletCategory;
+  if (rc === FolioRevenueCategory.CAFE || oc === FolioOutletCategory.CAFE) return "CAFE";
+  if (rc === FolioRevenueCategory.RESTAURANT || oc === FolioOutletCategory.RESTAURANT) return "RESTAURANT";
+  return "OTHER";
+}
 
 export async function getFbOperationsSummary(
   hotelId: string,
@@ -79,17 +106,70 @@ export async function getFbOperationsSummary(
     _count: true
   });
 
-  const directCharges = await prisma.folioTransaction.aggregate({
-    where: {
-      hotelId,
-      isVoided: false,
-      transactionType: FolioTransactionType.FNB_CHARGE,
-      bookingId: null,
-      chargeDate: { gte: rangeStartInclusive, lt: rangeEndExclusive }
-    },
-    _sum: { netAmount: true },
-    _count: true
-  });
+  const [folioGuestFnAgg, directFnRows, activityRows] = await Promise.all([
+    prisma.folioTransaction.aggregate({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.FNB_CHARGE,
+        bookingId: { not: null },
+        chargeDate: { gte: rangeStartInclusive, lt: rangeEndExclusive }
+      },
+      _sum: { netAmount: true },
+      _count: true
+    }),
+    prisma.folioTransaction.findMany({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.FNB_CHARGE,
+        bookingId: null,
+        chargeDate: { gte: rangeStartInclusive, lt: rangeEndExclusive }
+      },
+      select: {
+        netAmount: true,
+        revenueCategory: true,
+        outletCategory: true,
+        internalNote: true
+      }
+    }),
+    prisma.folioTransaction.findMany({
+      where: {
+        hotelId,
+        isVoided: false,
+        transactionType: FolioTransactionType.ACTIVITY_CHARGE,
+        chargeDate: { gte: rangeStartInclusive, lt: rangeEndExclusive }
+      },
+      select: { netAmount: true, bookingId: true }
+    })
+  ]);
+
+  let directFnChargesNet = 0;
+  let directFnRestaurantNet = 0;
+  let directFnCafeNet = 0;
+  let directFnOtherNet = 0;
+  let walkInCashierFnNet = 0;
+  for (const row of directFnRows) {
+    const n = round2(row.netAmount);
+    directFnChargesNet = round2(directFnChargesNet + n);
+    if (row.internalNote === "POS_WALK_IN_CASHIER") {
+      walkInCashierFnNet = round2(walkInCashierFnNet + n);
+    }
+    const bucket = classifyDirectFnOutlet(row);
+    if (bucket === "CAFE") directFnCafeNet = round2(directFnCafeNet + n);
+    else if (bucket === "RESTAURANT") directFnRestaurantNet = round2(directFnRestaurantNet + n);
+    else directFnOtherNet = round2(directFnOtherNet + n);
+  }
+
+  let activityChargesNet = 0;
+  let activityFolioLinkedNet = 0;
+  let activityDirectNet = 0;
+  for (const row of activityRows) {
+    const n = round2(row.netAmount);
+    activityChargesNet = round2(activityChargesNet + n);
+    if (row.bookingId) activityFolioLinkedNet = round2(activityFolioLinkedNet + n);
+    else activityDirectNet = round2(activityDirectNet + n);
+  }
 
   const walkPayments = await prisma.folioTransaction.findMany({
     where: {
@@ -106,7 +186,7 @@ export async function getFbOperationsSummary(
   const byMethod = new Map<string, number>();
   let walkInPaymentTotal = 0;
   for (const p of walkPayments) {
-    const m = (p.folioPaymentMethod ?? "Unspecified").trim().slice(0, 48) || "Unspecified";
+    const m = bucketFolioPaymentMethod(p.folioPaymentMethod);
     const g = round2(p.grossAmount);
     walkInPaymentTotal = round2(walkInPaymentTotal + g);
     byMethod.set(m, round2((byMethod.get(m) ?? 0) + g));
@@ -126,8 +206,17 @@ export async function getFbOperationsSummary(
   return {
     fbOrderFolioTotal: round2(orders._sum.totalAmount ?? 0),
     fbOrderFolioCount: orders._count,
-    directFnChargesNet: round2(directCharges._sum.netAmount ?? 0),
-    directFnChargeLineCount: directCharges._count,
+    folioGuestFnChargesNet: round2(folioGuestFnAgg._sum.netAmount ?? 0),
+    folioGuestFnChargeLineCount: folioGuestFnAgg._count,
+    directFnChargesNet,
+    directFnChargeLineCount: directFnRows.length,
+    directFnRestaurantNet,
+    directFnCafeNet,
+    directFnOtherNet,
+    walkInCashierFnNet,
+    activityChargesNet,
+    activityFolioLinkedNet,
+    activityDirectNet,
     walkInPaymentTotal,
     walkInPaymentsByMethod,
     expenseTotal: round2(exp._sum.amount ?? 0)

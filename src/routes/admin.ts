@@ -7991,8 +7991,9 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
 <p class="muted">${escapeHtml(hotel.displayName)} — ${escapeHtml(presetLabel)} · <strong>${escapeHtml(kpi.rangeLabel)}</strong>. ${escapeHtml(kpi.operationalDayNote)}</p>
 <p class="muted" style="font-size:12px;max-width:900px">
   Bookings and room revenue use stays with <strong>check-in</strong> in the selected range (same idea as the booking report).
-  Total revenue adds posted F&amp;B orders and folio charge lines in the range. Folio desk <strong>payments</strong> are grouped by payment method for the same period.
-  Occupancy / ADR / RevPAR use room-type inventory × days in range (simplified PMS-style view).
+  <strong>Total revenue (approx.)</strong> = room (confirmed) + posted <code>FbOrder</code> totals + all non-void folio <strong>charge</strong> lines (excl. payments/refunds) with <strong>charge date</strong> in range.
+  F&amp;B appears twice in concept: WhatsApp/menu <code>FbOrder</code> totals are separate from F&amp;B <strong>folio ledger</strong> lines — do not add those two columns together (they are different posting paths).
+  Folio <strong>payments</strong> are cash-flow collections by method; walk-in vs guest split shows cashier-style activity. Occupancy / ADR / RevPAR use room-type inventory × days in range (simplified PMS-style view).
 </p>
 
 <form method="get" action="/admin/management-kpi" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:16px">
@@ -8055,13 +8056,25 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
 <div class="grid-2" style="margin-top:18px;align-items:start">
   <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
     <h3 style="margin-top:0">Revenue mix</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 10px">Top-level components of <strong>total revenue (approx.)</strong>. Folio rows are ledger charges (not payments).</p>
     <table>
       <tbody>
         <tr><th>Room (confirmed)</th><td>${formatMoney(kpi.roomRevenue, hotel.currency)}</td></tr>
-        <tr><th>F&amp;B (posted orders)</th><td>${formatMoney(kpi.fbRevenue, hotel.currency)}</td></tr>
-        <tr><th>Folio charges (excl. payments)</th><td>${formatMoney(kpi.folioExtraRevenue, hotel.currency)}</td></tr>
+        <tr><th>F&amp;B — posted guest orders (<code>FbOrder</code>)</th><td>${formatMoney(kpi.fbRevenue, hotel.currency)}</td></tr>
+        <tr><th>Folio charges total (excl. payments / refunds)</th><td>${formatMoney(kpi.folioExtraRevenue, hotel.currency)}</td></tr>
       </tbody>
     </table>
+    <h4 style="margin:14px 0 8px;font-size:14px">Folio charge breakdown (same period)</h4>
+    <table>
+      <tbody>
+        <tr><th>F&amp;B — in-house guest folio</th><td>${formatMoney(kpi.folioFnbGuestChargesNet, hotel.currency)}</td></tr>
+        <tr><th>F&amp;B — walk-in / direct (no booking)</th><td>${formatMoney(kpi.folioFnbDirectChargesNet, hotel.currency)}</td></tr>
+        <tr><th>Activities</th><td>${formatMoney(kpi.folioActivityChargesNet, hotel.currency)}</td></tr>
+        <tr><th>Other services</th><td>${formatMoney(kpi.folioOtherServiceChargesNet, hotel.currency)}</td></tr>
+        <tr><th>Adjustments &amp; discounts (net)</th><td>${formatMoney(kpi.folioAdjustmentsAndDiscountsNet, hotel.currency)}</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="font-size:11px;margin:10px 0 0">The five breakdown lines sum to the folio charges total (minor rounding differences possible). <code>FbOrder</code> revenue is additional visibility for menu orders, not a subset of the folio F&amp;B lines above.</p>
   </section>
   <section style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
     <h3 style="margin-top:0">Guest messaging</h3>
@@ -8097,7 +8110,13 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
 
 <section style="margin-top:18px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
   <h3 style="margin-top:0">Folio desk payments (by method)</h3>
-  <p class="muted" style="font-size:13px">Posted folio payment lines with charge date in range. Labels are derived from <code>folioPaymentMethod</code>.</p>
+  <p class="muted" style="font-size:13px">Posted folio payment lines with <strong>charge date</strong> in range. Labels are derived from <code>folioPaymentMethod</code> (normalized buckets).</p>
+  <table style="margin-bottom:12px">
+    <tbody>
+      <tr><th>Guest / booking-linked payments</th><td>${kpi.folioPaymentsGuestBooking.count} lines</td><td>${formatMoney(kpi.folioPaymentsGuestBooking.amount, hotel.currency)}</td></tr>
+      <tr><th>Walk-in (no booking) — cashier / POS</th><td>${kpi.folioPaymentsWalkIn.count} lines</td><td>${formatMoney(kpi.folioPaymentsWalkIn.amount, hotel.currency)}</td></tr>
+    </tbody>
+  </table>
   <table>
     <thead><tr><th>Bucket</th><th>Lines</th><th>Amount</th></tr></thead>
     <tbody>${folioPayRows || '<tr><td colspan="3">No folio payments in range</td></tr>'}</tbody>
@@ -9221,18 +9240,20 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
     <button type="submit" class="btn-link primary" style="padding:10px 16px;border:0;border-radius:8px;background:#334155;color:#fff;font-weight:700">Refresh</button>
   </form>
   <p class="muted" style="font-size:12px;margin:0 0 10px">Range: ${escapeHtml(reportStartVal)} → ${escapeHtml(reportEndVal)} (inclusive).</p>
-  <div class="grid-4" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:12px">
-    <article class="stat"><h3>Folio menu orders</h3><p>${summaryOps.fbOrderFolioTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">${summaryOps.fbOrderFolioCount} order(s)</p></article>
-    <article class="stat"><h3>Walk-in F&amp;B (ledger)</h3><p>${summaryOps.directFnChargesNet.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">${summaryOps.directFnChargeLineCount} line(s)</p></article>
-    <article class="stat"><h3>Walk-in payments</h3><p>${summaryOps.walkInPaymentTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">POS restaurant/café</p></article>
+  <div class="grid-4" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:12px">
+    <article class="stat"><h3>Guest menu orders</h3><p>${summaryOps.fbOrderFolioTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">${summaryOps.fbOrderFolioCount} FbOrder(s)</p></article>
+    <article class="stat"><h3>Guest folio F&amp;B</h3><p>${summaryOps.folioGuestFnChargesNet.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">${summaryOps.folioGuestFnChargeLineCount} charge line(s) to in-house folios</p></article>
+    <article class="stat"><h3>Direct F&amp;B (no booking)</h3><p>${summaryOps.directFnChargesNet.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">${summaryOps.directFnChargeLineCount} line(s) · Rest ${summaryOps.directFnRestaurantNet.toFixed(2)} · Café ${summaryOps.directFnCafeNet.toFixed(2)}${summaryOps.directFnOtherNet > 0.005 ? ` · Other ${summaryOps.directFnOtherNet.toFixed(2)}` : ""}<br/>Quick cashier: ${summaryOps.walkInCashierFnNet.toFixed(2)}</p></article>
+    <article class="stat"><h3>Walk-in POS payments</h3><p>${summaryOps.walkInPaymentTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">Matches direct café/restaurant cashier takes</p></article>
+    <article class="stat"><h3>Activity sales</h3><p>${summaryOps.activityChargesNet.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">Folio ${summaryOps.activityFolioLinkedNet.toFixed(2)} · Direct ${summaryOps.activityDirectNet.toFixed(2)}</p></article>
     <article class="stat"><h3>F&amp;B expenses</h3><p>${summaryOps.expenseTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p><p class="muted" style="font-size:11px;margin:0">Recorded purchases</p></article>
   </div>
   <h3 style="font-size:14px;margin:12px 0 6px">Walk-in payment mix</h3>
   <table class="fb-pos-table" style="max-width:420px">
-    <thead><tr><th>Method</th><th class="num">Amount</th></tr></thead>
+    <thead><tr><th>Method (normalized)</th><th class="num">Amount</th></tr></thead>
     <tbody>${payMixRows}</tbody>
   </table>
-  <p class="muted" style="font-size:11px;margin-top:10px">Folio menu orders = <code>FbOrder</code> totals. Walk-in = ledger lines without booking + matching POS payments. Aligns with cashier shift reports for payment buckets.</p>
+  <p class="muted" style="font-size:11px;margin-top:10px">Guest menu orders = posted <code>FbOrder</code> totals. Guest folio F&amp;B = ledger charges linked to a stay. Direct F&amp;B = charges with no booking (walk-ins / quick cashier). Walk-in payments use the same method buckets as shift-close. Activity = <code>ACTIVITY_CHARGE</code> lines in the date range.</p>
 </section>
 <section id="fb-catalog" style="margin-bottom:16px;border:1px solid #e2e8f0;border-radius:12px;padding:14px">
   <h3 style="margin-top:0">Add menu item</h3>
