@@ -8,6 +8,8 @@ import { ownerRouter } from "./routes/owner";
 import { whatsappWebhookRouter } from "./whatsapp/webhookRouter";
 import { logWhatsAppStartupHints } from "./whatsapp/send";
 import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
+import { startOwnerDailyDigestScheduler } from "./jobs/ownerDailyDigestJob";
+import { startHotelDailyDigestScheduler } from "./jobs/hotelDailyDigestJob";
 
 const app = express();
 const rawPort = process.env.PORT ?? "3000";
@@ -39,6 +41,8 @@ const server = app.listen(port, host, () => {
   console.log(`(Keep this terminal open while you use the app.)`);
   logWhatsAppStartupHints();
   startPreArrivalReminderScheduler();
+  startOwnerDailyDigestScheduler();
+  startHotelDailyDigestScheduler();
 });
 
 server.on("error", (err: NodeJS.ErrnoException) => {

@@ -282,6 +282,26 @@ model Hotel {
   bookingStatusHistories BookingStatusHistory[]
   notifications         Notification[]
   marketingCampaigns    MarketingCampaign[]
+  hotelDailyDigestLogs  HotelDailyDigestLog[]
+  frontDeskShifts       FrontDeskShift[]
+}
+
+/// Per-hotel daily email digest audit (hotel admin); separate from platform OwnerDailyDigestLog.
+model HotelDailyDigestLog {
+  id            String   @id @default(cuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  digestKey     String
+  status        String
+  recipientsCsv String?
+  subject       String?
+  errorMessage  String?
+  summaryJson   String?
+  sentAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([hotelId, digestKey])
 }
 
 model HotelUser {
@@ -303,6 +323,59 @@ model HotelUser {
   foliosCreated    Folio[]            @relation("FolioCreatedBy")
   bookingStatusHistories BookingStatusHistory[]
   notifications          Notification[]
+  closedFrontDeskShifts  FrontDeskShift[] @relation("ShiftClosedBy")
+}
+
+/// Locked cashier / front-desk shift close with cash reconciliation (folio-based).
+model FrontDeskShift {
+  id                  String   @id @default(cuid())
+  hotelId             String
+  hotel               Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  /// MORNING | EVENING | NIGHT | CUSTOM — multiple shifts per day use distinct slots.
+  shiftSlot           String   @default("CUSTOM")
+  /// Optional label when slot is CUSTOM or for display (e.g. "Pre-convention").
+  shiftLabel          String?
+  /// Civil date (YYYY-MM-DD) for filtering; should align with property operations day.
+  businessDate        String   @default("1970-01-01")
+  shiftStart          DateTime
+  shiftEnd            DateTime
+  closedAt            DateTime
+  closedByUserId      String?
+  closedBy            HotelUser? @relation("ShiftClosedBy", fields: [closedByUserId], references: [id], onDelete: SetNull)
+  openingCash         Float
+  closingCashActual   Float
+  bankDepositAmount   Float    @default(0)
+  expectedClosingCash Float
+  cashVariance        Float
+  currency            String   @default("OMR")
+  status              String   @default("CLOSED")
+  locked              Boolean  @default(true)
+  /// MANUAL | CARRY_FROM_PRIOR — opening float entry mode
+  openingCashSource   String   @default("MANUAL")
+  /// Previous closed shift this session continued from (cashier handover chain).
+  priorShiftId        String?
+  priorShift            FrontDeskShift?  @relation("ShiftHandover", fields: [priorShiftId], references: [id], onDelete: SetNull)
+  nextShifts            FrontDeskShift[] @relation("ShiftHandover")
+  handoverNote        String?
+  /// Audit: auto totals + payment buckets + charge splits + outstanding snapshot at close
+  snapshotJson        String
+  expenses            FrontDeskShiftExpense[]
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([hotelId, closedAt])
+  @@index([hotelId, shiftStart])
+  @@index([hotelId, businessDate])
+}
+
+model FrontDeskShiftExpense {
+  id        String         @id @default(cuid())
+  shiftId   String
+  shift     FrontDeskShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  category  String
+  amount    Float
+  note      String?
+  createdAt DateTime       @default(now())
 }
 
 model Property {
@@ -1095,6 +1168,25 @@ model BookingDraft {
 
   @@index([hotelId, guestId, status])
   @@index([hotelId, checkIn, checkOut])
+}
+
+/// One row per calendar digest day (timezone in env OWNER_DIGEST_TZ); audit trail for owner daily email.
+model OwnerDailyDigestLog {
+  id            String    @id @default(cuid())
+  /// YYYY-MM-DD civil date in digest timezone when the run was for.
+  digestKey     String    @unique
+  status        String
+  recipient     String?
+  subject       String?
+  errorMessage  String?
+  /// JSON array of platform alert ids at send time (for “new since last” on next send).
+  alertIdsJson  String?
+  newAlertCount Int?
+  /// Compact JSON for history UI (KPIs headline).
+  summaryJson   String?
+  sentAt        DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
 model CalendarSession {

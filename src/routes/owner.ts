@@ -8,6 +8,8 @@ import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerS
 import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
 import { parseKpiPreset } from "../core/managementKpiDashboard";
 import { filterPlatformAlerts, loadPlatformAlerts } from "../core/ownerPlatformAlerts";
+import { runOwnerDailyDigest } from "../core/ownerDailyDigest";
+import { isOwnerDigestSmtpConfigured } from "../core/ownerDigestMail";
 
 export const ownerRouter = Router();
 
@@ -389,6 +391,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
     ? [
         '<a href="/owner/dashboard">Platform Dashboard</a>',
         '<a href="/owner/alerts">Alerts</a>',
+        '<a href="/owner/digest">Daily digest</a>',
         '<a href="/owner/hotels">Hotels</a>',
         '<a href="/owner/subscriptions">Subscriptions</a>',
       '<a href="/owner/billing">Billing</a>',
@@ -1071,6 +1074,105 @@ ownerRouter.get("/alerts", requireOwnerAuth, async (req, res) => {
 </p>`;
 
   res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.get("/digest", requireOwnerAuth, async (req, res) => {
+  const logs = await prisma.ownerDailyDigestLog.findMany({
+    orderBy: { digestKey: "desc" },
+    take: 30
+  });
+  const tz = (process.env.OWNER_DIGEST_TZ ?? "Asia/Muscat").trim();
+  const sendTime = (process.env.OWNER_DIGEST_TIME ?? "07:00").trim();
+  const enabled = process.env.OWNER_DIGEST_ENABLED !== "false";
+  const smtpOk = isOwnerDigestSmtpConfigured();
+  const sentFlash = req.query.sent === "1";
+  const errFlash = typeof req.query.err === "string" ? req.query.err : "";
+
+  const logRows = logs
+    .map((row) => {
+      const sum = row.summaryJson
+        ? (() => {
+            try {
+              const j = JSON.parse(row.summaryJson) as {
+                hotelsTotal?: number;
+                bookingsToday?: number;
+                newAlertCount?: number;
+              };
+              return `Hotels ${j.hotelsTotal ?? "—"} · bookings ${j.bookingsToday ?? "—"} · new alerts ${j.newAlertCount ?? "—"}`;
+            } catch {
+              return "—";
+            }
+          })()
+        : "—";
+      return `<tr>
+  <td>${escapeHtml(row.digestKey)}</td>
+  <td>${escapeHtml(row.status)}</td>
+  <td>${row.sentAt ? escapeHtml(row.sentAt.toISOString().slice(0, 19).replace("T", " ")) : "—"}</td>
+  <td>${row.recipient ? escapeHtml(row.recipient) : "—"}</td>
+  <td>${row.newAlertCount != null ? String(row.newAlertCount) : "—"}</td>
+  <td class="muted" style="font-size:12px">${escapeHtml(sum)}</td>
+  <td>${row.errorMessage ? `<span class="muted" style="font-size:12px">${escapeHtml(row.errorMessage.slice(0, 120))}${row.errorMessage.length > 120 ? "…" : ""}</span>` : "—"}</td>
+</tr>`;
+    })
+    .join("");
+
+  const flash =
+    sentFlash && !errFlash
+      ? '<p class="badge ok" style="display:inline-block;margin-bottom:12px">Digest run completed (check status below).</p>'
+      : errFlash
+        ? `<p class="badge alert" style="display:inline-block;margin-bottom:12px">${escapeHtml(errFlash)}</p>`
+        : "";
+
+  const content = `
+<h2>Daily owner digest</h2>
+<p class="muted">One email per calendar day (${tz}) after ${sendTime} when SMTP is set. Uses the same KPI and alert logic as the platform dashboard. Set <code>OWNER_DIGEST_ENABLED=false</code> to disable the scheduler.</p>
+${flash}
+<div class="grid-2" style="margin-bottom:14px;align-items:start">
+  <section>
+    <h3 style="margin-top:0">Schedule</h3>
+    <table>
+      <tbody>
+        <tr><th>Scheduler</th><td>${enabled ? '<span class="badge ok">On</span>' : '<span class="badge pending">Off</span>'}</td></tr>
+        <tr><th>Timezone</th><td>${escapeHtml(tz)}</td></tr>
+        <tr><th>Send time</th><td>${escapeHtml(sendTime)}</td></tr>
+        <tr><th>SMTP</th><td>${smtpOk ? '<span class="badge ok">Configured</span>' : '<span class="badge alert">Not configured</span> — digest is logged only.'}</td></tr>
+        <tr><th>Recipient</th><td>${escapeHtml((process.env.OWNER_EMAIL ?? "owner@chatastay.local").trim())}</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h3 style="margin-top:0">Run now</h3>
+    <form method="post" action="/owner/digest/send" style="margin:0">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin-bottom:10px">
+        <input type="checkbox" name="force" value="1" /> Force resend even if today already sent
+      </label>
+      <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:var(--brand);color:#fff;font-weight:700">Send digest now</button>
+    </form>
+    <p class="muted" style="font-size:12px;margin-top:10px">Manual runs set <code>manual</code> so a failed earlier attempt can retry the same day.</p>
+  </section>
+</div>
+
+<h3>Recent digest log</h3>
+<table>
+  <thead><tr><th>Day (digest key)</th><th>Status</th><th>Sent at (UTC)</th><th>To</th><th>New alerts #</th><th>Summary</th><th>Error</th></tr></thead>
+  <tbody>${logRows.length ? logRows : `<tr><td colspan="7" class="muted">No digest rows yet.</td></tr>`}</tbody>
+</table>
+
+<p class="muted" style="font-size:12px;margin-top:14px">
+  Links in emails: <a href="/owner/dashboard">Dashboard</a> · <a href="/owner/alerts">Alerts</a>. Env: <code>OWNER_DIGEST_TZ</code>, <code>OWNER_DIGEST_TIME</code>, <code>APP_URL</code>, same SMTP vars as admin password reset.
+</p>`;
+
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/digest/send", requireOwnerAuth, async (req, res) => {
+  const force =
+    req.body?.force === "1" || req.body?.force === "on" || req.body?.force === true || req.body?.force === "true";
+  const result = await runOwnerDailyDigest({ manual: true, force });
+  const params = new URLSearchParams();
+  if (result.ok) params.set("sent", "1");
+  else params.set("err", encodeURIComponent(result.message ?? result.status));
+  res.redirect(`/owner/digest?${params.toString()}`);
 });
 
 ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {

@@ -68,6 +68,17 @@ import {
 import { sendMarketingCampaignWhatsApp } from "../core/campaignSend";
 import { renderCampaignComposePage } from "./campaignCenterHtml";
 import { loadManagementKpis, parseKpiPreset } from "../core/managementKpiDashboard";
+import { runHotelDailyDigest } from "../core/hotelDailyDigest";
+import { isOwnerDigestSmtpConfigured } from "../core/ownerDigestMail";
+import {
+  computeExpectedClosingCash,
+  computeShiftSnapshot,
+  formatBusinessDateLocal,
+  formatDateTimeLocalForInput,
+  parseDateTimeLocalInput,
+  renderShiftReportHtml,
+  type ShiftCloseSnapshotFile
+} from "../core/shiftCloseReport";
 import { buildManualCheckInPageHtml, manualCheckInFormFromBody, resolveRoomTypeIdForUnit } from "./manualCheckInForm";
 import { computeManualCheckInRoomSelection } from "./manualCheckInRoomSelection";
 import { sendWhatsAppDocument, sendWhatsAppText, trySendWhatsAppText } from "../whatsapp/send";
@@ -562,6 +573,8 @@ function renderLayout(content: string, authenticated: boolean): string {
         '<div class="section-tabs" data-section="frontdesk">',
         '<a href="/admin/front-desk/check-in">Manual check-in</a>',
         '<a href="/admin/front-desk/check-out">Manual check-out</a>',
+        '<a href="/admin/shifts">Shifts</a>',
+        '<a href="/admin/shift-close">Shift close</a>',
         "</div>",
         '<div class="section-tabs" data-section="reservations">',
         '<a href="/admin/bookings">Bookings</a>',
@@ -585,6 +598,7 @@ function renderLayout(content: string, authenticated: boolean): string {
         '<div class="section-tabs" data-section="insights">',
         '<a href="/admin/reports-center">Reports</a>',
         '<a href="/admin/management-kpi">Management KPI</a>',
+        '<a href="/admin/daily-digest">Daily digest</a>',
         '<a href="/admin/ai-analytics">AI Analytics</a>',
         '<a href="/admin/booking-funnel">Booking Funnel</a>',
         '<a href="/admin/routing-health">Routing Health</a>',
@@ -620,6 +634,16 @@ function escapeHtml(input: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function parseShiftCloseSnapshot(raw: string): ShiftCloseSnapshotFile | null {
+  try {
+    const j = JSON.parse(raw) as ShiftCloseSnapshotFile;
+    if (!j || typeof j !== "object" || !("computed" in j)) return null;
+    return j;
+  } catch {
+    return null;
+  }
 }
 
 function parseManualSegmentTagsFromBody(body: Record<string, unknown>): SegmentTagKind[] {
@@ -3341,6 +3365,574 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
     const msg = e instanceof Error ? e.message : "Check-out could not be completed.";
     errRedirect(msg);
   }
+});
+
+adminRouter.get("/shifts", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Shifts</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const dateFilter = typeof req.query.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : "";
+  const slotRaw = typeof req.query.slot === "string" ? req.query.slot.toUpperCase() : "";
+  const slotFilter = ["MORNING", "EVENING", "NIGHT", "CUSTOM"].includes(slotRaw) ? slotRaw : "";
+
+  const where: { hotelId: string; businessDate?: string; shiftSlot?: string } = { hotelId: hotel.id };
+  if (dateFilter) where.businessDate = dateFilter;
+  if (slotFilter) where.shiftSlot = slotFilter;
+
+  const rows = await prisma.frontDeskShift.findMany({
+    where,
+    orderBy: { closedAt: "desc" },
+    take: 250,
+    include: { closedBy: { select: { fullName: true, email: true } } }
+  });
+
+  const tableRows = rows
+    .map((s) => {
+      const reportHref = `/admin/shift-report/${encodeURIComponent(s.id)}`;
+      const nextHandoverHref = `/admin/shift-close?prior_shift_id=${encodeURIComponent(s.id)}&opening_cash_source=CARRY_FROM_PRIOR&business_date=${encodeURIComponent(s.businessDate)}&suggested_opening=${encodeURIComponent(String(s.closingCashActual))}`;
+      const slotShow = s.shiftLabel?.trim()
+        ? `${escapeHtml(s.shiftSlot)} (${escapeHtml(s.shiftLabel.trim())})`
+        : escapeHtml(s.shiftSlot);
+      return `<tr>
+  <td>${slotShow}</td>
+  <td>${escapeHtml(s.businessDate)}</td>
+  <td>${escapeHtml(formatDateTimeLocalForInput(s.shiftStart))} → ${escapeHtml(formatDateTimeLocalForInput(s.shiftEnd))}</td>
+  <td>${escapeHtml(s.closedAt.toISOString().slice(0, 16).replace("T", " "))}</td>
+  <td>${s.closedBy ? escapeHtml(s.closedBy.fullName) : "—"}</td>
+  <td>${s.expectedClosingCash.toFixed(3)}</td>
+  <td>${s.closingCashActual.toFixed(3)}</td>
+  <td style="font-weight:700;color:${s.cashVariance === 0 ? "#166534" : "#991b1b"}">${s.cashVariance.toFixed(3)}</td>
+  <td><a href="${reportHref}">Print report</a> · <a href="${nextHandoverHref}">Next shift (carry)</a></td>
+</tr>`;
+    })
+    .join("");
+
+  const slotSel = (val: string, label: string) =>
+    `<option value="${escapeHtml(val)}" ${slotFilter === val ? "selected" : ""}>${escapeHtml(label)}</option>`;
+
+  const filterForm = `
+<form method="get" action="/admin/shifts" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:14px 0;padding:14px;border:1px solid #d8dee6;border-radius:12px">
+  <label>Business date <input type="date" name="date" value="${escapeHtml(dateFilter)}" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+  <label>Slot
+    <select name="slot" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;min-width:140px">
+      ${slotSel("", "All slots")}
+      ${slotSel("MORNING", "Morning")}
+      ${slotSel("EVENING", "Evening")}
+      ${slotSel("NIGHT", "Night")}
+      ${slotSel("CUSTOM", "Custom")}
+    </select>
+  </label>
+  <button type="submit" class="btn-link primary" style="border:0;padding:10px 16px">Apply filters</button>
+  <a href="/admin/shifts" class="muted" style="align-self:center">Reset</a>
+</form>`;
+
+  const content = `
+<h2>Front desk shifts</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} · ${escapeHtml(hotel.currency)} · Closed shifts only (locked). Use <a href="/admin/shift-close">Shift close</a> to close the current shift.</p>
+${filterForm}
+<table>
+  <thead><tr><th>Slot</th><th>Business date</th><th>Window</th><th>Closed (UTC)</th><th>By</th><th>Expected</th><th>Counted</th><th>Var</th><th>Actions</th></tr></thead>
+  <tbody>${tableRows.length ? tableRows : `<tr><td colspan="9" class="muted">No shifts match.</td></tr>`}</tbody>
+</table>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/shift-report/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.status(404).type("html").send(renderLayout("<h2>Shift report</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const shift = await prisma.frontDeskShift.findFirst({
+    where: { id: req.params.id, hotelId: hotel.id },
+    include: { closedBy: { select: { fullName: true } } }
+  });
+  if (!shift || !shift.locked) {
+    res.status(404).type("html").send(renderLayout("<h2>Shift report</h2><p>Shift not found or not locked.</p>", true));
+    return;
+  }
+
+  const snap = parseShiftCloseSnapshot(shift.snapshotJson);
+  const html = renderShiftReportHtml({
+    hotelName: hotel.displayName,
+    currency: shift.currency || hotel.currency,
+    shiftId: shift.id,
+    closedAtIso: shift.closedAt.toISOString(),
+    shiftStartIso: shift.shiftStart.toISOString(),
+    shiftEndIso: shift.shiftEnd.toISOString(),
+    closedByName: shift.closedBy?.fullName ?? null,
+    shiftSlot: shift.shiftSlot,
+    shiftLabel: shift.shiftLabel,
+    businessDate: shift.businessDate,
+    openingCashSource: shift.openingCashSource,
+    priorShiftId: shift.priorShiftId,
+    handoverNote: shift.handoverNote,
+    snapshot: snap
+  });
+
+  res.type("html").send(html);
+});
+
+adminRouter.get("/shift-close", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Shift close</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const flashOk = req.query.closed === "1" ? '<p class="badge ok" style="margin-bottom:12px">Shift closed and locked.</p>' : "";
+  const reportHint =
+    typeof req.query.report_id === "string" && req.query.report_id.trim()
+      ? `<p class="badge ok" style="margin-bottom:12px"><a href="/admin/shift-report/${escapeHtml(req.query.report_id.trim())}" style="color:inherit;font-weight:700">Open printable shift report</a></p>`
+      : "";
+  const errFlash =
+    typeof req.query.err === "string" && req.query.err.trim()
+      ? `<p class="badge alert" style="margin-bottom:12px">${escapeHtml(req.query.err)}</p>`
+      : "";
+
+  const now = new Date();
+  const defaultEnd = now;
+  const defaultStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 6, 0, 0, 0);
+  if (defaultStart.getTime() > defaultEnd.getTime()) {
+    defaultStart.setDate(defaultStart.getDate() - 1);
+  }
+
+  const shiftStart = parseDateTimeLocalInput(req.query.shift_start, defaultStart);
+  const shiftEnd = parseDateTimeLocalInput(req.query.shift_end, defaultEnd);
+
+  const qSlotRaw = typeof req.query.shift_slot === "string" ? req.query.shift_slot.toUpperCase() : "";
+  const shiftSlot = ["MORNING", "EVENING", "NIGHT", "CUSTOM"].includes(qSlotRaw) ? qSlotRaw : "CUSTOM";
+
+  const bdRaw = typeof req.query.business_date === "string" ? req.query.business_date.trim() : "";
+  const businessDate = /^\d{4}-\d{2}-\d{2}$/.test(bdRaw) ? bdRaw : formatBusinessDateLocal(shiftStart);
+
+  const priorIdQ = typeof req.query.prior_shift_id === "string" ? req.query.prior_shift_id.trim() : "";
+  let priorShiftPreview: {
+    id: string;
+    closingCashActual: number;
+    businessDate: string;
+    shiftSlot: string;
+    closedAt: Date;
+  } | null = null;
+  if (priorIdQ) {
+    const p = await prisma.frontDeskShift.findFirst({
+      where: { id: priorIdQ, hotelId: hotel.id, locked: true, status: "CLOSED" },
+      select: { id: true, closingCashActual: true, businessDate: true, shiftSlot: true, closedAt: true }
+    });
+    if (p) priorShiftPreview = p;
+  }
+
+  const ocsQ = typeof req.query.opening_cash_source === "string" ? req.query.opening_cash_source.toUpperCase() : "MANUAL";
+  const openingCashSourcePreview = ocsQ === "CARRY_FROM_PRIOR" ? "CARRY_FROM_PRIOR" : "MANUAL";
+
+  const openingCashParsed = parseFloat(String(req.query.opening_cash ?? ""));
+  const suggestedOpening = parseFloat(String(req.query.suggested_opening ?? ""));
+  let opening: number;
+  if (Number.isFinite(openingCashParsed)) {
+    opening = openingCashParsed;
+  } else if (Number.isFinite(suggestedOpening)) {
+    opening = suggestedOpening;
+  } else if (openingCashSourcePreview === "CARRY_FROM_PRIOR" && priorShiftPreview) {
+    opening = priorShiftPreview.closingCashActual;
+  } else {
+    opening = 0;
+  }
+
+  const shiftLabel =
+    typeof req.query.shift_label === "string" ? req.query.shift_label.trim().slice(0, 64) : "";
+
+  const priorBanner = priorShiftPreview
+    ? `<p class="muted" style="font-size:13px;margin:0 0 12px;padding:10px;border:1px solid #bae6fd;border-radius:10px;background:#f0f9ff">Handover from <strong>${escapeHtml(
+        priorShiftPreview.shiftSlot
+      )}</strong> shift on <strong>${escapeHtml(priorShiftPreview.businessDate)}</strong> (closed ${escapeHtml(
+      priorShiftPreview.closedAt.toISOString().slice(0, 16).replace("T", " ")
+    )} UTC). Carry-forward basis: <strong>${priorShiftPreview.closingCashActual.toFixed(3)}</strong> ${escapeHtml(hotel.currency)}.</p>`
+    : "";
+
+  let snapshotHtml = "";
+  let computed: Awaited<ReturnType<typeof computeShiftSnapshot>> | null = null;
+  if (shiftEnd.getTime() > shiftStart.getTime()) {
+    try {
+      computed = await computeShiftSnapshot({
+        hotelId: hotel.id,
+        currency: hotel.currency,
+        shiftStart,
+        shiftEnd
+      });
+      const payRows = computed.paymentBuckets
+        .map(
+          (b) =>
+            `<tr><td>${escapeHtml(b.label)}</td><td>${escapeHtml(String(b.count))}</td><td>${escapeHtml(String(b.amount.toFixed(3)))} ${escapeHtml(hotel.currency)}</td></tr>`
+        )
+        .join("");
+      snapshotHtml = `
+<section style="margin:16px 0;padding:14px;border:1px solid #d8dee6;border-radius:12px;background:#f8fafc">
+  <h3 style="margin-top:0;font-size:15px">Auto summary (folio activity, chargeDate in range)</h3>
+  <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px">
+    <article class="stat"><h3>Lines</h3><p>${computed.transactionCount}</p></article>
+    <article class="stat"><h3>Charges (net)</h3><p>${computed.revenueTotal.toFixed(3)}</p></article>
+    <article class="stat"><h3>Payments in</h3><p>${computed.totalPaymentsRecorded.toFixed(3)}</p></article>
+    <article class="stat"><h3>Cash in (folio)</h3><p>${computed.cashReceived.toFixed(3)}</p></article>
+  </div>
+  <p class="muted" style="font-size:12px;margin:0 0 8px">Room ${computed.revenueRoom.toFixed(3)} · F&amp;B ${computed.revenueFb.toFixed(3)} · Activity ${computed.revenueActivity.toFixed(3)} · Other ${computed.revenueOtherCharges.toFixed(3)} (${hotel.currency})</p>
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr><th>Method</th><th>Count</th><th>Amount</th></tr></thead>
+    <tbody>${payRows || `<tr><td colspan="3" class="muted">No payments</td></tr>`}</tbody>
+  </table>
+  <p class="muted" style="font-size:12px;margin-top:10px">Outstanding: ${computed.pendingPaymentIntents} pending payment intent(s), ${computed.pendingPaymentAmount.toFixed(3)} ${hotel.currency} total.</p>
+  <p class="muted" style="font-size:12px;margin-top:8px">If there were <strong>no</strong> cash expenses and <strong>no</strong> bank deposit, expected drawer cash would be <strong>${(opening + computed.cashReceived).toFixed(3)}</strong> ${escapeHtml(hotel.currency)} (opening + folio cash in).</p>
+</section>`;
+    } catch (e) {
+      snapshotHtml = `<p class="badge alert">Could not load summary: ${escapeHtml(e instanceof Error ? e.message : String(e))}</p>`;
+    }
+  } else {
+    snapshotHtml = `<p class="muted">Set shift end after shift start to see the summary.</p>`;
+  }
+
+  const history = await prisma.frontDeskShift.findMany({
+    where: { hotelId: hotel.id },
+    orderBy: { closedAt: "desc" },
+    take: 15,
+    include: { closedBy: { select: { fullName: true, email: true } } }
+  });
+  const histRows = history
+    .map((s) => {
+      const reportHref = `/admin/shift-report/${encodeURIComponent(s.id)}`;
+      const slotShow = s.shiftLabel?.trim()
+        ? `${escapeHtml(s.shiftSlot)} (${escapeHtml(s.shiftLabel.trim())})`
+        : escapeHtml(s.shiftSlot);
+      return `<tr>
+  <td>${slotShow}</td>
+  <td>${escapeHtml(s.businessDate)}</td>
+  <td>${escapeHtml(formatDateTimeLocalForInput(s.shiftStart))} → ${escapeHtml(formatDateTimeLocalForInput(s.shiftEnd))}</td>
+  <td>${escapeHtml(s.closedAt.toISOString().slice(0, 16).replace("T", " "))}</td>
+  <td>${s.closedBy ? escapeHtml(s.closedBy.fullName) : "—"}</td>
+  <td>${s.expectedClosingCash.toFixed(3)}</td>
+  <td>${s.closingCashActual.toFixed(3)}</td>
+  <td style="font-weight:700;color:${s.cashVariance === 0 ? "#166534" : "#991b1b"}">${s.cashVariance.toFixed(3)}</td>
+  <td><span class="badge ok">Locked</span> <a href="${reportHref}">Report</a></td>
+</tr>`;
+    })
+    .join("");
+
+  const slotOptionsHtml = ["MORNING", "EVENING", "NIGHT", "CUSTOM"]
+    .map((s) => {
+      const lab = s === "CUSTOM" ? "Custom (optional label below)" : s.charAt(0) + s.slice(1).toLowerCase();
+      return `<option value="${s}" ${shiftSlot === s ? "selected" : ""}>${escapeHtml(lab)}</option>`;
+    })
+    .join("");
+
+  const ocsCheckedManual = openingCashSourcePreview === "MANUAL" ? "checked" : "";
+  const ocsCheckedCarry = openingCashSourcePreview === "CARRY_FROM_PRIOR" ? "checked" : "";
+
+  const content = `
+<h2>Shift close / cashier report</h2>
+${flashOk}${reportHint}${errFlash}
+<p class="muted">Review folio payments and charges for the shift window, reconcile cash, record petty payouts and bank deposits, then close. Each closed shift is independent — pick a <strong>slot</strong> and <strong>business date</strong> so morning/evening/night reports stay separate. <a href="/admin/shifts">View all shifts</a>.</p>
+${priorBanner}
+${snapshotHtml}
+<form method="get" action="/admin/shift-close" style="margin:14px 0;padding:14px;border:1px solid #d8dee6;border-radius:12px">
+  <h3 style="margin-top:0;font-size:15px">1. Shift identity, window &amp; opening float</h3>
+  <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+    <label>Shift slot
+      <select name="shift_slot" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;min-width:160px">${slotOptionsHtml}</select>
+    </label>
+    <label>Business date
+      <input type="date" name="business_date" value="${escapeHtml(businessDate)}" required style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    </label>
+    <label>Custom label (optional)
+      <input type="text" name="shift_label" value="${escapeHtml(shiftLabel)}" maxlength="64" placeholder="e.g. Pre-event" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;width:200px" />
+    </label>
+    <label>Shift start<input type="datetime-local" name="shift_start" value="${escapeHtml(formatDateTimeLocalForInput(shiftStart))}" required style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>Shift end<input type="datetime-local" name="shift_end" value="${escapeHtml(formatDateTimeLocalForInput(shiftEnd))}" required style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>Prior shift (handover from)
+      <input type="text" name="prior_shift_id" value="${escapeHtml(priorIdQ)}" placeholder="Paste closed shift ID" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;width:220px" />
+    </label>
+    <div style="min-width:200px">
+      <span style="font-size:13px;display:block;margin-bottom:4px">Opening float source</span>
+      <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="radio" name="opening_cash_source" value="MANUAL" ${ocsCheckedManual} /> Manual</label>
+      <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="radio" name="opening_cash_source" value="CARRY_FROM_PRIOR" ${ocsCheckedCarry} /> Carry from prior shift</label>
+    </div>
+    <label>Opening cash (${escapeHtml(hotel.currency)})<input type="number" name="opening_cash" value="${opening}" min="0" step="0.001" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;width:140px" /></label>
+    <button type="submit" class="btn-link primary" style="border:0;padding:10px 16px">Refresh summary</button>
+  </div>
+</form>
+
+<form method="post" action="/admin/shift-close" style="margin:14px 0;padding:14px;border:1px solid #d8dee6;border-radius:12px">
+  <h3 style="margin-top:0;font-size:15px">2. Close shift (cash &amp; expenses)</h3>
+  <input type="hidden" name="shift_start" value="${escapeHtml(formatDateTimeLocalForInput(shiftStart))}" />
+  <input type="hidden" name="shift_end" value="${escapeHtml(formatDateTimeLocalForInput(shiftEnd))}" />
+  <input type="hidden" name="opening_cash" value="${opening}" />
+  <input type="hidden" name="shift_slot" value="${escapeHtml(shiftSlot)}" />
+  <input type="hidden" name="business_date" value="${escapeHtml(businessDate)}" />
+  <input type="hidden" name="shift_label" value="${escapeHtml(shiftLabel)}" />
+  <input type="hidden" name="prior_shift_id" value="${escapeHtml(priorIdQ)}" />
+  <input type="hidden" name="opening_cash_source" value="${escapeHtml(openingCashSourcePreview)}" />
+  <label style="display:block;margin-top:4px;font-size:13px">Handover / desk notes (optional)
+    <textarea name="handover_note" rows="3" maxlength="2000" style="display:block;margin-top:6px;width:100%;max-width:520px;padding:8px;border:1px solid #d8dee6;border-radius:8px;font-family:inherit"></textarea>
+  </label>
+  <label>Counted cash in drawer (${escapeHtml(hotel.currency)}) — actual
+    <input type="number" name="closing_cash_actual" min="0" step="0.001" required style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;width:180px" />
+  </label>
+  <label style="display:block;margin-top:10px">Bank deposit (cash taken to bank, ${escapeHtml(hotel.currency)})
+    <input type="number" name="bank_deposit" value="0" min="0" step="0.001" style="display:block;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;width:180px" />
+  </label>
+  <p class="muted" style="font-size:12px;margin:12px 0 6px">Cash expenses / payouts (petty cash out) — ${escapeHtml(hotel.currency)}</p>
+  <table style="width:100%;max-width:720px;border-collapse:collapse;font-size:13px">
+    <thead><tr><th>Category</th><th>Amount</th><th>Note</th></tr></thead>
+    <tbody>
+      ${[1, 2, 3, 4, 5]
+        .map(
+          (i) => `<tr>
+        <td><input name="exp_cat_${i}" placeholder="e.g. SUPPLIES" style="width:100%;padding:6px;border:1px solid #d8dee6;border-radius:6px" /></td>
+        <td><input type="number" name="exp_amt_${i}" min="0" step="0.001" placeholder="0" style="width:120px;padding:6px;border:1px solid #d8dee6;border-radius:6px" /></td>
+        <td><input name="exp_note_${i}" placeholder="optional" style="width:100%;padding:6px;border:1px solid #d8dee6;border-radius:6px" /></td>
+      </tr>`
+        )
+        .join("")}
+    </tbody>
+  </table>
+  <p class="muted" style="font-size:12px">Expected closing cash = opening + folio cash in − expenses − bank deposit. Variance = counted − expected.</p>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:14px">
+    <input type="checkbox" name="confirm_close" value="1" required /> I confirm this shift is accurate and should be locked.
+  </label>
+  <button type="submit" style="margin-top:12px;padding:10px 18px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Close &amp; lock shift</button>
+</form>
+
+<h3 style="margin-top:22px">Recent closed shifts</h3>
+<table>
+  <thead><tr><th>Slot</th><th>Date</th><th>Window</th><th>Closed (UTC)</th><th>By</th><th>Expected</th><th>Counted</th><th>Var</th><th></th></tr></thead>
+  <tbody>${histRows.length ? histRows : `<tr><td colspan="9" class="muted">No shifts closed yet.</td></tr>`}</tbody>
+</table>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/shift-close", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const session = getSession(req);
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, currency: true }
+  });
+  if (!hotel || !session) {
+    res.redirect("/admin/shift-close?err=" + encodeURIComponent("Session or hotel missing."));
+    return;
+  }
+  if (req.body?.confirm_close !== "1" && req.body?.confirm_close !== "on") {
+    res.redirect("/admin/shift-close?err=" + encodeURIComponent("Confirm the shift to close."));
+    return;
+  }
+
+  const shiftStart = parseDateTimeLocalInput(req.body.shift_start, new Date());
+  const shiftEnd = parseDateTimeLocalInput(req.body.shift_end, new Date());
+  const openingCash = parseFloat(String(req.body.opening_cash ?? "0"));
+  const closingCashActual = parseFloat(String(req.body.closing_cash_actual ?? ""));
+  const bankDeposit = parseFloat(String(req.body.bank_deposit ?? "0"));
+
+  const qSlotRaw = String(req.body.shift_slot ?? "CUSTOM").toUpperCase();
+  const shiftSlot = ["MORNING", "EVENING", "NIGHT", "CUSTOM"].includes(qSlotRaw) ? qSlotRaw : "CUSTOM";
+
+  const bdRaw = String(req.body.business_date ?? "").trim();
+  const businessDate = /^\d{4}-\d{2}-\d{2}$/.test(bdRaw) ? bdRaw : formatBusinessDateLocal(shiftStart);
+
+  const shiftLabel = String(req.body.shift_label ?? "").trim().slice(0, 64) || null;
+
+  const ocsBody = String(req.body.opening_cash_source ?? "MANUAL").toUpperCase();
+  const openingCashSource = ocsBody === "CARRY_FROM_PRIOR" ? "CARRY_FROM_PRIOR" : "MANUAL";
+
+  const priorShiftIdRaw = String(req.body.prior_shift_id ?? "").trim();
+  let priorShift: {
+    id: string;
+    closingCashActual: number;
+    businessDate: string;
+    shiftSlot: string;
+    closedAt: Date;
+  } | null = null;
+  if (priorShiftIdRaw) {
+    const p = await prisma.frontDeskShift.findFirst({
+      where: { id: priorShiftIdRaw, hotelId: hotel.id, locked: true, status: "CLOSED" },
+      select: { id: true, closingCashActual: true, businessDate: true, shiftSlot: true, closedAt: true }
+    });
+    if (!p) {
+      res.redirect("/admin/shift-close?err=" + encodeURIComponent("Prior shift not found or not locked."));
+      return;
+    }
+    priorShift = p;
+  }
+
+  if (openingCashSource === "CARRY_FROM_PRIOR" && !priorShift) {
+    res.redirect(
+      "/admin/shift-close?err=" + encodeURIComponent("Carry-forward requires a valid prior shift ID, or choose Manual opening.")
+    );
+    return;
+  }
+
+  const handoverNote = String(req.body.handover_note ?? "").trim().slice(0, 2000) || null;
+
+  if (!(shiftEnd.getTime() > shiftStart.getTime())) {
+    res.redirect("/admin/shift-close?err=" + encodeURIComponent("Shift end must be after start."));
+    return;
+  }
+  if (!Number.isFinite(closingCashActual) || closingCashActual < 0) {
+    res.redirect("/admin/shift-close?err=" + encodeURIComponent("Enter a valid counted cash amount."));
+    return;
+  }
+
+  if (shiftSlot !== "CUSTOM") {
+    const dup = await prisma.frontDeskShift.findFirst({
+      where: { hotelId: hotel.id, businessDate, shiftSlot }
+    });
+    if (dup) {
+      res.redirect(
+        "/admin/shift-close?err=" +
+          encodeURIComponent(
+            `A ${shiftSlot} shift for ${businessDate} is already closed. Use CUSTOM or another date, or consult shift history.`
+          )
+      );
+      return;
+    }
+  }
+
+  const expenseLines: { category: string; amount: number; note: string | null }[] = [];
+  for (let i = 1; i <= 5; i++) {
+    const cat = String(req.body[`exp_cat_${i}`] ?? "").trim();
+    const amtRaw = parseFloat(String(req.body[`exp_amt_${i}`] ?? ""));
+    const note = String(req.body[`exp_note_${i}`] ?? "").trim().slice(0, 500) || null;
+    if (!cat && (!Number.isFinite(amtRaw) || amtRaw <= 0)) continue;
+    if (!Number.isFinite(amtRaw) || amtRaw <= 0) continue;
+    expenseLines.push({ category: cat.slice(0, 48) || "OTHER", amount: amtRaw, note });
+  }
+  const expenseTotal = expenseLines.reduce((s, e) => s + e.amount, 0);
+
+  let computed: Awaited<ReturnType<typeof computeShiftSnapshot>>;
+  try {
+    computed = await computeShiftSnapshot({
+      hotelId: hotel.id,
+      currency: hotel.currency,
+      shiftStart,
+      shiftEnd
+    });
+  } catch (e) {
+    res.redirect("/admin/shift-close?err=" + encodeURIComponent(e instanceof Error ? e.message : "Compute failed"));
+    return;
+  }
+
+  const opening = Number.isFinite(openingCash) ? openingCash : 0;
+  const bank = Number.isFinite(bankDeposit) && bankDeposit >= 0 ? bankDeposit : 0;
+  const expectedClosing = computeExpectedClosingCash({
+    openingCash: opening,
+    cashReceived: computed.cashReceived,
+    expenseTotal,
+    bankDepositAmount: bank
+  });
+  const variance = closingCashActual - expectedClosing;
+
+  const closedNow = new Date();
+  const handoverSnap =
+    priorShift != null
+      ? {
+          priorShiftId: priorShift.id,
+          priorShiftSlot: priorShift.shiftSlot,
+          priorBusinessDate: priorShift.businessDate,
+          priorClosingCounted: priorShift.closingCashActual,
+          handoverAt: closedNow.toISOString(),
+          handedOverByUserId: session.staffId,
+          receivedByUserId: null as string | null,
+          openingCashSource,
+          handoverNote
+        }
+      : undefined;
+
+  const snapshotJson = JSON.stringify({
+    meta: {
+      shiftSlot,
+      businessDate,
+      shiftLabel,
+      openingCashSource,
+      handoverNote,
+      priorShiftId: priorShift?.id ?? null
+    },
+    handover: handoverSnap,
+    computed,
+    expenses: expenseLines,
+    openingCash: opening,
+    bankDepositAmount: bank,
+    expectedClosingCash: expectedClosing,
+    closingCashActual,
+    cashVariance: variance
+  });
+
+  let createdId: string;
+  try {
+    const row = await prisma.frontDeskShift.create({
+      data: {
+        hotelId: hotel.id,
+        shiftSlot,
+        shiftLabel,
+        businessDate,
+        shiftStart,
+        shiftEnd,
+        closedAt: closedNow,
+        closedByUserId: session.staffId,
+        openingCash: opening,
+        openingCashSource,
+        priorShiftId: priorShift?.id ?? null,
+        handoverNote,
+        closingCashActual,
+        bankDepositAmount: bank,
+        expectedClosingCash: expectedClosing,
+        cashVariance: variance,
+        currency: hotel.currency,
+        status: "CLOSED",
+        locked: true,
+        snapshotJson,
+        expenses: {
+          create: expenseLines.map((e) => ({
+            category: e.category,
+            amount: e.amount,
+            note: e.note
+          }))
+        }
+      }
+    });
+    createdId = row.id;
+  } catch (e) {
+    res.redirect("/admin/shift-close?err=" + encodeURIComponent(e instanceof Error ? e.message : "Save failed"));
+    return;
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "FRONT_DESK_SHIFT_CLOSED",
+    entityType: "FrontDeskShift",
+    entityId: createdId,
+    metadata: {
+      shiftSlot,
+      businessDate,
+      priorShiftId: priorShift?.id ?? null,
+      shiftStart: shiftStart.toISOString(),
+      shiftEnd: shiftEnd.toISOString(),
+      expectedClosingCash: expectedClosing,
+      closingCashActual,
+      variance
+    }
+  });
+
+  res.redirect("/admin/shift-close?closed=1&report_id=" + encodeURIComponent(createdId));
 });
 
 adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (req, res) => {
@@ -7253,6 +7845,107 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
 
 adminRouter.get("/reports", requirePermission("REPORTS", "VIEW"), (_req, res) => {
   res.redirect("/admin/reports-center");
+});
+
+adminRouter.get("/daily-digest", requireAuth, async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Daily digest</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const logs = await prisma.hotelDailyDigestLog.findMany({
+    where: { hotelId: hotel.id },
+    orderBy: { digestKey: "desc" },
+    take: 25
+  });
+  const tz = (hotel.timezone ?? "Asia/Muscat").trim();
+  const sendTime = (process.env.HOTEL_DIGEST_TIME ?? "07:15").trim();
+  const enabled = process.env.HOTEL_DIGEST_ENABLED !== "false";
+  const smtpOk = isOwnerDigestSmtpConfigured();
+  const sentFlash = req.query.sent === "1";
+  const errFlash = typeof req.query.err === "string" ? req.query.err : "";
+
+  const logRows = logs
+    .map((row) => {
+      let sumLine = "—";
+      if (row.summaryJson) {
+        try {
+          const j = JSON.parse(row.summaryJson) as { bookingsTotal?: number; alertCount?: number };
+          sumLine = `Bookings ${j.bookingsTotal ?? "—"} · alerts ${j.alertCount ?? "—"}`;
+        } catch {
+          /* ignore */
+        }
+      }
+      return `<tr>
+  <td>${escapeHtml(row.digestKey)}</td>
+  <td>${escapeHtml(row.status)}</td>
+  <td>${row.sentAt ? escapeHtml(row.sentAt.toISOString().slice(0, 19).replace("T", " ")) : "—"}</td>
+  <td>${row.recipientsCsv ? escapeHtml(row.recipientsCsv.length > 90 ? `${row.recipientsCsv.slice(0, 90)}…` : row.recipientsCsv) : "—"}</td>
+  <td class="muted" style="font-size:12px">${escapeHtml(sumLine)}</td>
+  <td>${row.errorMessage ? escapeHtml(row.errorMessage.slice(0, 120)) : "—"}</td>
+</tr>`;
+    })
+    .join("");
+
+  const flash =
+    sentFlash && !errFlash
+      ? '<p class="badge ok" style="display:inline-block;margin-bottom:12px">Digest run finished. See log below.</p>'
+      : errFlash
+        ? `<p class="badge alert" style="display:inline-block;margin-bottom:12px">${escapeHtml(errFlash)}</p>`
+        : "";
+
+  const content = `
+<h2>Daily digest email</h2>
+<p class="muted">One automated email per property per day in the hotel timezone. Recipients: active <strong>OWNER</strong> and <strong>MANAGER</strong> users; if none, <code>ADMIN_EMAIL</code>. Content is scoped to this hotel only.</p>
+${flash}
+<div class="grid-2" style="margin-bottom:14px;align-items:start">
+  <section>
+    <h3 style="margin-top:0">Schedule</h3>
+    <table>
+      <tbody>
+        <tr><th>Scheduler</th><td>${enabled ? '<span class="badge ok">On</span>' : '<span class="badge pending">Off</span>'}</td></tr>
+        <tr><th>Hotel timezone</th><td>${escapeHtml(tz)}</td></tr>
+        <tr><th>Send time (local)</th><td>${escapeHtml(sendTime)}</td></tr>
+        <tr><th>SMTP</th><td>${smtpOk ? '<span class="badge ok">Configured</span>' : '<span class="badge alert">Not configured</span>'}</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h3 style="margin-top:0">Send now</h3>
+    <form method="post" action="/admin/daily-digest/send" style="margin:0">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin-bottom:10px">
+        <input type="checkbox" name="force" value="1" /> Force resend even if today already sent
+      </label>
+      <button type="submit" style="padding:9px 14px;border:0;border-radius:10px;background:#075e54;color:#fff;font-weight:700">Run digest now</button>
+    </form>
+  </section>
+</div>
+<h3>Recent log</h3>
+<table>
+  <thead><tr><th>Day</th><th>Status</th><th>Sent (UTC)</th><th>Recipients</th><th>Summary</th><th>Error</th></tr></thead>
+  <tbody>${logRows.length ? logRows : `<tr><td colspan="6" class="muted">No rows yet.</td></tr>`}</tbody>
+</table>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/daily-digest/send", requireAuth, async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" }
+  });
+  if (!hotel) {
+    res.redirect("/admin/daily-digest?err=" + encodeURIComponent("No hotel"));
+    return;
+  }
+  const force =
+    req.body?.force === "1" || req.body?.force === "on" || req.body?.force === true || req.body?.force === "true";
+  const result = await runHotelDailyDigest({ hotelId: hotel.id, manual: true, force });
+  const p = new URLSearchParams();
+  if (result.ok) p.set("sent", "1");
+  else p.set("err", encodeURIComponent(result.message ?? result.status));
+  res.redirect(`/admin/daily-digest?${p.toString()}`);
 });
 
 adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (req, res) => {

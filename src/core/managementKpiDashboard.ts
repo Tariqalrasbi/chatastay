@@ -112,10 +112,15 @@ export async function loadManagementKpis(params: {
   rangeStart: Date;
   rangeEndExclusive: Date;
   roomTypes: Array<{ id: string; totalInventory: number }>;
+  /**
+   * When true (single-day range in hotel local TZ), arrivals/departures/stayovers use `rangeStart`→`rangeEndExclusive`
+   * instead of server-local “today” — required for per-hotel daily digests.
+   */
+  operationalSnapshotUsesRange?: boolean;
 }): Promise<ManagementKpiResult> {
   const { hotelId, rangeStart, rangeEndExclusive } = params;
-  const opDay = resolveOperationalDay(rangeStart, rangeEndExclusive);
-  const opNext = addDays(opDay, 1);
+  const opDay = params.operationalSnapshotUsesRange ? rangeStart : resolveOperationalDay(rangeStart, rangeEndExclusive);
+  const opNext = params.operationalSnapshotUsesRange ? rangeEndExclusive : addDays(opDay, 1);
 
   const daysInRange = Math.max(
     1,
@@ -310,8 +315,9 @@ export async function loadManagementKpis(params: {
     }
   });
 
-  const opNote =
-    opDay.getTime() === startOfDay(new Date()).getTime()
+  const opNote = params.operationalSnapshotUsesRange
+    ? "Operational row uses the selected civil day window (hotel timezone when used for daily digest)."
+    : opDay.getTime() === startOfDay(new Date()).getTime()
       ? "Operational row uses today (arrivals / departures / stayovers)."
       : `Operational row uses ${formatYmd(opDay)} (selected range is in the past or future).`;
 
