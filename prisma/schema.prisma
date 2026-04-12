@@ -273,6 +273,7 @@ model Hotel {
   calendarSessions CalendarSession[]
   menuItems      MenuItem[]
   fbOrders       FbOrder[]
+  fbOperationalExpenses FbOperationalExpense[]
   outletOrderTickets OutletOrderTicket[]
   folioTransactions FolioTransaction[]
   folios         Folio[]
@@ -324,6 +325,7 @@ model HotelUser {
   bookingStatusHistories BookingStatusHistory[]
   notifications          Notification[]
   closedFrontDeskShifts  FrontDeskShift[] @relation("ShiftClosedBy")
+  fbOperationalExpensesCreated FbOperationalExpense[] @relation("FbOpExpenseCreatedBy")
 }
 
 /// Locked cashier / front-desk shift close with cash reconciliation (folio-based).
@@ -774,6 +776,24 @@ model FbOrderLine {
   lineTotal    Float
 
   @@index([orderId])
+}
+
+/// Grocery / supplies / F&B operating costs (not guest folio).
+model FbOperationalExpense {
+  id              String    @id @default(cuid())
+  hotelId         String
+  hotel           Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  expenseDate     DateTime
+  amount          Float
+  category        String
+  outlet          String?
+  paymentMethod   String?
+  referenceNote   String?
+  createdByUserId String?
+  createdBy       HotelUser? @relation("FbOpExpenseCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime  @default(now())
+
+  @@index([hotelId, expenseDate])
 }
 
 /// Guest folio line item (blueprint name: FolioLine). Single ledger model — do not add a duplicate FolioLine table.
