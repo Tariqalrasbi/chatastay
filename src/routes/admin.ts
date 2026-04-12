@@ -15,12 +15,16 @@ import {
   FolioOutletCategory,
   FolioTransactionType,
   FolioTxnPaymentStatus,
+  HousekeepingTaskSource,
+  HousekeepingTaskStatus,
   MessageDirection,
+  NotificationStatus,
   OutletTicketSource,
   OutletTicketStatus,
   PaymentStatus,
   SegmentTagKind,
-  SegmentTagSource
+  SegmentTagSource,
+  UserRole
 } from "@prisma/client";
 import Stripe from "stripe";
 import nodemailer from "nodemailer";
@@ -95,11 +99,41 @@ export const adminRouter = Router();
 const viewsDir = path.join(process.cwd(), "src", "views");
 const sessionCookieName = "chatastay_admin_session";
 type PermissionAction = "VIEW" | "EDIT" | "CREATE" | "DELETE" | "MANAGE";
-type PermissionModule = "ROOMS" | "BOOKINGS" | "REPORTS" | "BILLING" | "CONVERSATIONS" | "USERS";
+type PermissionModule =
+  | "ROOMS"
+  | "BOOKINGS"
+  | "REPORTS"
+  | "BILLING"
+  | "CONVERSATIONS"
+  | "USERS"
+  | "OUTLET"
+  | "HOUSEKEEPING";
 type ModulePermissionSet = Record<PermissionAction, boolean>;
 type PermissionMatrix = Record<PermissionModule, ModulePermissionSet>;
 
-const permissionModules: PermissionModule[] = ["ROOMS", "BOOKINGS", "REPORTS", "BILLING", "CONVERSATIONS", "USERS"];
+const permissionModules: PermissionModule[] = [
+  "ROOMS",
+  "BOOKINGS",
+  "REPORTS",
+  "BILLING",
+  "CONVERSATIONS",
+  "USERS",
+  "OUTLET",
+  "HOUSEKEEPING"
+];
+
+/** Short labels for hotel staff UX (checkbox fieldset legends and summaries). */
+const permissionModuleLabels: Record<PermissionModule, string> = {
+  ROOMS: "Rooms & room board",
+  BOOKINGS: "Reservations & bookings",
+  REPORTS: "Reports & analytics",
+  BILLING: "Billing & subscription",
+  CONVERSATIONS: "WhatsApp / conversations",
+  USERS: "User administration",
+  OUTLET: "Restaurant & café — KOT, orders, outlet board",
+  HOUSEKEEPING: "Housekeeping — tasks, cleaning queue, room readiness"
+};
+
 const permissionActions: PermissionAction[] = ["VIEW", "EDIT", "CREATE", "DELETE", "MANAGE"];
 const adminPermissionsFile = path.join(process.cwd(), "admin-user-permissions.json");
 const uploadsDir = path.join(process.cwd(), "src", "public", "uploads", "id-cards");
@@ -122,7 +156,11 @@ type AdminSession = {
 };
 
 const activeSessions = new Map<string, AdminSession>();
-const auditActorContext = new AsyncLocalStorage<{ staffId?: string; staffEmail?: string }>();
+const auditActorContext = new AsyncLocalStorage<{
+  staffId?: string;
+  staffEmail?: string;
+  session?: AdminSession;
+}>();
 const passwordResetTtlMs = 60 * 60 * 1000; // 1 hour
 const passwordResetTokens = new Map<string, { email: string; expiresAt: number }>();
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
@@ -164,7 +202,9 @@ function buildFullPermissions(): PermissionMatrix {
     REPORTS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
     BILLING: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
     CONVERSATIONS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
-    USERS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true }
+    USERS: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    OUTLET: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true },
+    HOUSEKEEPING: { VIEW: true, EDIT: true, CREATE: true, DELETE: true, MANAGE: true }
   };
 }
 
@@ -175,7 +215,9 @@ function buildNoPermissions(): PermissionMatrix {
     REPORTS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
     BILLING: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
     CONVERSATIONS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
-    USERS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false }
+    USERS: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    OUTLET: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false },
+    HOUSEKEEPING: { VIEW: false, EDIT: false, CREATE: false, DELETE: false, MANAGE: false }
   };
 }
 
@@ -236,7 +278,14 @@ function getPermissionsForEmail(email: string): PermissionMatrix {
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   if (email.toLowerCase() === adminEmail) return buildFullPermissions();
   const store = readPermissionStore();
-  return store[email.toLowerCase()] ?? buildNoPermissions();
+  return normalizePermissionMatrix(store[email.toLowerCase()] ?? buildNoPermissions());
+}
+
+function effectivePermissionsForHotelUser(email: string, role: UserRole): PermissionMatrix {
+  const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
+  if (email.toLowerCase() === adminEmail) return buildFullPermissions();
+  const store = readPermissionStore();
+  return normalizePermissionMatrix(store[email.toLowerCase()] ?? defaultPermissionsForRole(role));
 }
 
 async function sendPasswordResetEmail(to: string, resetLink: string): Promise<boolean> {
@@ -554,6 +603,13 @@ function getAdminLiveScript(): string {
 
 function renderLayout(content: string, authenticated: boolean): string {
   const layout = readView("layout.html");
+  const perm = authenticated ? auditActorContext.getStore()?.session?.permissions : undefined;
+  const canNavHousekeeping =
+    !perm ||
+    hasPermission(perm, "HOUSEKEEPING", "VIEW") ||
+    hasPermission(perm, "ROOMS", "EDIT");
+  const canNavOutlet =
+    !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "ROOMS", "VIEW");
   const navHtml = authenticated
     ? [
         '<a class="top-level-link" data-top-group="dashboard" href="/admin/room-board">Dashboard</a>',
@@ -569,6 +625,7 @@ function renderLayout(content: string, authenticated: boolean): string {
     ? [
         '<div class="section-tabs" data-section="dashboard">',
         '<a href="/admin/room-board">Room Board</a>',
+        ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
         '<a href="/admin/handover-sheet">Handover Sheet</a>',
         "</div>",
         '<div class="section-tabs" data-section="frontdesk">',
@@ -580,6 +637,7 @@ function renderLayout(content: string, authenticated: boolean): string {
         '<div class="section-tabs" data-section="reservations">',
         '<a href="/admin/bookings">Bookings</a>',
         '<a href="/admin/fb/menu">Restaurant &amp; Café</a>',
+        ...(canNavOutlet ? ['<a href="/admin/restaurant-ops">Restaurant ops guide</a>'] : []),
         '<a href="/admin/outlet-dashboard">Outlet board</a>',
         '<a href="/admin/calendar">Calendar</a>',
         '<a href="/admin/conversations" data-admin-conv-link>Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
@@ -1266,6 +1324,68 @@ async function logAudit(params: {
   });
 }
 
+async function ensureHousekeepingTaskForCleaningTx(
+  tx: Prisma.TransactionClient,
+  params: {
+    hotelId: string;
+    roomUnitId: string;
+    source: HousekeepingTaskSource;
+    bookingId?: string | null;
+    createdByUserId?: string | null;
+    notes?: string | null;
+  }
+): Promise<{ created: boolean; taskId: string | null }> {
+  const open = await tx.housekeepingTask.findFirst({
+    where: {
+      hotelId: params.hotelId,
+      roomUnitId: params.roomUnitId,
+      status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+    },
+    select: { id: true }
+  });
+  if (open) return { created: false, taskId: open.id };
+  const task = await tx.housekeepingTask.create({
+    data: {
+      hotelId: params.hotelId,
+      roomUnitId: params.roomUnitId,
+      status: HousekeepingTaskStatus.PENDING,
+      source: params.source,
+      bookingId: params.bookingId ?? undefined,
+      createdByUserId: params.createdByUserId ?? undefined,
+      notes: params.notes ?? undefined
+    }
+  });
+  return { created: true, taskId: task.id };
+}
+
+async function notifyHousekeepingStaff(opts: {
+  hotelId: string;
+  title: string;
+  body: string;
+  type: string;
+  payloadJson?: string;
+}): Promise<void> {
+  const users = await prisma.hotelUser.findMany({
+    where: { hotelId: opts.hotelId, isActive: true },
+    select: { id: true, email: true, role: true }
+  });
+  for (const u of users) {
+    const matrix = effectivePermissionsForHotelUser(u.email, u.role);
+    if (!hasPermission(matrix, "HOUSEKEEPING", "VIEW")) continue;
+    await prisma.notification.create({
+      data: {
+        hotelId: opts.hotelId,
+        hotelUserId: u.id,
+        type: opts.type,
+        title: opts.title,
+        body: opts.body,
+        payloadJson: opts.payloadJson,
+        status: "PENDING"
+      }
+    });
+  }
+}
+
 function parseCookies(req: Request): Record<string, string> {
   const rawCookie = req.headers.cookie;
   if (!rawCookie) return {};
@@ -1376,6 +1496,42 @@ function requirePermissionJson(moduleName: PermissionModule, action: PermissionA
   };
 }
 
+/** Grant access if any of the module/action pairs matches (OR). */
+function requirePermissionAny(checks: Array<{ module: PermissionModule; action: PermissionAction }>) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const session = getSession(req);
+    if (!session) {
+      res.redirect("/admin/login");
+      return;
+    }
+    const ok = checks.some((c) => hasPermission(session.permissions, c.module, c.action));
+    if (!ok) {
+      res
+        .status(403)
+        .type("html")
+        .send(renderLayout("<h2>Access denied</h2><p>You do not have permission to access this module.</p>", true));
+      return;
+    }
+    next();
+  };
+}
+
+function requirePermissionAnyJson(checks: Array<{ module: PermissionModule; action: PermissionAction }>) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const session = getSession(req);
+    if (!session) {
+      res.status(401).json({ ok: false, error: "unauthorized" });
+      return;
+    }
+    const ok = checks.some((c) => hasPermission(session.permissions, c.module, c.action));
+    if (!ok) {
+      res.status(403).json({ ok: false, error: "forbidden" });
+      return;
+    }
+    next();
+  };
+}
+
 function classifyConversationActivity(
   state: ConversationState,
   hasBooking: boolean
@@ -1397,7 +1553,8 @@ adminRouter.use((req, _res, next) => {
   auditActorContext.run(
     {
       staffId: session?.staffId,
-      staffEmail: session?.email ?? process.env.ADMIN_EMAIL ?? "admin@chatastay.local"
+      staffEmail: session?.email ?? process.env.ADMIN_EMAIL ?? "admin@chatastay.local",
+      session
     },
     () => next()
   );
@@ -1436,7 +1593,7 @@ adminRouter.post("/login", async (req, res) => {
     if (hotelUser?.isActive && hotelUser.passwordHash) {
       if (verifyPassword(password, hotelUser.passwordHash)) {
         const store = readPermissionStore();
-        const effectivePermissions = store[email] ?? defaultPermissionsForRole(hotelUser.role);
+        const effectivePermissions = effectivePermissionsForHotelUser(email, hotelUser.role);
         const token = crypto.randomUUID();
         activeSessions.set(token, {
           staffId: hotelUser.id,
@@ -1648,9 +1805,10 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
 
   const rows = users
     .map((user) => {
-      const perms = store[user.email.toLowerCase()] ?? buildNoPermissions();
+      const perms = normalizePermissionMatrix(store[user.email.toLowerCase()] ?? buildNoPermissions());
       const modulesSummary = permissionModules
         .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
+        .map((m) => permissionModuleLabels[m])
         .join(", ");
       return `<tr>
       <td>${escapeHtml(user.fullName)}</td>
@@ -1665,7 +1823,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
   const modulePermissionBlocks = permissionModules
     .map(
       (moduleName) => `<fieldset style="border:1px solid #d8dee6; border-radius:10px; padding:10px">
-  <legend style="padding:0 6px">${moduleName}</legend>
+  <legend style="padding:0 6px">${escapeHtml(permissionModuleLabels[moduleName])}</legend>
   <label><input type="checkbox" name="${moduleName}_VIEW" /> View</label>
   <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_EDIT" /> Edit</label>
   <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_CREATE" /> Create</label>
@@ -1676,8 +1834,8 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
     .join("");
 
   const content = `
-<h2>Users & Permissions</h2>
-<p class="muted">Create admin users and assign module permissions.</p>
+<h2>Users &amp; permissions</h2>
+<p class="muted">Create hotel staff accounts. Use <strong>database role</strong> (MANAGER / STAFF / FINANCE) for defaults, then tune <strong>module permissions</strong> for operational roles — e.g. <em>Restaurant &amp; café</em> for KOT/outlet, <em>Housekeeping</em> for cleaning tasks. Platform owner retains full access.</p>
 ${created}
 <div class="actions">
   <a class="btn-link primary" href="/admin/profile">Back to profile</a>
@@ -2397,10 +2555,65 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
     res.redirect(returnTo === "/admin/profile" ? "/admin/profile" : fallback);
     return;
   }
-  await prisma.roomUnit.update({
-    where: { id: unit.id },
-    data: { notes: writeManualRoomStatusToNotes(unit.notes, status) }
+  const staffSession = getSession(req);
+  const staffId = staffSession?.staffId;
+
+  let hkCreatedFromBoard: { created: boolean; taskId: string | null } = { created: false, taskId: null };
+  await prisma.$transaction(async (tx) => {
+    const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
+    await tx.roomUnit.update({
+      where: { id: unit.id },
+      data: { notes: writeManualRoomStatusToNotes(fresh?.notes, status) }
+    });
+    if (status === "CLEANING") {
+      hkCreatedFromBoard = await ensureHousekeepingTaskForCleaningTx(tx, {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        source: HousekeepingTaskSource.MANUAL,
+        createdByUserId: staffId ?? null,
+        notes: "Room board set to CLEANING"
+      });
+    }
+    if (status === "AVAILABLE") {
+      await tx.housekeepingTask.updateMany({
+        where: {
+          hotelId: hotel.id,
+          roomUnitId: unit.id,
+          status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+        },
+        data: {
+          status: HousekeepingTaskStatus.COMPLETED,
+          completedAt: new Date(),
+          completedByUserId: staffId ?? null,
+          notes: "Marked AVAILABLE from room board (bypassed HK screen)"
+        }
+      });
+    }
   });
+
+  if (hkCreatedFromBoard.created && hkCreatedFromBoard.taskId) {
+    const unitLabel = await prisma.roomUnit.findUnique({
+      where: { id: unit.id },
+      select: { name: true, roomType: { select: { name: true } } }
+    });
+    const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : unit.id;
+    await notifyHousekeepingStaff({
+      hotelId: hotel.id,
+      type: "HK_TASK_NEW",
+      title: "Room marked for cleaning",
+      body: `${label} — new housekeeping task from room board.`,
+      payloadJson: JSON.stringify({ taskId: hkCreatedFromBoard.taskId, roomUnitId: unit.id })
+    });
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "ROOM_BOARD_UNIT_STATUS",
+    entityType: "RoomUnit",
+    entityId: unit.id,
+    metadata: { status, source: "room_board" }
+  });
+
   if (returnTo === "/admin/profile") {
     res.redirect("/admin/profile?unitUpdated=1");
     return;
@@ -3267,6 +3480,7 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
 
   try {
     let auditBookingId: string | undefined;
+    let hkFromCheckout: { created: boolean; taskId: string | null } = { created: false, taskId: null };
     let auditMetadata: Record<string, unknown> = {
       roomUnitId: unit.id,
       departureDate: formatDateForInput(departureDate),
@@ -3351,6 +3565,14 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
         where: { id: unit.id },
         data: { notes: writeManualRoomStatusToNotes(fresh?.notes, "CLEANING") }
       });
+      hkFromCheckout = await ensureHousekeepingTaskForCleaningTx(tx, {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        source: HousekeepingTaskSource.CHECKOUT,
+        bookingId: auditBookingId ?? null,
+        createdByUserId: staffSession?.staffId ?? null,
+        notes: "Guest departure (manual check-out)"
+      });
     });
 
     await logAudit({
@@ -3360,6 +3582,21 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
       entityId: auditBookingId ?? unit.id,
       metadata: auditMetadata
     });
+
+    if (hkFromCheckout.created && hkFromCheckout.taskId) {
+      const unitLabel = await prisma.roomUnit.findUnique({
+        where: { id: unit.id },
+        select: { name: true, roomType: { select: { name: true } } }
+      });
+      const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : unit.id;
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "HK_TASK_NEW",
+        title: "Checkout — room needs cleaning",
+        body: `${label} — task created after manual check-out.`,
+        payloadJson: JSON.stringify({ taskId: hkFromCheckout.taskId, roomUnitId: unit.id, bookingId: auditBookingId })
+      });
+    }
 
     res.redirect(`/admin/room-board?date=${encodeURIComponent(formatDateForInput(departureDate))}&manualCheckOut=1`);
   } catch (e) {
@@ -9651,7 +9888,243 @@ function outletTicketWhatsappBadgeHtml(t: {
   return `<span class="outlet-wa outlet-wa-unk" title="No notify attempt recorded yet">WhatsApp —</span>`;
 }
 
-adminRouter.get("/outlet-dashboard", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+adminRouter.get("/restaurant-ops", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (_req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { displayName: true } });
+  const title = hotel?.displayName ?? "Hotel";
+  const content = `
+<h2>Restaurant &amp; outlet operations</h2>
+<p class="muted">${escapeHtml(title)} — Use this checklist with dedicated <strong>OUTLET</strong> permissions (Users page) for cashier / KOT / service staff.</p>
+<section style="margin-top:16px;line-height:1.55">
+  <h3>Best-practice flow</h3>
+  <ol style="margin:0;padding-left:20px">
+    <li><strong>KOT / kitchen tickets</strong> — Open <a href="/admin/outlet-dashboard">Outlet board</a> (kanban). Move tickets NEW → PREPARING → READY → DELIVERED. This is your single source of truth for meal execution.</li>
+    <li><strong>Orders &amp; billing</strong> — In-stay charges post to the guest folio (<a href="/admin/bookings">Bookings</a> → booking → folio). Walk-ins and direct sales use the F&amp;B menu and cashier paths already in <a href="/admin/fb/menu">Restaurant &amp; Café</a>.</li>
+    <li><strong>Payments</strong> — Record payments against the folio or shift close (<a href="/admin/shift-close">Shift close</a>) so cash and card reconcile per shift.</li>
+    <li><strong>Handover</strong> — At shift end, ensure open KOT items are either delivered or explicitly cancelled; note variances in the shift report.</li>
+  </ol>
+  <h3 style="margin-top:18px">Permissions</h3>
+  <p class="muted" style="margin:0">Grant <code>OUTLET</code> (View / Edit) for board operators; keep <code>BILLING</code> narrow for finance-only users. Managers typically retain full modules.</p>
+  <p style="margin-top:14px"><a class="btn-link primary" href="/admin/outlet-dashboard">Open outlet board</a> · <a class="btn-link" href="/admin/fb/menu">F&amp;B menu</a> · <a class="btn-link" href="/admin/outlet-orders">Table view</a></p>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Housekeeping</h2><p>No hotel data.</p>", true));
+    return;
+  }
+  const session = getSession(req);
+  const staffId = session?.staffId ?? "";
+
+  const openTasks = await prisma.housekeepingTask.findMany({
+    where: { hotelId: hotel.id, status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] } },
+    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+    take: 200,
+    include: {
+      roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
+      assignedTo: { select: { fullName: true, email: true } },
+      booking: { select: { id: true, referenceCode: true } }
+    }
+  });
+
+  const recentDone = await prisma.housekeepingTask.findMany({
+    where: { hotelId: hotel.id, status: HousekeepingTaskStatus.COMPLETED },
+    orderBy: { completedAt: "desc" },
+    take: 25,
+    include: {
+      roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
+      assignedTo: { select: { fullName: true } },
+      completedBy: { select: { fullName: true, email: true } }
+    }
+  });
+
+  let alertsHtml = "";
+  if (staffId && staffId !== "STAFF-SUPERADMIN") {
+    const alerts = await prisma.notification.findMany({
+      where: {
+        hotelId: hotel.id,
+        hotelUserId: staffId,
+        readAt: null,
+        type: { startsWith: "HK_" }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 40
+    });
+    if (alerts.length) {
+      alertsHtml = `<section style="margin-bottom:18px"><h3>Your housekeeping alerts</h3><ul style="margin:0;padding-left:18px">`;
+      for (const n of alerts) {
+        alertsHtml += `<li><strong>${escapeHtml(n.title ?? n.type)}</strong> — ${escapeHtml(n.body)} <span class="muted" style="font-size:12px">${formatDateTime(n.createdAt)}</span></li>`;
+      }
+      alertsHtml += `</ul><form method="post" action="/admin/housekeeping/notifications/read" style="margin-top:8px"><button type="submit" class="btn-link">Mark alerts read</button></form></section>`;
+    }
+  }
+
+  const canAct =
+    session &&
+    (hasPermission(session.permissions, "HOUSEKEEPING", "EDIT") || hasPermission(session.permissions, "ROOMS", "EDIT"));
+
+  const rowHtml = (t: (typeof openTasks)[0]) => {
+    const roomLabel = `${t.roomUnit.name} (${t.roomUnit.roomType.name})`;
+    const assignee = t.assignedTo ? escapeHtml(t.assignedTo.fullName) : '<span class="muted">Unassigned</span>';
+    const ref = t.booking?.referenceCode ? escapeHtml(t.booking.referenceCode) : "—";
+    const claimBtn =
+      canAct && t.status === HousekeepingTaskStatus.PENDING
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/claim" style="display:inline;margin:0"><button type="submit" style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Claim</button></form>`
+        : "";
+    const doneBtn =
+      canAct && (t.status === HousekeepingTaskStatus.PENDING || t.status === HousekeepingTaskStatus.IN_PROGRESS)
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 0 0 6px"><button type="submit" style="padding:4px 10px;border-radius:8px;border:0;background:#128c7e;color:#fff;cursor:pointer;font-weight:600">Mark clean (available)</button></form>`
+        : "";
+    return `<tr>
+      <td>${escapeHtml(roomLabel)}</td>
+      <td>${escapeHtml(t.status)}</td>
+      <td>${escapeHtml(t.source)}</td>
+      <td>${assignee}</td>
+      <td>${ref}</td>
+      <td style="white-space:nowrap">${claimBtn}${doneBtn}</td>
+    </tr>`;
+  };
+
+  const doneRows = recentDone
+    .map((t) => {
+      const roomLabel = `${t.roomUnit.name} (${t.roomUnit.roomType.name})`;
+      const by = t.completedBy ? escapeHtml(t.completedBy.fullName) : "—";
+      const when = t.completedAt ? formatDateTime(t.completedAt) : "—";
+      return `<tr><td>${escapeHtml(roomLabel)}</td><td>${by}</td><td>${when}</td></tr>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Housekeeping</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Tasks are created when a room is set to <strong>CLEANING</strong> (checkout or room board). Assign cleaners, then mark <strong>clean</strong> to set the room to <strong>AVAILABLE</strong>. Actions are logged with staff identity.</p>
+<p class="muted" style="font-size:13px">Grant <strong>HOUSEKEEPING</strong> (View/Edit) in <a href="/admin/users">Users</a> for housekeeping-only accounts. Front desk typically uses <strong>ROOMS</strong> Edit.</p>
+${alertsHtml}
+<section>
+  <h3>Open tasks</h3>
+  <div style="overflow:auto">
+  <table class="data-table" style="min-width:720px">
+    <thead><tr><th>Room</th><th>Status</th><th>Source</th><th>Assigned</th><th>Booking ref</th><th></th></tr></thead>
+    <tbody>${openTasks.length ? openTasks.map(rowHtml).join("") : '<tr><td colspan="6" class="muted">No open housekeeping tasks.</td></tr>'}</tbody>
+  </table>
+  </div>
+</section>
+<section style="margin-top:22px">
+  <h3>Recently completed</h3>
+  <div style="overflow:auto">
+  <table class="data-table" style="min-width:520px">
+    <thead><tr><th>Room</th><th>Completed by</th><th>When</th></tr></thead>
+    <tbody>${doneRows || '<tr><td colspan="3" class="muted">None yet.</td></tr>'}</tbody>
+  </table>
+  </div>
+</section>`;
+
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/housekeeping/notifications/read", requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  await prisma.notification.updateMany({
+    where: {
+      hotelId: hotel.id,
+      hotelUserId: session.staffId,
+      readAt: null,
+      type: { startsWith: "HK_" }
+    },
+    data: { readAt: new Date(), status: NotificationStatus.READ }
+  });
+  res.redirect("/admin/housekeeping");
+});
+
+adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: { id: taskId, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING }
+  });
+  if (!task) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  await prisma.housekeepingTask.update({
+    where: { id: task.id },
+    data: {
+      status: HousekeepingTaskStatus.IN_PROGRESS,
+      assignedToUserId: session.staffId,
+      startedAt: new Date()
+    }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_CLAIMED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    metadata: { roomUnitId: task.roomUnitId, assignedToUserId: session.staffId }
+  });
+  res.redirect("/admin/housekeeping");
+});
+
+adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  if (!hotel || !session) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: {
+      id: taskId,
+      hotelId: hotel.id,
+      status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+    },
+    include: { roomUnit: { select: { notes: true } } }
+  });
+  if (!task) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  await prisma.$transaction(async (tx) => {
+    const fresh = await tx.roomUnit.findUnique({ where: { id: task.roomUnitId }, select: { notes: true } });
+    await tx.roomUnit.update({
+      where: { id: task.roomUnitId },
+      data: { notes: writeManualRoomStatusToNotes(fresh?.notes, "AVAILABLE") }
+    });
+    await tx.housekeepingTask.update({
+      where: { id: task.id },
+      data: {
+        status: HousekeepingTaskStatus.COMPLETED,
+        completedAt: new Date(),
+        completedByUserId: session.staffId !== "STAFF-SUPERADMIN" ? session.staffId : null
+      }
+    });
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_COMPLETED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    bookingId: task.bookingId ?? undefined,
+    metadata: { roomUnitId: task.roomUnitId, completedByUserId: session.staffId }
+  });
+  res.redirect("/admin/housekeeping");
+});
+
+adminRouter.get("/outlet-dashboard", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: "al-ashkhara-beach-resort" },
     select: { id: true, displayName: true, currency: true }
@@ -9864,7 +10337,7 @@ ${errBanner}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/outlet-orders", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+adminRouter.get("/outlet-orders", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: "al-ashkhara-beach-resort" },
     select: { id: true, displayName: true, currency: true }
@@ -10011,7 +10484,7 @@ ${errBanner}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/outlet-orders/:ticketId/status", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+adminRouter.post("/outlet-orders/:ticketId/status", requirePermissionAny([{ module: "OUTLET", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/outlet-dashboard");

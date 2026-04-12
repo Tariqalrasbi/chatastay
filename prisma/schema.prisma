@@ -240,6 +240,20 @@ enum OutletKind {
   OTHER
 }
 
+/// Housekeeping queue: assignment, audit trail, and cleaner accountability (PMS-style).
+enum HousekeepingTaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum HousekeepingTaskSource {
+  CHECKOUT
+  MANUAL
+  FRONTDESK
+}
+
 model Hotel {
   id             String                  @id @default(cuid())
   slug           String                  @unique
@@ -285,6 +299,7 @@ model Hotel {
   marketingCampaigns    MarketingCampaign[]
   hotelDailyDigestLogs  HotelDailyDigestLog[]
   frontDeskShifts       FrontDeskShift[]
+  housekeepingTasks     HousekeepingTask[]
 }
 
 /// Per-hotel daily email digest audit (hotel admin); separate from platform OwnerDailyDigestLog.
@@ -326,6 +341,9 @@ model HotelUser {
   notifications          Notification[]
   closedFrontDeskShifts  FrontDeskShift[] @relation("ShiftClosedBy")
   fbOperationalExpensesCreated FbOperationalExpense[] @relation("FbOpExpenseCreatedBy")
+  hkTasksAssigned              HousekeepingTask[]     @relation("HKTaskAssignedTo")
+  hkTasksCreated               HousekeepingTask[]     @relation("HKTaskCreatedBy")
+  hkTasksCompleted             HousekeepingTask[]     @relation("HKTaskCompletedBy")
 }
 
 /// Locked cashier / front-desk shift close with cash reconciliation (folio-based).
@@ -612,6 +630,7 @@ model Booking {
   folios         Folio[]
   statusHistory  BookingStatusHistory[]
   auditLogEntries AuditLog[] @relation("BookingAuditLogs")
+  housekeepingTasks HousekeepingTask[]
 
   @@unique([hotelId, referenceCode])
   @@index([hotelId, referenceCode])
@@ -933,6 +952,35 @@ model OutletOrderTicket {
   @@index([hotelId, createdAt])
 }
 
+model HousekeepingTask {
+  id                String                 @id @default(cuid())
+  hotelId           String
+  hotel             Hotel                  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  roomUnitId        String
+  roomUnit          RoomUnit               @relation(fields: [roomUnitId], references: [id], onDelete: Cascade)
+  status            HousekeepingTaskStatus @default(PENDING)
+  source            HousekeepingTaskSource
+  bookingId         String?
+  booking           Booking?               @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  assignedToUserId  String?
+  assignedTo        HotelUser?             @relation("HKTaskAssignedTo", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  createdByUserId   String?
+  createdBy         HotelUser?             @relation("HKTaskCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  completedByUserId String?
+  completedBy       HotelUser?             @relation("HKTaskCompletedBy", fields: [completedByUserId], references: [id], onDelete: SetNull)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([hotelId, status])
+  @@index([hotelId, roomUnitId])
+  @@index([assignedToUserId])
+}
+
 model RoomUnit {
   id         String   @id @default(cuid())
   hotelId    String
@@ -948,6 +996,7 @@ model RoomUnit {
   bookings   Booking[]
   folioTransactions FolioTransaction[]
   folios     Folio[]
+  housekeepingTasks HousekeepingTask[]
 
   @@unique([roomTypeId, name])
   @@index([hotelId, roomTypeId, isActive])
