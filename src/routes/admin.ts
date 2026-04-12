@@ -8705,6 +8705,116 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
     </tr>`;
     })
     .join("");
+  const fbQuickCashierSectionHtml = `<div id="fb-direct" style="height:0;margin:0;padding:0;overflow:hidden" aria-hidden="true"></div>
+<section id="fb-cashier-sale" class="fb-pos-shell fb-cashier-shell" style="margin-bottom:22px;scroll-margin-top:88px">
+  <header class="fb-pos-shell-head">
+    <h2 style="margin:0 0 4px;font-size:1.35rem">Quick cashier sale</h2>
+    <p class="muted" style="margin:0;font-size:13px">Walk-in <strong>restaurant</strong> or <strong>café</strong> — no booking, no folio. Saves <strong>direct ledger lines + payment</strong> (outlet + payment method for F&amp;B &amp; shift reports).</p>
+  </header>
+  <form id="fb-direct-sale" method="post" action="/admin/fb/menu/direct-sale">
+    <div class="fb-cashier-outlet" role="radiogroup" aria-label="Cashier outlet">
+      <span style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#64748b;width:100%">1. Outlet</span>
+      <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:2px solid #0f766e;border-radius:10px;background:#ecfdf5;cursor:pointer;margin:0">
+        <input type="radio" name="cashier_outlet" value="RESTAURANT" checked /> Restaurant
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:2px solid #cbd5e1;border-radius:10px;background:#fff;cursor:pointer;margin:0">
+        <input type="radio" name="cashier_outlet" value="COFFEE_SHOP" /> Coffee shop / Café
+      </label>
+    </div>
+    <p class="muted" style="margin:0 0 8px;font-size:12px">2. Tick items and set qty · 3. Payment · 4. Confirm</p>
+    <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:12px;background:#fff">
+      <table class="fb-pos-table">
+        <thead><tr><th style="width:44px">✓</th><th class="num" style="width:56px">Qty</th><th>Item</th><th class="num">Unit</th><th style="width:64px">Menu</th></tr></thead>
+        <tbody>${cashierSaleRows || '<tr><td colspan="5" class="muted">No menu items — add under Menu catalog.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:14px">
+      <label>Payment method<br/>
+        <select name="payment_method" required style="padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;min-width:200px;font-weight:600">
+          <option value="CASH">Cash</option>
+          <option value="CARD">Card / credit</option>
+          <option value="MOBILE">Mobile transfer</option>
+          <option value="BANK_TRANSFER">Bank transfer</option>
+          <option value="OTHER">Other</option>
+        </select>
+      </label>
+      <label style="flex:1;min-width:220px">Note / receipt ref<br/><input type="text" name="notes" maxlength="500" placeholder="Optional" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:12px;background:#f0fdfa;border:1px solid #5eead4;">
+      <p id="fb-cashier-total" style="margin:0;font-size:1.15rem;font-weight:800;color:#134e4a">Total: <span id="fb-cashier-total-num">0.00 ${escapeHtml(hotel.currency)}</span></p>
+      <button type="submit" style="padding:14px 28px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:800;font-size:17px;cursor:pointer;box-shadow:0 2px 10px rgba(15,118,110,.25)">Confirm sale</button>
+    </div>
+  </form>
+  <script>
+    (function () {
+      var cur = "${escapeHtml(hotel.currency)}";
+      function activeOutlet() {
+        var r = document.querySelector('input[name="cashier_outlet"]:checked');
+        return r ? r.value : "RESTAURANT";
+      }
+      function applyOutletFilter() {
+        var o = activeOutlet();
+        document.querySelectorAll("tr.fb-cashier-row").forEach(function (tr) {
+          var rowO = tr.getAttribute("data-cashier-outlet");
+          var show = rowO === o;
+          tr.style.display = show ? "" : "none";
+          if (!show) {
+            var cb = tr.querySelector(".fb-cashier-cb");
+            var qEl = tr.querySelector(".fb-cashier-qty");
+            if (cb) cb.checked = false;
+            if (qEl) qEl.value = 1;
+          }
+        });
+        document.querySelectorAll(".fb-cashier-outlet label").forEach(function (lab) {
+          var inp = lab.querySelector('input[type="radio"]');
+          if (!inp) return;
+          lab.style.borderColor = inp.checked ? "#0f766e" : "#cbd5e1";
+          lab.style.background = inp.checked ? "#ecfdf5" : "#fff";
+        });
+        recalcCashier();
+      }
+      function recalcCashier() {
+        var sum = 0;
+        document.querySelectorAll("tr.fb-cashier-row").forEach(function (tr) {
+          if (tr.style.display === "none") return;
+          if (tr.getAttribute("data-fb-active") !== "1") return;
+          var cb = tr.querySelector(".fb-cashier-cb");
+          var qEl = tr.querySelector(".fb-cashier-qty");
+          if (!cb || !cb.checked || cb.disabled) return;
+          var qty = parseInt(qEl && qEl.value, 10);
+          if (!isFinite(qty) || qty < 1) qty = 1;
+          var price = parseFloat(tr.getAttribute("data-fb-price") || "0");
+          sum += Math.round(price * qty * 100) / 100;
+        });
+        var el = document.getElementById("fb-cashier-total-num");
+        if (el) el.textContent = sum.toFixed(2) + " " + cur;
+      }
+      document.querySelectorAll('input[name="cashier_outlet"]').forEach(function (el) {
+        el.addEventListener("change", applyOutletFilter);
+      });
+      document.querySelectorAll(".fb-cashier-cb, .fb-cashier-qty").forEach(function (el) {
+        el.addEventListener("change", recalcCashier);
+        el.addEventListener("input", recalcCashier);
+      });
+      var form = document.getElementById("fb-direct-sale");
+      if (form) {
+        form.addEventListener("submit", function (e) {
+          var ok = false;
+          document.querySelectorAll("tr.fb-cashier-row").forEach(function (tr) {
+            if (tr.style.display === "none") return;
+            var cb = tr.querySelector(".fb-cashier-cb");
+            if (cb && cb.checked && !cb.disabled) ok = true;
+          });
+          if (!ok) {
+            e.preventDefault();
+            alert("Select at least one active item for this outlet.");
+          }
+        });
+      }
+      applyOutletFilter();
+    })();
+  </script>
+</section>`;
   const content = `
 <style>
 .fb-master-nav a { font-size:13px;font-weight:700;color:#0f766e;text-decoration:none;padding:6px 10px;border-radius:8px; }
@@ -8752,16 +8862,17 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
 .fb-cashier-outlet label:has(input:checked) { border-color:#0f766e !important;background:#ecfdf5 !important; }
 </style>
 <h1 style="margin:0 0 6px;font-size:1.5rem">Restaurant &amp; café — operations</h1>
-<p class="muted">${escapeHtml(hotel.displayName)} · Master page for <strong>in-house folio charging</strong>, <strong>walk-in POS sales</strong>, <strong>outlet tickets</strong>, <strong>expenses</strong>, and <strong>sales summaries</strong>.</p>
+<p class="muted">${escapeHtml(hotel.displayName)} · Master page for <strong>walk-in cashier</strong>, <strong>in-house folio charging</strong>, <strong>outlet tickets</strong>, <strong>expenses</strong>, and <strong>sales summaries</strong>.</p>
 <nav class="fb-master-nav" aria-label="F&amp;B sections">
+  <a href="#fb-cashier-sale">Quick cashier (walk-in)</a>
   <a href="#fb-lookup">Guest lookup</a>
   <a href="#fb-inhouse">In-house folio charge</a>
-  <a href="#fb-cashier-sale">Quick cashier sale</a>
   <a href="/admin/outlet-dashboard">Outlet board</a>
   <a href="#fb-expenses">Expenses</a>
   <a href="#fb-sales-summary">Sales summary</a>
   <a href="#fb-catalog">Menu catalog</a>
 </nav>
+${fbQuickCashierSectionHtml}
 ${saved}
 ${mergedBanner}
 ${chargeSuccessFlag && chargeSuccessBanner ? `<div class="fb-pos-card" style="background:#ecfdf5;border:2px solid #34d399;margin-bottom:16px;padding:16px 18px;border-radius:12px" role="status"><strong style="display:block;margin-bottom:8px;color:#065f46;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Success — folio updated</strong>${chargeSuccessBanner}</div>` : ""}
@@ -9080,116 +9191,6 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
     })();
   </script>
 </section>
-</section>
-<div id="fb-direct" style="height:0;margin:0;padding:0;overflow:hidden" aria-hidden="true"></div>
-<section id="fb-cashier-sale" class="fb-pos-shell fb-cashier-shell" style="margin-bottom:22px">
-  <header class="fb-pos-shell-head">
-    <h2 style="margin:0 0 4px;font-size:1.35rem">Quick cashier sale</h2>
-    <p class="muted" style="margin:0;font-size:13px">Walk-in <strong>restaurant</strong> or <strong>café</strong> — no booking, no folio. Saves <strong>direct ledger lines + payment</strong> (outlet + payment method for F&amp;B &amp; shift reports).</p>
-  </header>
-  <form id="fb-direct-sale" method="post" action="/admin/fb/menu/direct-sale">
-    <div class="fb-cashier-outlet" role="radiogroup" aria-label="Cashier outlet">
-      <span style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#64748b;width:100%">1. Outlet</span>
-      <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:2px solid #0f766e;border-radius:10px;background:#ecfdf5;cursor:pointer;margin:0">
-        <input type="radio" name="cashier_outlet" value="RESTAURANT" checked /> Restaurant
-      </label>
-      <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:2px solid #cbd5e1;border-radius:10px;background:#fff;cursor:pointer;margin:0">
-        <input type="radio" name="cashier_outlet" value="COFFEE_SHOP" /> Coffee shop / Café
-      </label>
-    </div>
-    <p class="muted" style="margin:0 0 8px;font-size:12px">2. Tick items and set qty · 3. Payment · 4. Confirm</p>
-    <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:12px;background:#fff">
-      <table class="fb-pos-table">
-        <thead><tr><th style="width:44px">✓</th><th class="num" style="width:56px">Qty</th><th>Item</th><th class="num">Unit</th><th style="width:64px">Menu</th></tr></thead>
-        <tbody>${cashierSaleRows || '<tr><td colspan="5" class="muted">No menu items — add under Menu catalog.</td></tr>'}</tbody>
-      </table>
-    </div>
-    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:14px">
-      <label>Payment method<br/>
-        <select name="payment_method" required style="padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;min-width:200px;font-weight:600">
-          <option value="CASH">Cash</option>
-          <option value="CARD">Card / credit</option>
-          <option value="MOBILE">Mobile transfer</option>
-          <option value="BANK_TRANSFER">Bank transfer</option>
-          <option value="OTHER">Other</option>
-        </select>
-      </label>
-      <label style="flex:1;min-width:220px">Note / receipt ref<br/><input type="text" name="notes" maxlength="500" placeholder="Optional" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
-    </div>
-    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:12px;background:#f0fdfa;border:1px solid #5eead4;">
-      <p id="fb-cashier-total" style="margin:0;font-size:1.15rem;font-weight:800;color:#134e4a">Total: <span id="fb-cashier-total-num">0.00 ${escapeHtml(hotel.currency)}</span></p>
-      <button type="submit" style="padding:14px 28px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:800;font-size:17px;cursor:pointer;box-shadow:0 2px 10px rgba(15,118,110,.25)">Confirm sale</button>
-    </div>
-  </form>
-  <script>
-    (function () {
-      var cur = "${escapeHtml(hotel.currency)}";
-      function activeOutlet() {
-        var r = document.querySelector('input[name="cashier_outlet"]:checked');
-        return r ? r.value : "RESTAURANT";
-      }
-      function applyOutletFilter() {
-        var o = activeOutlet();
-        document.querySelectorAll("tr.fb-cashier-row").forEach(function (tr) {
-          var rowO = tr.getAttribute("data-cashier-outlet");
-          var show = rowO === o;
-          tr.style.display = show ? "" : "none";
-          if (!show) {
-            var cb = tr.querySelector(".fb-cashier-cb");
-            var qEl = tr.querySelector(".fb-cashier-qty");
-            if (cb) cb.checked = false;
-            if (qEl) qEl.value = 1;
-          }
-        });
-        document.querySelectorAll(".fb-cashier-outlet label").forEach(function (lab) {
-          var inp = lab.querySelector('input[type="radio"]');
-          if (!inp) return;
-          lab.style.borderColor = inp.checked ? "#0f766e" : "#cbd5e1";
-          lab.style.background = inp.checked ? "#ecfdf5" : "#fff";
-        });
-        recalcCashier();
-      }
-      function recalcCashier() {
-        var sum = 0;
-        document.querySelectorAll("tr.fb-cashier-row").forEach(function (tr) {
-          if (tr.style.display === "none") return;
-          if (tr.getAttribute("data-fb-active") !== "1") return;
-          var cb = tr.querySelector(".fb-cashier-cb");
-          var qEl = tr.querySelector(".fb-cashier-qty");
-          if (!cb || !cb.checked || cb.disabled) return;
-          var qty = parseInt(qEl && qEl.value, 10);
-          if (!isFinite(qty) || qty < 1) qty = 1;
-          var price = parseFloat(tr.getAttribute("data-fb-price") || "0");
-          sum += Math.round(price * qty * 100) / 100;
-        });
-        var el = document.getElementById("fb-cashier-total-num");
-        if (el) el.textContent = sum.toFixed(2) + " " + cur;
-      }
-      document.querySelectorAll('input[name="cashier_outlet"]').forEach(function (el) {
-        el.addEventListener("change", applyOutletFilter);
-      });
-      document.querySelectorAll(".fb-cashier-cb, .fb-cashier-qty").forEach(function (el) {
-        el.addEventListener("change", recalcCashier);
-        el.addEventListener("input", recalcCashier);
-      });
-      var form = document.getElementById("fb-direct-sale");
-      if (form) {
-        form.addEventListener("submit", function (e) {
-          var ok = false;
-          document.querySelectorAll("tr.fb-cashier-row").forEach(function (tr) {
-            if (tr.style.display === "none") return;
-            var cb = tr.querySelector(".fb-cashier-cb");
-            if (cb && cb.checked && !cb.disabled) ok = true;
-          });
-          if (!ok) {
-            e.preventDefault();
-            alert("Select at least one active item for this outlet.");
-          }
-        });
-      }
-      applyOutletFilter();
-    })();
-  </script>
 </section>
 <section id="fb-expenses" class="fb-pos-card" style="margin-bottom:18px;border:1px solid #e9d5ff;background:#faf5ff">
   <h2 style="margin:0 0 8px;font-size:1.1rem">F&amp;B expenses &amp; purchases</h2>
