@@ -636,7 +636,7 @@ function renderLayout(content: string, authenticated: boolean): string {
         "</div>",
         '<div class="section-tabs" data-section="reservations">',
         '<a href="/admin/bookings">Bookings</a>',
-        '<a href="/admin/fb/menu">Restaurant &amp; Café</a>',
+        '<a href="/admin/fb/menu">F&amp;B master</a>',
         ...(canNavOutlet ? ['<a href="/admin/restaurant-ops">Restaurant ops guide</a>'] : []),
         '<a href="/admin/outlet-dashboard">Outlet board</a>',
         '<a href="/admin/calendar">Calendar</a>',
@@ -1530,6 +1530,21 @@ function requirePermissionAnyJson(checks: Array<{ module: PermissionModule; acti
     }
     next();
   };
+}
+
+/** Master F&amp;B page: outlet/restaurant staff or reservations — backward compatible with BOOKINGS-only users. */
+function requireFbOperationsView() {
+  return requirePermissionAny([
+    { module: "OUTLET", action: "VIEW" },
+    { module: "BOOKINGS", action: "VIEW" }
+  ]);
+}
+
+function requireFbOperationsEdit() {
+  return requirePermissionAny([
+    { module: "OUTLET", action: "EDIT" },
+    { module: "BOOKINGS", action: "EDIT" }
+  ]);
 }
 
 function classifyConversationActivity(
@@ -8700,7 +8715,7 @@ ${broadcastNotice}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true, currency: true } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>F&amp;B menu</h2><p>No hotel data found.</p>", true));
@@ -8869,6 +8884,11 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
   }
 
   const summaryOps = await getFbOperationsSummary(hotel.id, reportStartDay, reportRangeEndExclusive);
+  const snapshotDay = await getFbOperationsSummary(
+    hotel.id,
+    startOfDay(opsDay),
+    addDays(startOfDay(opsDay), 1)
+  );
   const recentFbExpenses = await prisma.fbOperationalExpense.findMany({
     where: { hotelId: hotel.id },
     orderBy: { expenseDate: "desc" },
@@ -8907,6 +8927,31 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
           .join("")
       : `<tr><td colspan="2" class="muted">No walk-in POS payments in this range</td></tr>`;
 
+  const snapshotMasterHtml = `<section id="fb-master-snapshot" class="fb-master-snapshot fb-pos-card" style="margin-bottom:16px;border:1px solid #6ee7b7;background:linear-gradient(135deg,#ecfdf5 0%,#f0fdf4 100%);scroll-margin-top:72px">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px">
+    <h2 style="margin:0;font-size:1.15rem">Stay-date snapshot</h2>
+    <span class="muted" style="font-size:13px;font-weight:700">${escapeHtml(formatDateForInput(opsDay))}</span>
+  </div>
+  <p class="muted" style="margin:0 0 12px;font-size:12px;line-height:1.45">One-day F&amp;B picture for the same <strong>Stay date</strong> used in guest lookup. Change stay date in the lookup section to shift this snapshot.</p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px">
+    <article class="stat" style="margin:0;padding:10px 12px"><h3 style="font-size:11px">Guest menu orders</h3><p style="margin:0;font-size:1rem;font-weight:700">${snapshotDay.fbOrderFolioTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p></article>
+    <article class="stat" style="margin:0;padding:10px 12px"><h3 style="font-size:11px">In-house folio F&amp;B</h3><p style="margin:0;font-size:1rem;font-weight:700">${snapshotDay.folioGuestFnChargesNet.toFixed(2)} ${escapeHtml(hotel.currency)}</p></article>
+    <article class="stat" style="margin:0;padding:10px 12px"><h3 style="font-size:11px">Direct (walk-in) F&amp;B</h3><p style="margin:0;font-size:1rem;font-weight:700">${snapshotDay.directFnChargesNet.toFixed(2)} ${escapeHtml(hotel.currency)}</p></article>
+    <article class="stat" style="margin:0;padding:10px 12px"><h3 style="font-size:11px">Walk-in payments</h3><p style="margin:0;font-size:1rem;font-weight:700">${snapshotDay.walkInPaymentTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p></article>
+    <article class="stat" style="margin:0;padding:10px 12px"><h3 style="font-size:11px">F&amp;B expenses logged</h3><p style="margin:0;font-size:1rem;font-weight:700">${snapshotDay.expenseTotal.toFixed(2)} ${escapeHtml(hotel.currency)}</p></article>
+  </div>
+</section>`;
+
+  const outletMasterStripHtml = `<section id="fb-master-outlet" class="fb-master-outlet-strip fb-pos-card" style="margin-bottom:18px;border:1px solid #7dd3fc;background:#f0f9ff;scroll-margin-top:72px">
+  <h2 style="margin:0 0 6px;font-size:1.1rem">Outlet · KOT &amp; tickets</h2>
+  <p class="muted" style="margin:0 0 12px;font-size:13px">Restaurant and café kitchen flow — move tickets by status, notify service. Same outlets as menu items below.</p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
+    <a class="btn-link primary" style="display:block;text-align:center;padding:12px 14px;border-radius:10px;font-weight:700" href="/admin/outlet-dashboard">Outlet board (kanban)</a>
+    <a class="btn-link" style="display:block;text-align:center;padding:12px 14px;border-radius:10px;border:1px solid #94a3b8;background:#fff;font-weight:600" href="/admin/outlet-orders">All outlet tickets</a>
+    <a class="btn-link" style="display:block;text-align:center;padding:12px 14px;border-radius:10px;border:1px solid #94a3b8;background:#fff;font-weight:600" href="/admin/restaurant-ops">Restaurant ops guide</a>
+  </div>
+</section>`;
+
   const items = await prisma.menuItem.findMany({
     where: { hotelId: hotel.id },
     orderBy: [{ outletType: "asc" }, { sortOrder: "asc" }, { name: "asc" }]
@@ -8943,10 +8988,10 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
     })
     .join("");
   const fbQuickCashierSectionHtml = `<div id="fb-direct" style="height:0;margin:0;padding:0;overflow:hidden" aria-hidden="true"></div>
-<section id="fb-cashier-sale" class="fb-pos-shell fb-cashier-shell" style="margin-bottom:22px;scroll-margin-top:88px">
+<section id="fb-cashier-sale" class="fb-pos-shell fb-cashier-shell" style="margin-bottom:22px;scroll-margin-top:88px;border-radius:14px">
   <header class="fb-pos-shell-head">
-    <h2 style="margin:0 0 4px;font-size:1.35rem">Quick cashier sale</h2>
-    <p class="muted" style="margin:0;font-size:13px">Walk-in <strong>restaurant</strong> or <strong>café</strong> — no booking, no folio. Saves <strong>direct ledger lines + payment</strong> (outlet + payment method for F&amp;B &amp; shift reports).</p>
+    <h2 style="margin:0 0 4px;font-size:1.35rem">Direct sale — walk-in / non-staying</h2>
+    <p class="muted" style="margin:0;font-size:13px">Quick POS for <strong>restaurant</strong> or <strong>café</strong> with no room booking. Records <strong>F&amp;B charges + payment</strong> on the ledger (outlet + method for shift-close and daily F&amp;B reporting).</p>
   </header>
   <form id="fb-direct-sale" method="post" action="/admin/fb/menu/direct-sale">
     <div class="fb-cashier-outlet" role="radiogroup" aria-label="Cashier outlet">
@@ -9054,8 +9099,10 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
 </section>`;
   const content = `
 <style>
+.fb-master-page { max-width:1180px;margin:0 auto; }
 .fb-master-nav a { font-size:13px;font-weight:700;color:#0f766e;text-decoration:none;padding:6px 10px;border-radius:8px; }
 .fb-master-nav a:hover { background:#e0f2f1; }
+.fb-master-nav-sticky { position:sticky;top:0;z-index:20;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);padding:10px 4px 12px;margin:0 -4px 14px;border-bottom:1px solid #e2e8f0;box-shadow:0 1px 0 rgba(15,23,42,.04); }
 .fb-pos-title { margin:0;font-size:1.2rem;font-weight:800;color:#064e3b;letter-spacing:-0.02em; }
 .fb-pos-h3 { margin:0 0 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#64748b; }
 .fb-pos-card { border-radius:12px;padding:16px 18px;margin-bottom:14px; }
@@ -9098,17 +9145,21 @@ adminRouter.get("/fb/menu", requirePermission("BOOKINGS", "VIEW"), async (req, r
 .fb-cashier-outlet { display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px; }
 .fb-cashier-outlet label:has(input:checked) { border-color:#0f766e !important;background:#ecfdf5 !important; }
 </style>
-<h1 style="margin:0 0 6px;font-size:1.5rem">Restaurant &amp; café — operations</h1>
-<p class="muted">${escapeHtml(hotel.displayName)} · Master page for <strong>walk-in cashier</strong>, <strong>in-house folio charging</strong>, <strong>outlet tickets</strong>, <strong>expenses</strong>, and <strong>sales summaries</strong>.</p>
-<nav class="fb-master-nav" aria-label="F&amp;B sections">
-  <a href="#fb-cashier-sale">Quick cashier (walk-in)</a>
+<div class="fb-master-page">
+<h1 style="margin:0 0 6px;font-size:1.55rem;letter-spacing:-0.02em">F&amp;B master — restaurant &amp; café</h1>
+<p class="muted" style="margin:0 0 12px;line-height:1.5">${escapeHtml(hotel.displayName)} · Single control page for <strong>in-house folio posting</strong>, <strong>walk-in / direct POS</strong>, <strong>outlet KOT tickets</strong>, <strong>operating expenses</strong>, and <strong>sales reporting</strong> (PMS-style F&amp;B ops).</p>
+<nav class="fb-master-nav fb-master-nav-sticky" aria-label="F&amp;B sections">
+  <a href="#fb-master-snapshot">Snapshot</a>
+  <a href="#fb-master-outlet">Outlet / KOT</a>
+  <a href="#fb-cashier-sale">Direct sale</a>
   <a href="#fb-lookup">Guest lookup</a>
-  <a href="#fb-inhouse">In-house folio charge</a>
-  <a href="/admin/outlet-dashboard">Outlet board</a>
+  <a href="#fb-inhouse">Folio charge</a>
   <a href="#fb-expenses">Expenses</a>
-  <a href="#fb-sales-summary">Sales summary</a>
-  <a href="#fb-catalog">Menu catalog</a>
+  <a href="#fb-sales-summary">Sales report</a>
+  <a href="#fb-catalog">Menu admin</a>
 </nav>
+${snapshotMasterHtml}
+${outletMasterStripHtml}
 ${fbQuickCashierSectionHtml}
 ${saved}
 ${mergedBanner}
@@ -9119,9 +9170,9 @@ ${directOk ? `<p class="badge ok" style="padding:12px 14px;margin-bottom:12px">W
 ${directErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom:12px">${escapeHtml(directErrStr)}</p>` : ""}
 ${expenseSavedFlag ? `<p class="badge ok" style="padding:12px 14px;margin-bottom:12px">Operational expense saved.</p>` : ""}
 ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom:12px">${escapeHtml(expenseErrStr)}</p>` : ""}
-<section id="fb-lookup" class="fb-pos-card" style="background:#f0f9ff;border:1px solid #7dd3fc;margin-bottom:16px">
-  <h2 style="margin:0 0 10px;font-size:1.1rem">In-house guest picker</h2>
-  <p class="muted" style="margin:0 0 12px;font-size:13px"><strong>1)</strong> Stay date · <strong>2)</strong> Room / unit · <strong>3)</strong> Optional name or reference filters · <strong>4)</strong> Load folio. Same-night in-house stays only.</p>
+<section id="fb-lookup" class="fb-pos-card" style="background:#f0f9ff;border:1px solid #7dd3fc;margin-bottom:16px;scroll-margin-top:72px">
+  <h2 style="margin:0 0 10px;font-size:1.1rem">In-house guest lookup</h2>
+  <p class="muted" style="margin:0 0 12px;font-size:13px"><strong>1)</strong> Stay date · <strong>2)</strong> Room / unit (or leave “All rooms”) · <strong>3)</strong> Filter by name, phone, or reference · <strong>4)</strong> Choose guest in the list to load folio — <em>no need to paste booking ID first</em>. Booking ID remains available as a fallback under Folio charge.</p>
   <form id="fb-guest-filters" method="get" action="/admin/fb/menu" style="margin-bottom:14px">
     <input type="hidden" name="report_start" value="${escapeHtml(reportStartVal)}" />
     <input type="hidden" name="report_end" value="${escapeHtml(reportEndVal)}" />
@@ -9174,11 +9225,11 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
     })();
   </script>
 </section>
-<section id="fb-inhouse">
+<section id="fb-inhouse" style="scroll-margin-top:72px">
 <section id="fb-charge-root" class="fb-pos-shell" data-currency="${escapeHtml(hotel.currency)}" data-booking-valid="${bookingForBanner ? "1" : "0"}" data-loaded-booking-id="${bookingForBanner ? escapeHtml(bookingForBanner.id) : ""}" data-guest-recap="${guestRecapLabel}">
   <header class="fb-pos-shell-head">
-    <h2 style="margin:0 0 4px;font-size:1.25rem">Folio charge</h2>
-    <p class="muted" style="margin:0;font-size:13px">Hotel POS-style screen: link a booking, pick menu lines, confirm totals, post to the guest folio.</p>
+    <h2 style="margin:0 0 4px;font-size:1.25rem">In-house guest folio charge</h2>
+    <p class="muted" style="margin:0;font-size:13px">Post menu lines to the staying guest&apos;s folio (room service or dining). Use <strong>Guest lookup</strong> above to load the booking, then select items and post.</p>
   </header>
   ${bookingContextPanel}
   ${bookingGatePanel}
@@ -9429,7 +9480,7 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
   </script>
 </section>
 </section>
-<section id="fb-expenses" class="fb-pos-card" style="margin-bottom:18px;border:1px solid #e9d5ff;background:#faf5ff">
+<section id="fb-expenses" class="fb-pos-card" style="margin-bottom:18px;border:1px solid #e9d5ff;background:#faf5ff;scroll-margin-top:72px">
   <h2 style="margin:0 0 8px;font-size:1.1rem">F&amp;B expenses &amp; purchases</h2>
   <p class="muted" style="margin:0 0 12px;font-size:13px">Groceries, beverages, supplies — internal cost tracking (not guest folio).</p>
   <form method="post" action="/admin/fb/menu/expense" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:14px">
@@ -9464,8 +9515,8 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
     </table>
   </div>
 </section>
-<section id="fb-sales-summary" class="fb-pos-card" style="margin-bottom:18px">
-  <h2 style="margin:0 0 8px;font-size:1.1rem">Sales summary</h2>
+<section id="fb-sales-summary" class="fb-pos-card" style="margin-bottom:18px;scroll-margin-top:72px">
+  <h2 style="margin:0 0 8px;font-size:1.1rem">Sales summary &amp; reporting</h2>
   <form method="get" action="/admin/fb/menu" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:14px">
     <input type="hidden" name="ops_date" value="${escapeHtml(opsDateVal)}" />
     <input type="hidden" name="guest_q" value="${escapeHtml(explicitGuestQ)}" />
@@ -9493,8 +9544,8 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
   </table>
   <p class="muted" style="font-size:11px;margin-top:10px">Guest menu orders = posted <code>FbOrder</code> totals. Guest folio F&amp;B = ledger charges linked to a stay. Direct F&amp;B = charges with no booking (walk-ins / quick cashier). Walk-in payments use the same method buckets as shift-close. Activity = <code>ACTIVITY_CHARGE</code> lines in the date range.</p>
 </section>
-<section id="fb-catalog" style="margin-bottom:16px;border:1px solid #e2e8f0;border-radius:12px;padding:14px">
-  <h3 style="margin-top:0">Add menu item</h3>
+<section id="fb-catalog" style="margin-bottom:16px;border:1px solid #e2e8f0;border-radius:12px;padding:14px;scroll-margin-top:72px">
+  <h3 style="margin-top:0">Menu administration — add item</h3>
   <form method="post" action="/admin/fb/menu/add" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
     <label>Outlet
       <select name="outletType" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
@@ -9514,11 +9565,12 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
   </form>
   <span class="muted" style="font-size:12px;margin-left:8px">Safe to run more than once — skips duplicates by name + outlet.</span>
 </section>
-<p class="muted"><a class="inline-link" href="/admin/bookings">Back to bookings</a></p>`;
+<p class="muted"><a class="inline-link" href="/admin/bookings">Back to bookings</a></p>
+</div>`;
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/fb/menu/charge-folio", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/fb/menu/charge-folio", requireFbOperationsEdit(), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
@@ -9589,7 +9641,7 @@ adminRouter.post("/fb/menu/charge-folio", requirePermission("BOOKINGS", "EDIT"),
   }
 });
 
-adminRouter.post("/fb/menu/append-resort-menu", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/fb/menu/append-resort-menu", requireFbOperationsEdit(), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
@@ -9606,7 +9658,7 @@ adminRouter.post("/fb/menu/append-resort-menu", requirePermission("BOOKINGS", "E
   res.redirect(`/admin/fb/menu?merged=${encodeURIComponent(String(n))}&saved=1`);
 });
 
-adminRouter.post("/fb/menu/add", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/fb/menu/add", requireFbOperationsEdit(), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
@@ -9628,7 +9680,7 @@ adminRouter.post("/fb/menu/add", requirePermission("BOOKINGS", "EDIT"), async (r
   res.redirect("/admin/fb/menu?saved=1");
 });
 
-adminRouter.post("/fb/menu/:itemId/toggle", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/fb/menu/:itemId/toggle", requireFbOperationsEdit(), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
@@ -9641,7 +9693,7 @@ adminRouter.post("/fb/menu/:itemId/toggle", requirePermission("BOOKINGS", "EDIT"
   res.redirect("/admin/fb/menu?saved=1");
 });
 
-adminRouter.post("/fb/menu/direct-sale", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, res) => {
   const session = getSession(req);
   const hotel = await prisma.hotel.findFirst({
     where: { slug: "al-ashkhara-beach-resort" },
@@ -9691,7 +9743,7 @@ adminRouter.post("/fb/menu/direct-sale", requirePermission("BOOKINGS", "EDIT"), 
   }
 });
 
-adminRouter.post("/fb/menu/expense", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/fb/menu/expense", requireFbOperationsEdit(), async (req, res) => {
   const session = getSession(req);
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel || !session) {
