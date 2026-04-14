@@ -1394,6 +1394,13 @@ async function notifyHousekeepingStaff(opts: {
   }
 }
 
+function isOptionalHousekeepingSchemaError(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  const msg = raw.toLowerCase();
+  if (!msg.includes("no such table")) return false;
+  return msg.includes("housekeepingtask") || msg.includes("notification");
+}
+
 function parseCookies(req: Request): Record<string, string> {
   const rawCookie = req.headers.cookie;
   if (!rawCookie) return {};
@@ -2628,51 +2635,61 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
   const staffId = staffSession?.staffId;
 
   let hkCreatedFromBoard: { created: boolean; taskId: string | null } = { created: false, taskId: null };
+  let hkOpsSkipped = false;
   await prisma.$transaction(async (tx) => {
     const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
     await tx.roomUnit.update({
       where: { id: unit.id },
       data: { notes: writeManualRoomStatusToNotes(fresh?.notes, status) }
     });
-    if (status === "CLEANING") {
-      hkCreatedFromBoard = await ensureHousekeepingTaskForCleaningTx(tx, {
-        hotelId: hotel.id,
-        roomUnitId: unit.id,
-        source: HousekeepingTaskSource.MANUAL,
-        createdByUserId: staffId ?? null,
-        notes: "Room board set to CLEANING"
-      });
-    }
-    if (status === "AVAILABLE") {
-      await tx.housekeepingTask.updateMany({
-        where: {
+    try {
+      if (status === "CLEANING") {
+        hkCreatedFromBoard = await ensureHousekeepingTaskForCleaningTx(tx, {
           hotelId: hotel.id,
           roomUnitId: unit.id,
-          status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
-        },
-        data: {
-          status: HousekeepingTaskStatus.COMPLETED,
-          completedAt: new Date(),
-          completedByUserId: staffId ?? null,
-          notes: "Marked AVAILABLE from room board (bypassed HK screen)"
-        }
-      });
+          source: HousekeepingTaskSource.MANUAL,
+          createdByUserId: staffId ?? null,
+          notes: "Room board set to CLEANING"
+        });
+      }
+      if (status === "AVAILABLE") {
+        await tx.housekeepingTask.updateMany({
+          where: {
+            hotelId: hotel.id,
+            roomUnitId: unit.id,
+            status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+          },
+          data: {
+            status: HousekeepingTaskStatus.COMPLETED,
+            completedAt: new Date(),
+            completedByUserId: staffId ?? null,
+            notes: "Marked AVAILABLE from room board (bypassed HK screen)"
+          }
+        });
+      }
+    } catch (err) {
+      if (!isOptionalHousekeepingSchemaError(err)) throw err;
+      hkOpsSkipped = true;
     }
   });
 
-  if (hkCreatedFromBoard.created && hkCreatedFromBoard.taskId) {
-    const unitLabel = await prisma.roomUnit.findUnique({
-      where: { id: unit.id },
-      select: { name: true, roomType: { select: { name: true } } }
-    });
-    const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : unit.id;
-    await notifyHousekeepingStaff({
-      hotelId: hotel.id,
-      type: "HK_TASK_NEW",
-      title: "Room marked for cleaning",
-      body: `${label} — new housekeeping task from room board.`,
-      payloadJson: JSON.stringify({ taskId: hkCreatedFromBoard.taskId, roomUnitId: unit.id })
-    });
+  if (!hkOpsSkipped && hkCreatedFromBoard.created && hkCreatedFromBoard.taskId) {
+    try {
+      const unitLabel = await prisma.roomUnit.findUnique({
+        where: { id: unit.id },
+        select: { name: true, roomType: { select: { name: true } } }
+      });
+      const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : unit.id;
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "HK_TASK_NEW",
+        title: "Room marked for cleaning",
+        body: `${label} — new housekeeping task from room board.`,
+        payloadJson: JSON.stringify({ taskId: hkCreatedFromBoard.taskId, roomUnitId: unit.id })
+      });
+    } catch (err) {
+      if (!isOptionalHousekeepingSchemaError(err)) throw err;
+    }
   }
 
   await logAudit({
