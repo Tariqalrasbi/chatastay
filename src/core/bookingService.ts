@@ -8,6 +8,14 @@ import { ensureActiveFolio } from "./folioService";
 import { addDays, findAvailableRoomType, startOfDay } from "./availability";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
 
+type OpsRoomStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
+
+function parseOpsRoomStatusFromNotes(notes: string | null | undefined): OpsRoomStatus | null {
+  if (!notes) return null;
+  const m = notes.match(/@manual-status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)@/i);
+  return (m?.[1]?.toUpperCase() as OpsRoomStatus | undefined) ?? null;
+}
+
 export async function autoAssignRoomUnitForBookingTx(params: {
   tx: Prisma.TransactionClient;
   hotelId: string;
@@ -19,7 +27,7 @@ export async function autoAssignRoomUnitForBookingTx(params: {
   const units = await params.tx.roomUnit.findMany({
     where: { hotelId: params.hotelId, roomTypeId: params.roomTypeId, isActive: true },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-    select: { id: true }
+    select: { id: true, notes: true }
   });
   if (!units.length) return null;
 
@@ -36,7 +44,11 @@ export async function autoAssignRoomUnitForBookingTx(params: {
     select: { roomUnitId: true }
   });
   const occupied = new Set(overlaps.map((row) => row.roomUnitId).filter((id): id is string => Boolean(id)));
-  const candidate = units.find((unit) => !occupied.has(unit.id));
+  const candidate = units.find((unit) => {
+    if (occupied.has(unit.id)) return false;
+    const ops = parseOpsRoomStatusFromNotes(unit.notes);
+    return ops !== "CLEANING" && ops !== "MAINTENANCE";
+  });
   return candidate?.id ?? null;
 }
 
@@ -183,11 +195,20 @@ export async function createConfirmedBookingAtomic(params: {
       where: { hotelId: params.hotelId, roomTypeId: offer.roomTypeId, date: { gte: stayStart, lt: stayEnd } },
       select: { total: true, reserved: true, closedOut: true }
     });
-    const availableRooms = inventoryRows.length
+    const blockedUnits = await tx.roomUnit.count({
+      where: {
+        hotelId: params.hotelId,
+        roomTypeId: offer.roomTypeId,
+        isActive: true,
+        OR: [{ notes: { contains: "@manual-status:CLEANING@" } }, { notes: { contains: "@manual-status:MAINTENANCE@" } }]
+      }
+    });
+    const baselineAvailableRooms = inventoryRows.length
       ? inventoryRows.some((x) => x.closedOut)
         ? 0
         : inventoryRows.reduce((min, row) => Math.min(min, Math.max(0, row.total - row.reserved)), Number.POSITIVE_INFINITY)
       : Math.max(0, roomType.totalInventory - overlappingCount);
+    const availableRooms = Math.max(0, baselineAvailableRooms - blockedUnits);
 
     if (availableRooms < params.rooms) {
       throw new Error("Availability changed while confirming booking.");

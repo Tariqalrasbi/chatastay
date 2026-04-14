@@ -6,6 +6,14 @@ import { prisma } from "../db";
 
 export type RoomTypeWithUnits = RoomType & { roomUnits: RoomUnit[] };
 
+type OpsRoomStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
+
+function parseOpsRoomStatusFromNotes(notes: string | null | undefined): OpsRoomStatus | null {
+  if (!notes) return null;
+  const m = notes.match(/@manual-status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)@/i);
+  return (m?.[1]?.toUpperCase() as OpsRoomStatus | undefined) ?? null;
+}
+
 function startOfDayLocal(input: Date): Date {
   const d = new Date(input);
   d.setHours(0, 0, 0, 0);
@@ -116,6 +124,8 @@ export async function computeManualCheckInRoomSelection(params: {
     const freeUnits: Array<{ id: string; name: string }> = [];
     for (const u of rt.roomUnits) {
       if (!u.isActive) continue;
+      const ops = parseOpsRoomStatusFromNotes(u.notes);
+      if (ops === "CLEANING" || ops === "MAINTENANCE") continue;
       const busy = await unitHasOverlappingBooking({
         hotelId,
         roomUnitId: u.id,

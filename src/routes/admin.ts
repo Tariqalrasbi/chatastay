@@ -9972,6 +9972,10 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   }
   const session = getSession(req);
   const staffId = session?.staffId ?? "";
+  const claimViewRaw = typeof req.query.claimView === "string" ? req.query.claimView.trim().toLowerCase() : "all";
+  const claimView: "all" | "unclaimed" | "mine" | "others" = ["all", "unclaimed", "mine", "others"].includes(claimViewRaw)
+    ? (claimViewRaw as "all" | "unclaimed" | "mine" | "others")
+    : "all";
 
   const openTasks = await prisma.housekeepingTask.findMany({
     where: { hotelId: hotel.id, status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] } },
@@ -10019,26 +10023,56 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   const canAct =
     session &&
     (hasPermission(session.permissions, "HOUSEKEEPING", "EDIT") || hasPermission(session.permissions, "ROOMS", "EDIT"));
+  const canManageAssignments =
+    session &&
+    (hasPermission(session.permissions, "HOUSEKEEPING", "MANAGE") || hasPermission(session.permissions, "ROOMS", "MANAGE"));
+
+  const filteredOpenTasks = openTasks.filter((t) => {
+    if (!staffId || staffId === "STAFF-SUPERADMIN") return claimView !== "mine" && claimView !== "others";
+    if (claimView === "unclaimed") return !t.assignedToUserId;
+    if (claimView === "mine") return t.assignedToUserId === staffId;
+    if (claimView === "others") return Boolean(t.assignedToUserId && t.assignedToUserId !== staffId);
+    return true;
+  });
 
   const rowHtml = (t: (typeof openTasks)[0]) => {
     const roomLabel = `${t.roomUnit.name} (${t.roomUnit.roomType.name})`;
-    const assignee = t.assignedTo ? escapeHtml(t.assignedTo.fullName) : '<span class="muted">Unassigned</span>';
+    const assigneeName = t.assignedTo ? escapeHtml(t.assignedTo.fullName) : "Unassigned";
+    const assignee =
+      t.assignedToUserId && staffId && t.assignedToUserId === staffId
+        ? `<span class="badge ok">Claimed by me — ${assigneeName}</span>`
+        : t.assignedTo
+          ? `<span class="badge pending">Claimed by ${assigneeName}</span>`
+          : '<span class="muted">Unclaimed</span>';
     const ref = t.booking?.referenceCode ? escapeHtml(t.booking.referenceCode) : "—";
+    const claimedAt = t.startedAt ? `<div class="muted" style="font-size:11px;margin-top:4px">Claimed at ${escapeHtml(formatDateTime(t.startedAt))}</div>` : "";
+    const claimDisabled = Boolean(t.assignedToUserId && (!staffId || t.assignedToUserId !== staffId));
     const claimBtn =
       canAct && t.status === HousekeepingTaskStatus.PENDING
-        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/claim" style="display:inline;margin:0"><button type="submit" style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Claim</button></form>`
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/claim" style="display:inline;margin:0"><button type="submit" ${claimDisabled ? "disabled" : ""} style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Claim</button></form>`
         : "";
     const doneBtn =
       canAct && (t.status === HousekeepingTaskStatus.PENDING || t.status === HousekeepingTaskStatus.IN_PROGRESS)
-        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 0 0 6px"><button type="submit" style="padding:4px 10px;border-radius:8px;border:0;background:#128c7e;color:#fff;cursor:pointer;font-weight:600">Mark clean (available)</button></form>`
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 0 0 6px"><input type="hidden" name="targetStatus" value="AVAILABLE" /><button type="submit" style="padding:4px 10px;border-radius:8px;border:0;background:#128c7e;color:#fff;cursor:pointer;font-weight:600">Mark clean (available)</button></form>`
+        : "";
+    const maintenanceBtn =
+      canAct && (t.status === HousekeepingTaskStatus.PENDING || t.status === HousekeepingTaskStatus.IN_PROGRESS)
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 0 0 6px"><input type="hidden" name="targetStatus" value="MAINTENANCE" /><button type="submit" style="padding:4px 10px;border-radius:8px;border:0;background:#6b21a8;color:#fff;cursor:pointer;font-weight:600">Mark maintenance</button></form>`
+        : "";
+    const reassignSelect =
+      canManageAssignments && t.assignedToUserId
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/reassign" style="display:inline;margin:0 0 0 6px">
+            <input type="email" name="assigneeEmail" required placeholder="reassign email" style="padding:4px 8px;border:1px solid #d8dee6;border-radius:8px;width:170px" />
+            <button type="submit" style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Reassign</button>
+          </form>`
         : "";
     return `<tr>
       <td>${escapeHtml(roomLabel)}</td>
       <td>${escapeHtml(t.status)}</td>
       <td>${escapeHtml(t.source)}</td>
-      <td>${assignee}</td>
+      <td>${assignee}${claimedAt}</td>
       <td>${ref}</td>
-      <td style="white-space:nowrap">${claimBtn}${doneBtn}</td>
+      <td style="white-space:nowrap">${claimBtn}${doneBtn}${maintenanceBtn}${reassignSelect}</td>
     </tr>`;
   };
 
@@ -10056,12 +10090,24 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
 <p class="muted">${escapeHtml(hotel.displayName)} — Tasks are created when a room is set to <strong>CLEANING</strong> (checkout or room board). Assign cleaners, then mark <strong>clean</strong> to set the room to <strong>AVAILABLE</strong>. Actions are logged with staff identity.</p>
 <p class="muted" style="font-size:13px">Grant <strong>HOUSEKEEPING</strong> (View/Edit) in <a href="/admin/users">Users</a> for housekeeping-only accounts. Front desk typically uses <strong>ROOMS</strong> Edit.</p>
 ${alertsHtml}
+<section style="margin-bottom:14px">
+  <form method="get" action="/admin/housekeeping" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <span class="muted" style="font-size:12px">Task view</span>
+    <select name="claimView" onchange="this.form.submit()" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
+      <option value="all" ${claimView === "all" ? "selected" : ""}>All open rooms</option>
+      <option value="unclaimed" ${claimView === "unclaimed" ? "selected" : ""}>Unclaimed only</option>
+      <option value="mine" ${claimView === "mine" ? "selected" : ""}>My claimed rooms</option>
+      <option value="others" ${claimView === "others" ? "selected" : ""}>Claimed by others</option>
+    </select>
+    <span class="muted" style="font-size:12px">${filteredOpenTasks.length} task(s)</span>
+  </form>
+</section>
 <section>
   <h3>Open tasks</h3>
   <div style="overflow:auto">
   <table class="data-table" style="min-width:720px">
     <thead><tr><th>Room</th><th>Status</th><th>Source</th><th>Assigned</th><th>Booking ref</th><th></th></tr></thead>
-    <tbody>${openTasks.length ? openTasks.map(rowHtml).join("") : '<tr><td colspan="6" class="muted">No open housekeeping tasks.</td></tr>'}</tbody>
+    <tbody>${filteredOpenTasks.length ? filteredOpenTasks.map(rowHtml).join("") : '<tr><td colspan="6" class="muted">No open housekeeping tasks in this view.</td></tr>'}</tbody>
   </table>
   </div>
 </section>
@@ -10112,13 +10158,34 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     res.redirect("/admin/housekeeping");
     return;
   }
-  await prisma.housekeepingTask.update({
-    where: { id: task.id },
+  const now = new Date();
+  const claim = await prisma.housekeepingTask.updateMany({
+    where: {
+      id: task.id,
+      hotelId: hotel.id,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: null
+    },
     data: {
       status: HousekeepingTaskStatus.IN_PROGRESS,
       assignedToUserId: session.staffId,
-      startedAt: new Date()
+      startedAt: now
     }
+  });
+  if (claim.count === 0) {
+    await logAudit({
+      hotelId: hotel.id,
+      action: "HOUSEKEEPING_TASK_CLAIM_BLOCKED",
+      entityType: "HousekeepingTask",
+      entityId: task.id,
+      metadata: { roomUnitId: task.roomUnitId, blockedForUserId: session.staffId }
+    });
+    res.redirect("/admin/housekeeping?claimView=unclaimed");
+    return;
+  }
+  await prisma.roomUnit.update({
+    where: { id: task.roomUnitId },
+    data: { notes: writeManualRoomStatusToNotes((await prisma.roomUnit.findUnique({ where: { id: task.roomUnitId }, select: { notes: true } }))?.notes, "CLEANING") }
   });
   await logAudit({
     hotelId: hotel.id,
@@ -10130,10 +10197,60 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
   res.redirect("/admin/housekeeping");
 });
 
+adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ module: "HOUSEKEEPING", action: "MANAGE" }, { module: "ROOMS", action: "MANAGE" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  const assigneeEmail = String(req.body.assigneeEmail ?? "").trim().toLowerCase();
+  if (!hotel || !session || !assigneeEmail) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: { id: taskId, hotelId: hotel.id, status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] } },
+    select: { id: true, roomUnitId: true, assignedToUserId: true }
+  });
+  if (!task) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  const assignee = await prisma.hotelUser.findFirst({
+    where: { hotelId: hotel.id, email: assigneeEmail, isActive: true },
+    select: { id: true, fullName: true, email: true }
+  });
+  if (!assignee) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  await prisma.housekeepingTask.update({
+    where: { id: task.id },
+    data: {
+      assignedToUserId: assignee.id,
+      status: HousekeepingTaskStatus.IN_PROGRESS,
+      startedAt: task.assignedToUserId ? undefined : new Date()
+    }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_REASSIGNED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    metadata: {
+      roomUnitId: task.roomUnitId,
+      assignedToUserId: assignee.id,
+      assignedToEmail: assignee.email,
+      reassignedByUserId: session.staffId
+    }
+  });
+  res.redirect("/admin/housekeeping");
+});
+
 adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
+  const targetStatusRaw = String(req.body.targetStatus ?? "AVAILABLE").trim().toUpperCase();
+  const targetStatus: RoomBoardStatus = targetStatusRaw === "MAINTENANCE" ? "MAINTENANCE" : "AVAILABLE";
   if (!hotel || !session) {
     res.redirect("/admin/housekeeping");
     return;
@@ -10150,11 +10267,20 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
     res.redirect("/admin/housekeeping");
     return;
   }
+  if (task.assignedToUserId && session.staffId !== task.assignedToUserId) {
+    const canOverride =
+      hasPermission(session.permissions, "HOUSEKEEPING", "MANAGE") ||
+      hasPermission(session.permissions, "ROOMS", "MANAGE");
+    if (!canOverride) {
+      res.redirect("/admin/housekeeping");
+      return;
+    }
+  }
   await prisma.$transaction(async (tx) => {
     const fresh = await tx.roomUnit.findUnique({ where: { id: task.roomUnitId }, select: { notes: true } });
     await tx.roomUnit.update({
       where: { id: task.roomUnitId },
-      data: { notes: writeManualRoomStatusToNotes(fresh?.notes, "AVAILABLE") }
+      data: { notes: writeManualRoomStatusToNotes(fresh?.notes, targetStatus) }
     });
     await tx.housekeepingTask.update({
       where: { id: task.id },
@@ -10171,7 +10297,7 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
     entityType: "HousekeepingTask",
     entityId: task.id,
     bookingId: task.bookingId ?? undefined,
-    metadata: { roomUnitId: task.roomUnitId, completedByUserId: session.staffId }
+    metadata: { roomUnitId: task.roomUnitId, completedByUserId: session.staffId, targetStatus }
   });
   res.redirect("/admin/housekeeping");
 });
