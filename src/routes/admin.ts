@@ -152,6 +152,7 @@ const idCardUpload = multer({
 type AdminSession = {
   staffId: string;
   email: string;
+  role: string;
   permissions: PermissionMatrix;
 };
 
@@ -223,6 +224,12 @@ function buildNoPermissions(): PermissionMatrix {
 
 function defaultPermissionsForRole(role: string): PermissionMatrix {
   if (role === "MANAGER") return buildFullPermissions();
+  if (role === "HOUSEKEEPING") {
+    const p = buildNoPermissions();
+    p.HOUSEKEEPING = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
+    p.ROOMS = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
+    return p;
+  }
   if (role === "FINANCE") {
     const p = buildNoPermissions();
     p.BILLING = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
@@ -1370,6 +1377,7 @@ async function notifyHousekeepingStaff(opts: {
     select: { id: true, email: true, role: true }
   });
   for (const u of users) {
+    if (!u.email) continue;
     const matrix = effectivePermissionsForHotelUser(u.email, u.role);
     if (!hasPermission(matrix, "HOUSEKEEPING", "VIEW")) continue;
     await prisma.notification.create({
@@ -1575,6 +1583,20 @@ adminRouter.use((req, _res, next) => {
   );
 });
 
+/** Housekeeping users use /hk only; keep admin area isolated. */
+adminRouter.use((req, res, next) => {
+  const session = getSession(req);
+  if (session?.role === "HOUSEKEEPING") {
+    if (req.path === "/logout") {
+      next();
+      return;
+    }
+    res.redirect("/hk");
+    return;
+  }
+  next();
+});
+
 adminRouter.get("/", (req, res) => {
   if (!isAuthenticated(req)) {
     res.redirect("/admin/login");
@@ -1613,6 +1635,7 @@ adminRouter.post("/login", async (req, res) => {
         activeSessions.set(token, {
           staffId: hotelUser.id,
           email,
+          role: String(hotelUser.role),
           permissions: effectivePermissions
         });
         res.setHeader(
@@ -1630,6 +1653,7 @@ adminRouter.post("/login", async (req, res) => {
     activeSessions.set(token, {
       staffId: "STAFF-SUPERADMIN",
       email,
+      role: "MANAGER",
       permissions: getPermissionsForEmail(email)
     });
     res.setHeader(
@@ -1820,14 +1844,14 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
 
   const rows = users
     .map((user) => {
-      const perms = normalizePermissionMatrix(store[user.email.toLowerCase()] ?? buildNoPermissions());
+      const perms = normalizePermissionMatrix(store[(user.email ?? "").toLowerCase()] ?? defaultPermissionsForRole(String(user.role)));
       const modulesSummary = permissionModules
         .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
         .map((m) => permissionModuleLabels[m])
         .join(", ");
       return `<tr>
       <td>${escapeHtml(user.fullName)}</td>
-      <td>${escapeHtml(user.email)}</td>
+      <td>${escapeHtml(user.email ?? user.username ?? "—")}</td>
       <td>${escapeHtml(user.role)}</td>
       <td>${user.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
       <td>${escapeHtml(modulesSummary || "No permissions set")}</td>
@@ -1860,13 +1884,16 @@ ${created}
   <form method="post" action="/admin/users" style="display:grid; gap:10px">
     <div class="grid-2">
       <label>Full name<br /><input type="text" name="fullName" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
-      <label>Email<br /><input type="email" name="email" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Email (optional for housekeeping)<br /><input type="email" name="email" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Username (for /hk login)<br /><input type="text" name="username" maxlength="64" placeholder="e.g. hk-01" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
       <label>Password<br /><input type="password" name="password" minlength="8" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>PIN (optional, /hk login)<br /><input type="password" name="pin" minlength="4" maxlength="12" placeholder="4-12 digits" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
       <label>Role
         <select name="role" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">
           <option value="MANAGER">MANAGER</option>
           <option value="STAFF">STAFF</option>
           <option value="FINANCE">FINANCE</option>
+          <option value="HOUSEKEEPING">HOUSEKEEPING</option>
         </select>
       </label>
     </div>
@@ -1892,36 +1919,63 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     return;
   }
   const fullName = String(req.body.fullName ?? "").trim();
-  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const emailRaw = String(req.body.email ?? "").trim().toLowerCase();
+  const email = emailRaw || null;
+  const username = String(req.body.username ?? "").trim().toLowerCase() || null;
   const password = String(req.body.password ?? "");
+  const pin = String(req.body.pin ?? "").trim();
   const role = String(req.body.role ?? "MANAGER");
-  if (!fullName || !email || password.length < 8) {
+  if (!fullName || password.length < 8) {
     res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>Invalid user input.</p>", true));
     return;
   }
-  const allowedRoles = new Set(["MANAGER", "STAFF", "FINANCE"]);
+  const allowedRoles = new Set(["MANAGER", "STAFF", "FINANCE", "HOUSEKEEPING"]);
+  if (role === "HOUSEKEEPING" && !username && !email) {
+    res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>For housekeeping, set at least a username or email.</p>", true));
+    return;
+  }
   const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
-
-  await prisma.hotelUser.upsert({
-    where: { hotelId_email: { hotelId: hotel.id, email } },
-    create: {
-      hotelId: hotel.id,
-      fullName,
-      email,
-      passwordHash: hashPassword(password),
-      role: allowedRoles.has(role) ? (role as "MANAGER" | "STAFF" | "FINANCE") : "MANAGER",
-      isActive: true
-    },
-    update: {
-      fullName,
-      passwordHash: hashPassword(password),
-      role: allowedRoles.has(role) ? (role as "MANAGER" | "STAFF" | "FINANCE") : "MANAGER",
-      isActive: true
-    }
-  });
+  const roleSafe = allowedRoles.has(role) ? role : "MANAGER";
+  const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
+  const createData = {
+    hotelId: hotel.id,
+    fullName,
+    email,
+    username,
+    passwordHash: hashPassword(password),
+    pinHash,
+    role: roleSafe as "MANAGER" | "STAFF" | "FINANCE" | "HOUSEKEEPING",
+    isActive: true
+  };
+  if (email) {
+    await prisma.hotelUser.upsert({
+      where: { hotelId_email: { hotelId: hotel.id, email } },
+      create: createData,
+      update: {
+        fullName,
+        username,
+        passwordHash: createData.passwordHash,
+        pinHash,
+        role: createData.role,
+        isActive: true
+      }
+    });
+  } else if (username) {
+    await prisma.hotelUser.upsert({
+      where: { hotelId_username: { hotelId: hotel.id, username } },
+      create: createData,
+      update: {
+        fullName,
+        passwordHash: createData.passwordHash,
+        pinHash,
+        role: createData.role,
+        isActive: true
+      }
+    });
+  }
 
   const store = readPermissionStore();
-  store[email] = permissions;
+  if (email) store[email] = permissions;
   writePermissionStore(store);
   res.redirect("/admin/users?created=1");
 });

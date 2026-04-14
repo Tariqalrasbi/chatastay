@@ -3,6 +3,7 @@ import express from "express";
 import path from "node:path";
 import { apiRouter } from "./routes/api";
 import { adminRouter } from "./routes/admin";
+import { housekeepingRouter } from "./routes/housekeeping";
 import { guestRouter } from "./routes/guest";
 import { ownerRouter } from "./routes/owner";
 import { whatsappWebhookRouter } from "./whatsapp/webhookRouter";
@@ -30,6 +31,7 @@ app.get("/", (_req, res) => {
 
 app.use("/api", apiRouter);
 app.use("/admin", adminRouter);
+app.use("/hk", housekeepingRouter);
 app.use("/guest", guestRouter);
 app.use("/owner", ownerRouter);
 app.use("/whatsapp/webhook", whatsappWebhookRouter);

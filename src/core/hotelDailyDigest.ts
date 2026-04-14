@@ -113,7 +113,7 @@ export async function runHotelDailyDigest(opts: {
     },
     select: { email: true, fullName: true }
   });
-  const toList = recipients.map((u) => u.email.trim()).filter(Boolean);
+  const toList = recipients.map((u) => (u.email ?? "").trim()).filter(Boolean);
   const fallbackTo = (process.env.ADMIN_EMAIL ?? "").trim();
   const emailTo = toList.length ? toList.join(", ") : fallbackTo;
   if (!emailTo) {
