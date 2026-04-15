@@ -245,6 +245,13 @@ function defaultPermissionsForRole(role: string): PermissionMatrix {
     p.REPORTS = { VIEW: true, EDIT: false, CREATE: false, DELETE: false, MANAGE: false };
     return p;
   }
+  if (role === "FRONTDESK") {
+    const p = buildNoPermissions();
+    p.ROOMS = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
+    p.BOOKINGS = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    p.CONVERSATIONS = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    return p;
+  }
   return buildNoPermissions();
 }
 
@@ -611,6 +618,8 @@ function getAdminLiveScript(): string {
 function renderLayout(content: string, authenticated: boolean): string {
   const layout = readView("layout.html");
   const perm = authenticated ? auditActorContext.getStore()?.session?.permissions : undefined;
+  const role = authenticated ? auditActorContext.getStore()?.session?.role : undefined;
+  const isFrontdesk = role === "FRONTDESK";
   const canNavHousekeeping =
     !perm ||
     hasPermission(perm, "HOUSEKEEPING", "VIEW") ||
@@ -618,76 +627,112 @@ function renderLayout(content: string, authenticated: boolean): string {
   const canNavOutlet =
     !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "ROOMS", "VIEW");
   const canNavFb =
-    !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW");
+    !isFrontdesk && (!perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW"));
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
   const navHtml = authenticated
-    ? [
-        '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
-        '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
-        '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
-        ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B</a>'] : []),
-        ...(canNavComms
-          ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
-          : []),
-        '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>',
-        '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>'
-      ].join("")
+    ? isFrontdesk
+      ? [
+          '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
+          '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
+          '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
+          ...(canNavComms
+            ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
+            : [])
+        ].join("")
+      : [
+          '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
+          '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
+          '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
+          ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B</a>'] : []),
+          ...(canNavComms
+            ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
+            : []),
+          '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>',
+          '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>'
+        ].join("")
     : '<a href="/admin/login">Login</a>';
   const logoutHtml = authenticated
     ? '<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>'
     : "";
   const sectionTabsHtml = authenticated
-    ? [
-        '<div class="section-tabs" data-section="dashboard">',
-        '<a href="/admin/profile">Overview</a>',
-        "</div>",
-        '<div class="section-tabs" data-section="reservations">',
-        '<a href="/admin/bookings">Bookings</a>',
-        '<a href="/admin/calendar">Calendar</a>',
-        '<a href="/admin/inventory">Availability</a>',
-        '<a href="/admin/rooms">Rates</a>',
-        '<a href="/admin/offers">Offers</a>',
-        "</div>",
-        '<div class="section-tabs" data-section="rooms">',
-        '<a href="/admin/room-board">Room board</a>',
-        ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
-        '<a href="/admin/handover-sheet">Handover</a>',
-        '<a href="/admin/front-desk/check-in">Check-in</a>',
-        '<a href="/admin/front-desk/check-out">Check-out</a>',
-        '<a href="/admin/shifts">Shifts</a>',
-        '<a href="/admin/shift-close">Shift close</a>',
-        '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
-        "</div>",
-        '<div class="section-tabs" data-section="fb">',
-        '<a href="/admin/fb/menu">F&amp;B master</a>',
-        ...(canNavOutlet
-          ? [
-              '<a href="/admin/outlet-dashboard">Outlet board</a>',
-              '<a href="/admin/outlet-orders">Outlet orders</a>',
-              '<a href="/admin/restaurant-ops">Restaurant operations guide</a>'
-            ]
-          : []),
-        "</div>",
-        '<div class="section-tabs" data-section="comms">',
-        '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
-        '<a href="/admin/campaigns">Campaigns</a>',
-        "</div>",
-        '<div class="section-tabs" data-section="account">',
-        '<a href="/admin/setup">Settings</a>',
-        '<a href="/admin/users">Users &amp; permissions</a>',
-        '<a href="/admin/subscription">Subscription</a>',
-        '<a href="/admin/billing">Billing</a>',
-        '<a href="/admin/integrations">Integrations</a>',
-        "</div>",
-        '<div class="section-tabs" data-section="insights">',
-        '<a href="/admin/reports-center">Reports</a>',
-        '<a href="/admin/management-kpi">KPI dashboard</a>',
-        '<a href="/admin/daily-digest">Daily digest</a>',
-        '<a href="/admin/ai-analytics">AI analytics</a>',
-        '<a href="/admin/booking-funnel">Booking funnel</a>',
-        '<a href="/admin/routing-health">Routing health</a>',
-        "</div>"
-      ].join("")
+    ? isFrontdesk
+      ? [
+          '<div class="section-tabs" data-section="dashboard">',
+          '<a href="/admin/profile">Overview</a>',
+          "</div>",
+          '<div class="section-tabs" data-section="reservations">',
+          '<a href="/admin/bookings">Bookings</a>',
+          '<a href="/admin/calendar">Calendar</a>',
+          '<a href="/admin/inventory">Availability</a>',
+          '<a href="/admin/rooms">Rates</a>',
+          '<a href="/admin/offers">Offers</a>',
+          "</div>",
+          '<div class="section-tabs" data-section="rooms">',
+          '<a href="/admin/room-board">Room board</a>',
+          ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
+          '<a href="/admin/handover-sheet">Handover</a>',
+          '<a href="/admin/front-desk/check-in">Check-in</a>',
+          '<a href="/admin/front-desk/check-out">Check-out</a>',
+          '<a href="/admin/shifts">Shifts</a>',
+          '<a href="/admin/shift-close">Shift close</a>',
+          '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
+          "</div>",
+          '<div class="section-tabs" data-section="comms">',
+          '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
+          '<a href="/admin/campaigns">Campaigns</a>',
+          "</div>"
+        ].join("")
+      : [
+          '<div class="section-tabs" data-section="dashboard">',
+          '<a href="/admin/profile">Overview</a>',
+          "</div>",
+          '<div class="section-tabs" data-section="reservations">',
+          '<a href="/admin/bookings">Bookings</a>',
+          '<a href="/admin/calendar">Calendar</a>',
+          '<a href="/admin/inventory">Availability</a>',
+          '<a href="/admin/rooms">Rates</a>',
+          '<a href="/admin/offers">Offers</a>',
+          "</div>",
+          '<div class="section-tabs" data-section="rooms">',
+          '<a href="/admin/room-board">Room board</a>',
+          ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
+          '<a href="/admin/handover-sheet">Handover</a>',
+          '<a href="/admin/front-desk/check-in">Check-in</a>',
+          '<a href="/admin/front-desk/check-out">Check-out</a>',
+          '<a href="/admin/shifts">Shifts</a>',
+          '<a href="/admin/shift-close">Shift close</a>',
+          '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
+          "</div>",
+          '<div class="section-tabs" data-section="fb">',
+          '<a href="/admin/fb/menu">F&amp;B master</a>',
+          ...(canNavOutlet
+            ? [
+                '<a href="/admin/outlet-dashboard">Outlet board</a>',
+                '<a href="/admin/outlet-orders">Outlet orders</a>',
+                '<a href="/admin/restaurant-ops">Restaurant operations guide</a>'
+              ]
+            : []),
+          "</div>",
+          '<div class="section-tabs" data-section="comms">',
+          '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
+          '<a href="/admin/campaigns">Campaigns</a>',
+          "</div>",
+          '<div class="section-tabs" data-section="account">',
+          '<a href="/admin/setup">Settings</a>',
+          '<a href="/admin/users">Users &amp; permissions</a>',
+          '<a href="/admin/subscription">Subscription</a>',
+          '<a href="/admin/billing">Billing</a>',
+          '<a href="/admin/integrations">Integrations</a>',
+          "</div>",
+          '<div class="section-tabs" data-section="insights">',
+          '<a href="/admin/reports-center">Reports</a>',
+          '<a href="/admin/management-kpi">KPI dashboard</a>',
+          '<a href="/admin/daily-digest">Daily digest</a>',
+          '<a href="/admin/ai-analytics">AI analytics</a>',
+          '<a href="/admin/booking-funnel">Booking funnel</a>',
+          '<a href="/admin/routing-health">Routing health</a>',
+          "</div>"
+        ].join("")
     : "";
   const langSwitcherHtml = '<a href="?lang=en" data-lang-link="en">EN</a><a href="?lang=ar" data-lang-link="ar">AR</a>';
 
@@ -704,6 +749,19 @@ function renderLayout(content: string, authenticated: boolean): string {
     .replace("{{logoutAction}}", logoutHtml)
     .replace("{{content}}", content)
     .replace("{{extraScripts}}", authenticated ? getAdminLiveScript() : "");
+}
+
+function renderHkLayout(params: { title: string; content: string; active: "tasks" | "board" }): string {
+  const layout = readView("hk-layout.html");
+  const tasksCls = params.active === "tasks" ? ' class="active"' : "";
+  const boardCls = params.active === "board" ? ' class="active"' : "";
+  const navLinks = `<a href="/admin/hk"${tasksCls}>My tasks</a><a href="/admin/hk/room-board"${boardCls}>Room board</a>`;
+  const logoutForm = '<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>';
+  return layout
+    .replace("{{pageTitle}}", escapeHtml(params.title))
+    .replace("{{navLinks}}", navLinks)
+    .replace("{{logoutForm}}", logoutForm)
+    .replace("{{content}}", params.content);
 }
 
 function renderPage(pageFile: string, authenticated: boolean): string {
@@ -1546,6 +1604,20 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
+function requireHousekeepingPortal(req: Request, res: Response, next: NextFunction): void {
+  const session = getSession(req);
+  if (!session || session.role !== "HOUSEKEEPING") {
+    res.redirect("/admin/login");
+    return;
+  }
+  next();
+}
+
+function pickPostLoginRedirect(role: string): string {
+  if (role === "HOUSEKEEPING") return "/admin/hk";
+  return "/admin/dashboard";
+}
+
 function hasPermission(
   permissions: PermissionMatrix,
   moduleName: PermissionModule,
@@ -1667,7 +1739,7 @@ adminRouter.use((req, _res, next) => {
   );
 });
 
-/** Housekeeping users use /hk only; keep admin area isolated. */
+/** Housekeeping staff: dedicated portal under /admin/hk (no full admin chrome). */
 adminRouter.use((req, res, next) => {
   const session = getSession(req);
   if (session?.role === "HOUSEKEEPING") {
@@ -1675,7 +1747,12 @@ adminRouter.use((req, res, next) => {
       next();
       return;
     }
-    res.redirect("/hk");
+    const p = req.path;
+    if (p === "/hk" || p.startsWith("/hk/room-board") || p.startsWith("/hk/task/")) {
+      next();
+      return;
+    }
+    res.redirect("/admin/hk");
     return;
   }
   next();
@@ -1691,7 +1768,8 @@ adminRouter.get("/", (req, res) => {
 
 adminRouter.get("/login", (req, res) => {
   if (isAuthenticated(req)) {
-    res.redirect("/admin/dashboard");
+    const s = getSession(req);
+    res.redirect(pickPostLoginRedirect(s?.role ?? ""));
     return;
   }
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
@@ -1726,7 +1804,7 @@ adminRouter.post("/login", async (req, res) => {
           "Set-Cookie",
           `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
         );
-        res.redirect("/admin/dashboard");
+        res.redirect(pickPostLoginRedirect(String(hotelUser.role)));
         return;
       }
     }
@@ -1958,7 +2036,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
 
   const content = `
 <h2>Users &amp; permissions</h2>
-<p class="muted">Create hotel staff accounts. Use <strong>database role</strong> (MANAGER / STAFF / FINANCE) for defaults, then tune <strong>module permissions</strong> for operational roles — e.g. <em>Restaurant &amp; café</em> for KOT/outlet, <em>Housekeeping</em> for cleaning tasks. Platform owner retains full access.</p>
+<p class="muted">Create hotel staff accounts. Use <strong>database role</strong> (MANAGER / STAFF / FRONTDESK / FINANCE / HOUSEKEEPING) for defaults, then tune <strong>module permissions</strong> for operational roles — e.g. <em>Restaurant &amp; café</em> for KOT/outlet, <em>Housekeeping</em> for cleaning tasks. Platform owner retains full access.</p>
 ${created}
 <div class="actions">
   <a class="btn-link primary" href="/admin/profile">Back to profile</a>
@@ -1976,6 +2054,7 @@ ${created}
         <select name="role" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">
           <option value="MANAGER">MANAGER</option>
           <option value="STAFF">STAFF</option>
+          <option value="FRONTDESK">FRONTDESK</option>
           <option value="FINANCE">FINANCE</option>
           <option value="HOUSEKEEPING">HOUSEKEEPING</option>
         </select>
@@ -2013,7 +2092,7 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>Invalid user input.</p>", true));
     return;
   }
-  const allowedRoles = new Set(["MANAGER", "STAFF", "FINANCE", "HOUSEKEEPING"]);
+  const allowedRoles = new Set(["MANAGER", "STAFF", "FRONTDESK", "FINANCE", "HOUSEKEEPING"]);
   if (role === "HOUSEKEEPING" && !username && !email) {
     res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>For housekeeping, set at least a username or email.</p>", true));
     return;
@@ -2028,7 +2107,7 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     username,
     passwordHash: hashPassword(password),
     pinHash,
-    role: roleSafe as "MANAGER" | "STAFF" | "FINANCE" | "HOUSEKEEPING",
+    role: roleSafe as "MANAGER" | "STAFF" | "FRONTDESK" | "FINANCE" | "HOUSEKEEPING",
     isActive: true
   };
   if (email) {
@@ -2440,6 +2519,268 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
 
 type RoomBoardStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
 
+type RoomBoardCardRow = {
+  unitId: string | null;
+  unitName: string;
+  roomTypeId: string;
+  name: string;
+  status: RoomBoardStatus;
+  guestName: string | null;
+  checkIn: Date | null;
+  checkOut: Date | null;
+  bookingId: string | null;
+  isUnassignedBooking: boolean;
+  adults: number | null;
+  children: number | null;
+  bookingNights: number | null;
+};
+
+type RoomBoardLoadViewOpts = { omitFilters?: boolean; boardPath?: string };
+
+type RoomBoardLoadViewResult = {
+  hotelId: string;
+  hotelDisplayName: string;
+  boardDate: Date;
+  filterRoomTypeId: string;
+  filterUnitId: string;
+  filterStatus: string;
+  buildRoomBoardQuery: (day: Date) => string;
+  prevRoomBoardHref: string;
+  nextRoomBoardHref: string;
+  dateStart: Date;
+  dateEndExclusive: Date;
+  roomTypes: Awaited<ReturnType<typeof prisma.roomType.findMany>>;
+  cards: RoomBoardCardRow[];
+  filteredCards: RoomBoardCardRow[];
+  statusCounts: Record<RoomBoardStatus, number>;
+  totalRooms: number;
+  updatedNotice: string;
+  manualCheckInNotice: string;
+  manualCheckOutNotice: string;
+  invoiceSentFromCheckIn: string;
+  invoiceErrFromCheckIn: string;
+  printInvoiceScript: string;
+};
+
+async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts): Promise<RoomBoardLoadViewResult | null> {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: "al-ashkhara-beach-resort" },
+    include: {
+      roomTypes: { where: { isActive: true }, orderBy: { name: "asc" }, include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } } }
+    }
+  });
+  if (!hotel) return null;
+
+  const now = startOfDay(new Date());
+  const boardDate = parseDateInput(req.query.date, now);
+  let filterRoomTypeId = typeof req.query.roomTypeId === "string" ? req.query.roomTypeId.trim() : "";
+  let filterUnitId = typeof req.query.unitId === "string" ? req.query.unitId.trim() : "";
+  let filterStatus = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
+  if (opts?.omitFilters) {
+    filterRoomTypeId = "";
+    filterUnitId = "";
+    filterStatus = "";
+  }
+  const boardBase = opts?.boardPath ?? "/admin/room-board";
+
+  const buildRoomBoardQuery = (day: Date): string => {
+    const p = new URLSearchParams();
+    p.set("date", formatDateForInput(day));
+    if (filterRoomTypeId) p.set("roomTypeId", filterRoomTypeId);
+    if (filterUnitId) p.set("unitId", filterUnitId);
+    if (filterStatus) p.set("status", filterStatus);
+    return p.toString();
+  };
+  const prevRoomBoardHref = `${boardBase}?${buildRoomBoardQuery(addDays(boardDate, -1))}`;
+  const nextRoomBoardHref = `${boardBase}?${buildRoomBoardQuery(addDays(boardDate, 1))}`;
+
+  const dateStart = boardDate;
+  const dateEndExclusive = addDays(boardDate, 1);
+  const updatedNotice = req.query.unitUpdated ? '<p class="badge ok">Room status updated.</p>' : "";
+  const manualCheckInNotice = req.query.manualCheckIn ? '<p class="badge ok">Manual check-in saved. Booking created and room board updated.</p>' : "";
+  const manualCheckOutNotice = req.query.manualCheckOut ? '<p class="badge ok">Room marked for housekeeping (cleaning).</p>' : "";
+  const invoiceSentFromCheckIn = req.query.invoiceSent ? '<p class="badge ok">Invoice PDF was sent to the guest on WhatsApp.</p>' : "";
+  const invoiceErrFromCheckIn =
+    typeof req.query.invoiceError === "string" && req.query.invoiceError.trim()
+      ? `<p class="badge alert">${escapeHtml(req.query.invoiceError.trim().slice(0, 600))}</p>`
+      : "";
+  const printBookingIdRaw = typeof req.query.printBookingId === "string" ? req.query.printBookingId.trim() : "";
+  const printInvoiceScript = printBookingIdRaw
+    ? `<script>(function(){var u=${JSON.stringify(`/admin/bookings/${encodeURIComponent(printBookingIdRaw)}/invoice-print`)};window.open(u,"_blank","noopener");})();</script>`
+    : "";
+
+  await ensureDefaultRoomUnitsForBoard(
+    hotel.id,
+    hotel.roomTypes.map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
+  );
+  await backfillMissingRoomUnitAssignmentsForDate({
+    hotelId: hotel.id,
+    dateStart,
+    dateEndExclusive
+  });
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
+  });
+
+  const boardDayRange = inventoryDayRangeExclusive(dateStart);
+  const [inventoryRows, overlappingBookings] = await Promise.all([
+    prisma.inventory.findMany({
+      where: { hotelId: hotel.id, date: { gte: boardDayRange.gte, lt: boardDayRange.lt } },
+      select: { roomTypeId: true, total: true, reserved: true, closedOut: true }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: dateStart },
+        status: { in: ["CONFIRMED", "PENDING"] }
+      },
+      include: { guest: true, roomType: true, roomUnit: true },
+      orderBy: { checkIn: "asc" }
+    })
+  ]);
+
+  const inventoryByRoomType = new Map(inventoryRows.map((r) => [r.roomTypeId, r]));
+
+  const cards: RoomBoardCardRow[] = [];
+  const statusCounts = { AVAILABLE: 0, RESERVED: 0, OCCUPIED: 0, CLEANING: 0, MAINTENANCE: 0 };
+
+  for (const roomType of roomTypes) {
+    const inv = inventoryByRoomType.get(roomType.id);
+    const closedOut = inv?.closedOut ?? false;
+    const bookableTotal = inv?.total ?? roomType.totalInventory;
+    const reservedCount = inv?.reserved ?? 0;
+    const aggregateAvailable = closedOut ? 0 : Math.max(0, bookableTotal - reservedCount);
+    const units = roomType.roomUnits;
+    const activeUnits = units.filter((u) => u.isActive);
+    const overlapForType = overlappingBookings.filter((b) => b.roomTypeId === roomType.id);
+    const bookingSlotCount = overlapForType.length;
+    const unbookedActiveUnits = activeUnits.filter((u) => !overlapForType.some((b) => b.roomUnitId === u.id));
+    const effectiveReserved = Math.min(reservedCount, bookableTotal);
+    const needInvReserved = Math.max(0, effectiveReserved - bookingSlotCount);
+    const reservedFromInventoryUnitIds = new Set<string>();
+    {
+      let remaining = needInvReserved;
+      for (const u of unbookedActiveUnits) {
+        if (remaining <= 0) break;
+        if (parseManualRoomStatusFromNotes(u.notes)) continue;
+        reservedFromInventoryUnitIds.add(u.id);
+        remaining -= 1;
+      }
+    }
+
+    for (const unit of units) {
+      const bookingsForUnit = overlappingBookings.filter((b) => b.roomUnitId === unit.id);
+      const firstBooking = bookingsForUnit[0] ?? null;
+      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED");
+      const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
+      const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
+      const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
+      const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
+
+      let status: RoomBoardStatus;
+      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus });
+      if (fromBooking !== null) {
+        status = fromBooking;
+      } else if (closedOut) {
+        status = "MAINTENANCE";
+      } else if (manualStatus) {
+        status = manualStatus;
+      } else if (!unit.isActive) {
+        status = "MAINTENANCE";
+      } else if (beyondInventoryCap) {
+        status = "MAINTENANCE";
+      } else if (reservedFromInventoryUnitIds.has(unit.id)) {
+        status = "RESERVED";
+      } else if (aggregateAvailable <= 0) {
+        status = "RESERVED";
+      } else {
+        status = "AVAILABLE";
+      }
+      statusCounts[status] += 1;
+
+      cards.push({
+        unitId: unit.id,
+        unitName: unit.name,
+        roomTypeId: roomType.id,
+        name: roomType.name,
+        status,
+        guestName: firstBooking?.guest?.fullName ?? firstBooking?.guest?.phoneE164 ?? null,
+        checkIn: firstBooking?.checkIn ?? null,
+        checkOut: firstBooking?.checkOut ?? null,
+        bookingId: firstBooking?.id ?? null,
+        isUnassignedBooking: false,
+        adults: firstBooking ? firstBooking.adults : null,
+        children: firstBooking ? firstBooking.children : null,
+        bookingNights: firstBooking ? firstBooking.nights : null
+      });
+    }
+
+    const unassignedForType = overlappingBookings.filter((b) => b.roomTypeId === roomType.id && !b.roomUnitId);
+    for (const b of unassignedForType) {
+      const hasConfirmed = b.status === "CONFIRMED";
+      const hasPending = b.status === "PENDING";
+      let status: RoomBoardStatus;
+      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
+      if (fromBooking !== null) {
+        status = fromBooking;
+      } else {
+        status = "RESERVED";
+      }
+      statusCounts[status] += 1;
+      cards.push({
+        unitId: null,
+        unitName: "Unassigned",
+        roomTypeId: roomType.id,
+        name: roomType.name,
+        status,
+        guestName: b.guest?.fullName ?? b.guest?.phoneE164 ?? null,
+        checkIn: b.checkIn,
+        checkOut: b.checkOut,
+        bookingId: b.id,
+        isUnassignedBooking: true,
+        adults: b.adults,
+        children: b.children,
+        bookingNights: b.nights
+      });
+    }
+  }
+
+  let filteredCards = cards;
+  if (filterRoomTypeId) filteredCards = filteredCards.filter((c) => c.roomTypeId === filterRoomTypeId);
+  if (filterUnitId) filteredCards = filteredCards.filter((c) => c.unitId === filterUnitId);
+  if (filterStatus) filteredCards = filteredCards.filter((c) => c.status === filterStatus);
+
+  const totalRooms = cards.length;
+
+  return {
+    hotelId: hotel.id,
+    hotelDisplayName: hotel.displayName,
+    boardDate,
+    filterRoomTypeId,
+    filterUnitId,
+    filterStatus,
+    buildRoomBoardQuery,
+    prevRoomBoardHref,
+    nextRoomBoardHref,
+    dateStart,
+    dateEndExclusive,
+    roomTypes,
+    cards,
+    filteredCards,
+    statusCounts,
+    totalRooms,
+    updatedNotice,
+    manualCheckInNotice,
+    manualCheckOutNotice,
+    invoiceSentFromCheckIn,
+    invoiceErrFromCheckIn,
+    printInvoiceScript
+  };
+}
+
 function getRoomBoardStatusClass(status: RoomBoardStatus): string {
   switch (status) {
     case "AVAILABLE": return "room-status-available";
@@ -2781,217 +3122,360 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
     res.redirect("/admin/profile?unitUpdated=1");
     return;
   }
+  if (returnTo.startsWith("/admin/hk")) {
+    const join = returnTo.includes("?") ? "&" : "?";
+    res.redirect(`${returnTo}${join}unitUpdated=1`);
+    return;
+  }
   res.redirect(`/admin/room-board?date=${formatDateForInput(boardDate)}&unitUpdated=1`);
 });
 
-adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
+adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true } });
+  if (!hotel) {
+    res.type("html").send(renderHkLayout({ title: "My tasks", active: "tasks", content: "<h2>My tasks</h2><p>No hotel data.</p>" }));
+    return;
+  }
+  const session = getSession(req)!;
+  const assignNotice =
+    req.query.assign === "blocked"
+      ? '<p class="badge alert">That room was claimed by another teammate.</p>'
+      : req.query.start === "blocked"
+        ? '<p class="badge alert">Unable to start cleaning (refresh and try again).</p>'
+        : req.query.complete === "need-start"
+          ? '<p class="badge alert">Start cleaning before marking the room ready.</p>'
+          : "";
+  const openTasks = await prisma.housekeepingTask.findMany({
+    where: { hotelId: hotel.id, status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] } },
+    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+    take: 200,
     include: {
-      roomTypes: { where: { isActive: true }, orderBy: { name: "asc" }, include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } } }
+      roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
+      assignedTo: { select: { fullName: true } }
     }
   });
-  if (!hotel) {
+  const shiftSelect = () => `<select name="shift" style="padding:4px 6px;border:1px solid #d8dee6;border-radius:8px">
+    <option value="MORNING">Morning</option>
+    <option value="EVENING">Evening</option>
+    <option value="NIGHT">Night</option>
+  </select>`;
+  const rows = openTasks
+    .map((t) => {
+      const roomLabel = `${escapeHtml(t.roomUnit.name)} (${escapeHtml(t.roomUnit.roomType.name)})`;
+      const assignee = t.assignedToUserId
+        ? t.assignedToUserId === session.staffId
+          ? `<span class="badge ok">You</span>`
+          : `<span class="badge pending">${escapeHtml(t.assignedTo?.fullName ?? "Assigned")}</span>`
+        : '<span class="muted">—</span>';
+      const claimedMeta =
+        t.startedAt != null
+          ? `<div class="muted" style="font-size:12px;margin-top:4px">Started ${escapeHtml(formatDateTime(t.startedAt))}</div>`
+          : t.assignedToUserId
+            ? '<div class="muted" style="font-size:12px;margin-top:4px">Claimed — not started</div>'
+            : "";
+      let actions = "";
+      if (t.status === HousekeepingTaskStatus.PENDING && !t.assignedToUserId) {
+        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/assign" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Claim</button></form>`;
+      } else if (t.status === HousekeepingTaskStatus.PENDING && t.assignedToUserId === session.staffId && !t.startedAt) {
+        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/start-cleaning" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#0b6e6e;color:#fff;font-weight:700;cursor:pointer">Start cleaning</button></form>`;
+      } else if (
+        (t.status === HousekeepingTaskStatus.IN_PROGRESS || t.status === HousekeepingTaskStatus.PENDING) &&
+        t.assignedToUserId === session.staffId &&
+        t.startedAt
+      ) {
+        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 6px 0 0"><input type="hidden" name="targetStatus" value="AVAILABLE" /><button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Mark ready</button></form>
+        <form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0"><input type="hidden" name="targetStatus" value="MAINTENANCE" /><button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#6b21a8;color:#fff;font-weight:700;cursor:pointer">Maintenance</button></form>`;
+      } else if (t.assignedToUserId && t.assignedToUserId !== session.staffId) {
+        actions = '<span class="muted">In use by another housekeeper</span>';
+      }
+      return `<tr><td>${roomLabel}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
+    })
+    .join("");
+  const content = `<h2>My tasks</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — claim a room, start cleaning, then mark ready or maintenance.</p>
+${assignNotice}
+<table style="width:100%;border-collapse:collapse;margin-top:12px">
+<thead><tr><th>Room</th><th>Status</th><th>Assignment</th><th>Actions</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="4" class="muted">No open tasks.</td></tr>'}</tbody>
+</table>`;
+  res.type("html").send(renderHkLayout({ title: "My tasks", active: "tasks", content }));
+});
+
+adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  const shift = parseHousekeepingShiftInput(req.body.shift);
+  if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
+    res.redirect("/admin/hk");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: { id: taskId, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING, assignedToUserId: null }
+  });
+  if (!task) {
+    res.redirect("/admin/hk?assign=blocked");
+    return;
+  }
+  const claim = await prisma.housekeepingTask.updateMany({
+    where: { id: task.id, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING, assignedToUserId: null },
+    data: { assignedToUserId: session.staffId }
+  });
+  if (claim.count === 0) {
+    await logAudit({
+      hotelId: hotel.id,
+      action: "HOUSEKEEPING_TASK_ASSIGN_BLOCKED",
+      entityType: "HousekeepingTask",
+      entityId: task.id,
+      metadata: { roomUnitId: task.roomUnitId, blockedForUserId: session.staffId }
+    });
+    res.redirect("/admin/hk?assign=blocked");
+    return;
+  }
+  const refreshed = await prisma.housekeepingTask.findUnique({ where: { id: task.id }, select: { notes: true } });
+  await prisma.housekeepingTask.update({
+    where: { id: task.id },
+    data: { notes: writeHousekeepingShift(refreshed?.notes, shift) }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_ASSIGNED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    metadata: {
+      roomUnitId: task.roomUnitId,
+      claimedByUserId: session.staffId,
+      shift,
+      claimedAt: new Date().toISOString()
+    }
+  });
+  res.redirect("/admin/hk");
+});
+
+adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  const shift = parseHousekeepingShiftInput(req.body.shift);
+  if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
+    res.redirect("/admin/hk");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: {
+      id: taskId,
+      hotelId: hotel.id,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: session.staffId,
+      startedAt: null
+    }
+  });
+  if (!task) {
+    res.redirect("/admin/hk?start=blocked");
+    return;
+  }
+  const upd = await prisma.housekeepingTask.updateMany({
+    where: {
+      id: task.id,
+      hotelId: hotel.id,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: session.staffId,
+      startedAt: null
+    },
+    data: { status: HousekeepingTaskStatus.IN_PROGRESS, startedAt: new Date() }
+  });
+  if (upd.count === 0) {
+    res.redirect("/admin/hk?start=blocked");
+    return;
+  }
+  await prisma.roomUnit.update({
+    where: { id: task.roomUnitId },
+    data: {
+      notes: writeManualRoomStatusToNotes(
+        (await prisma.roomUnit.findUnique({ where: { id: task.roomUnitId }, select: { notes: true } }))?.notes,
+        "CLEANING"
+      )
+    }
+  });
+  const noteRef = await prisma.housekeepingTask.findUnique({ where: { id: task.id }, select: { notes: true } });
+  await prisma.housekeepingTask.update({
+    where: { id: task.id },
+    data: { notes: writeHousekeepingShift(noteRef?.notes, shift) }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_STARTED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    metadata: {
+      roomUnitId: task.roomUnitId,
+      claimedByUserId: session.staffId,
+      startedAt: new Date().toISOString(),
+      shift
+    }
+  });
+  res.redirect("/admin/hk");
+});
+
+adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  const targetStatusRaw = String(req.body.targetStatus ?? "AVAILABLE").trim().toUpperCase();
+  const targetStatus: RoomBoardStatus = targetStatusRaw === "MAINTENANCE" ? "MAINTENANCE" : "AVAILABLE";
+  if (!hotel || !session) {
+    res.redirect("/admin/hk");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: {
+      id: taskId,
+      hotelId: hotel.id,
+      status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+    },
+    include: { roomUnit: { select: { notes: true } } }
+  });
+  if (!task) {
+    res.redirect("/admin/hk");
+    return;
+  }
+  if (!task.startedAt) {
+    res.redirect("/admin/hk?complete=need-start");
+    return;
+  }
+  if (task.assignedToUserId && session.staffId !== task.assignedToUserId) {
+    res.redirect("/admin/hk");
+    return;
+  }
+  await prisma.$transaction(async (tx) => {
+    const fresh = await tx.roomUnit.findUnique({ where: { id: task.roomUnitId }, select: { notes: true } });
+    await tx.roomUnit.update({
+      where: { id: task.roomUnitId },
+      data: { notes: writeManualRoomStatusToNotes(fresh?.notes, targetStatus) }
+    });
+    await tx.housekeepingTask.update({
+      where: { id: task.id },
+      data: {
+        status: HousekeepingTaskStatus.COMPLETED,
+        completedAt: new Date(),
+        completedByUserId: session.staffId !== "STAFF-SUPERADMIN" ? session.staffId : null
+      }
+    });
+  });
+  const completed = await prisma.housekeepingTask.findUnique({
+    where: { id: task.id },
+    select: { startedAt: true, completedAt: true, notes: true }
+  });
+  const shift = parseHousekeepingShift(completed?.notes ?? task.notes) ?? deriveHousekeepingShift(new Date());
+  const durationMins = housekeepingDurationMinutes(completed?.startedAt, completed?.completedAt);
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_COMPLETED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    bookingId: task.bookingId ?? undefined,
+    metadata: {
+      roomUnitId: task.roomUnitId,
+      completedByUserId: session.staffId,
+      targetStatus,
+      shift,
+      durationMinutes: durationMins,
+      startedAt: completed?.startedAt?.toISOString() ?? undefined,
+      completedAt: completed?.completedAt?.toISOString() ?? undefined,
+      portal: "hk"
+    }
+  });
+  res.redirect("/admin/hk");
+});
+
+adminRouter.get("/hk/room-board", requireAuth, requireHousekeepingPortal, requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const view = await loadRoomBoardViewData(req, { omitFilters: true, boardPath: "/admin/hk/room-board" });
+  if (!view) {
+    res.type("html").send(renderHkLayout({ title: "Room board", active: "board", content: "<h2>Room board</h2><p>No hotel data.</p>" }));
+    return;
+  }
+  const { boardDate, prevRoomBoardHref, nextRoomBoardHref, filteredCards, statusCounts, totalRooms, updatedNotice } = view;
+  const hkReturn = `/admin/hk/room-board?date=${formatDateForInput(boardDate)}`;
+  const hkCards = filteredCards.filter((c) => c.unitId && !c.isUnassignedBooking);
+  const roomCardsHtml = hkCards
+    .map((c) => {
+      const statusClass = getRoomBoardStatusClass(c.status);
+      const statusForm = `<form method="post" action="/admin/room-board/unit/${encodeURIComponent(c.unitId!)}/status" style="display:flex; gap:6px; align-items:center">
+      <input type="hidden" name="date" value="${formatDateForInput(boardDate)}" />
+      <input type="hidden" name="returnTo" value="${escapeHtml(hkReturn)}" />
+      <select name="status" style="padding:4px 6px; border:1px solid #d8dee6; border-radius:8px; font-size:12px">
+        <option value="AVAILABLE" ${c.status === "AVAILABLE" ? "selected" : ""}>Available</option>
+        <option value="RESERVED" ${c.status === "RESERVED" ? "selected" : ""}>Reserved</option>
+        <option value="OCCUPIED" ${c.status === "OCCUPIED" ? "selected" : ""}>Occupied</option>
+        <option value="CLEANING" ${c.status === "CLEANING" ? "selected" : ""}>Cleaning</option>
+        <option value="MAINTENANCE" ${c.status === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+      </select>
+      <button type="submit" style="padding:4px 8px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; font-size:12px">Set</button>
+    </form>`;
+      return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:10px; border:2px solid currentColor;">
+  <div style="font-weight:800; font-size:1rem;">${escapeHtml(c.unitName)}</div>
+  <div style="margin-top:6px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
+  <div style="margin-top:10px;">${statusForm}</div>
+</div>`;
+    })
+    .join("");
+  const content = `<h2>Room board</h2>
+<p class="muted">Housekeeping view — room number and status only.</p>
+${updatedNotice}
+<form method="get" action="/admin/hk/room-board" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px">
+  <a class="btn-link" href="${escapeHtml(prevRoomBoardHref)}" style="padding:8px 12px;border:1px solid #d8dee6;border-radius:8px;text-decoration:none;color:#0f172a;font-weight:700">‹</a>
+  <input type="date" name="date" value="${formatDateForInput(boardDate)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+  <a class="btn-link" href="${escapeHtml(nextRoomBoardHref)}" style="padding:8px 12px;border:1px solid #d8dee6;border-radius:8px;text-decoration:none;color:#0f172a;font-weight:700">›</a>
+  <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Go</button>
+</form>
+<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:10px; margin-bottom:14px;">
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Total</strong><div>${totalRooms}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Available</strong><div>${statusCounts.AVAILABLE}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Reserved</strong><div>${statusCounts.RESERVED}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Occupied</strong><div>${statusCounts.OCCUPIED}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Cleaning</strong><div>${statusCounts.CLEANING}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Maintenance</strong><div>${statusCounts.MAINTENANCE}</div></div>
+</div>
+<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px;">
+  ${roomCardsHtml || '<p class="muted">No rooms.</p>'}
+</div>
+<style>
+  .room-board-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; }
+  .room-status-available { background:#dcfce7; color:#166534; }
+  .room-status-reserved { background:#dbeafe; color:#1e40af; }
+  .room-status-occupied { background:#fee2e2; color:#991b1b; }
+  .room-status-cleaning { background:#fef9c3; color:#854d0e; }
+  .room-status-maintenance { background:#f3e8ff; color:#6b21a8; }
+</style>`;
+  res.type("html").send(renderHkLayout({ title: "Room board", active: "board", content }));
+});
+
+adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const view = await loadRoomBoardViewData(req);
+  if (!view) {
     res.type("html").send(renderLayout("<h2>Room Status Board</h2><p>No hotel data found.</p>", true));
     return;
   }
-
-  const now = startOfDay(new Date());
-  const boardDate = parseDateInput(req.query.date, now);
-  const filterRoomTypeId = typeof req.query.roomTypeId === "string" ? req.query.roomTypeId.trim() : "";
-  const filterUnitId = typeof req.query.unitId === "string" ? req.query.unitId.trim() : "";
-  const filterStatus = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
-
-  const buildRoomBoardQuery = (day: Date): string => {
-    const p = new URLSearchParams();
-    p.set("date", formatDateForInput(day));
-    if (filterRoomTypeId) p.set("roomTypeId", filterRoomTypeId);
-    if (filterUnitId) p.set("unitId", filterUnitId);
-    if (filterStatus) p.set("status", filterStatus);
-    return p.toString();
-  };
-  const prevRoomBoardHref = `/admin/room-board?${buildRoomBoardQuery(addDays(boardDate, -1))}`;
-  const nextRoomBoardHref = `/admin/room-board?${buildRoomBoardQuery(addDays(boardDate, 1))}`;
-
-  const dateStart = boardDate;
-  const dateEndExclusive = addDays(boardDate, 1);
-  const updatedNotice = req.query.unitUpdated ? '<p class="badge ok">Room status updated.</p>' : "";
-  const manualCheckInNotice = req.query.manualCheckIn ? '<p class="badge ok">Manual check-in saved. Booking created and room board updated.</p>' : "";
-  const manualCheckOutNotice = req.query.manualCheckOut ? '<p class="badge ok">Room marked for housekeeping (cleaning).</p>' : "";
-  const invoiceSentFromCheckIn = req.query.invoiceSent ? '<p class="badge ok">Invoice PDF was sent to the guest on WhatsApp.</p>' : "";
-  const invoiceErrFromCheckIn =
-    typeof req.query.invoiceError === "string" && req.query.invoiceError.trim()
-      ? `<p class="badge alert">${escapeHtml(req.query.invoiceError.trim().slice(0, 600))}</p>`
-      : "";
-  const printBookingIdRaw = typeof req.query.printBookingId === "string" ? req.query.printBookingId.trim() : "";
-  const printInvoiceScript = printBookingIdRaw
-    ? `<script>(function(){var u=${JSON.stringify(`/admin/bookings/${encodeURIComponent(printBookingIdRaw)}/invoice-print`)};window.open(u,"_blank","noopener");})();</script>`
-    : "";
-
-  await ensureDefaultRoomUnitsForBoard(
-    hotel.id,
-    hotel.roomTypes.map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
-  );
-  await backfillMissingRoomUnitAssignmentsForDate({
-    hotelId: hotel.id,
+  const {
+    boardDate,
+    filterRoomTypeId,
+    filterUnitId,
+    filterStatus,
+    prevRoomBoardHref,
+    nextRoomBoardHref,
     dateStart,
-    dateEndExclusive
-  });
-  const roomTypes = await prisma.roomType.findMany({
-    where: { hotelId: hotel.id, isActive: true },
-    orderBy: { name: "asc" },
-    include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } }
-  });
-
-  const boardDayRange = inventoryDayRangeExclusive(dateStart);
-  const [inventoryRows, overlappingBookings] = await Promise.all([
-    prisma.inventory.findMany({
-      where: { hotelId: hotel.id, date: { gte: boardDayRange.gte, lt: boardDayRange.lt } },
-      select: { roomTypeId: true, total: true, reserved: true, closedOut: true }
-    }),
-    prisma.booking.findMany({
-      where: {
-        hotelId: hotel.id,
-        checkIn: { lt: dateEndExclusive },
-        checkOut: { gt: dateStart },
-        status: { in: ["CONFIRMED", "PENDING"] }
-      },
-      include: { guest: true, roomType: true, roomUnit: true },
-      orderBy: { checkIn: "asc" }
-    })
-  ]);
-
-  const inventoryByRoomType = new Map(inventoryRows.map((r) => [r.roomTypeId, r]));
-
-  interface RoomCard {
-    unitId: string | null;
-    unitName: string;
-    roomTypeId: string;
-    name: string;
-    status: RoomBoardStatus;
-    guestName: string | null;
-    checkIn: Date | null;
-    checkOut: Date | null;
-    bookingId: string | null;
-    isUnassignedBooking: boolean;
-    adults: number | null;
-    children: number | null;
-    bookingNights: number | null;
-  }
-
-  const cards: RoomCard[] = [];
-  const statusCounts = { AVAILABLE: 0, RESERVED: 0, OCCUPIED: 0, CLEANING: 0, MAINTENANCE: 0 };
-
-  for (const roomType of roomTypes) {
-    const inv = inventoryByRoomType.get(roomType.id);
-    const closedOut = inv?.closedOut ?? false;
-    const bookableTotal = inv?.total ?? roomType.totalInventory;
-    const reservedCount = inv?.reserved ?? 0;
-    const aggregateAvailable = closedOut ? 0 : Math.max(0, bookableTotal - reservedCount);
-    const units = roomType.roomUnits;
-    const activeUnits = units.filter((u) => u.isActive);
-    const overlapForType = overlappingBookings.filter((b) => b.roomTypeId === roomType.id);
-    const bookingSlotCount = overlapForType.length;
-    const unbookedActiveUnits = activeUnits.filter((u) => !overlapForType.some((b) => b.roomUnitId === u.id));
-    const effectiveReserved = Math.min(reservedCount, bookableTotal);
-    const needInvReserved = Math.max(0, effectiveReserved - bookingSlotCount);
-    const reservedFromInventoryUnitIds = new Set<string>();
-    {
-      let remaining = needInvReserved;
-      for (const u of unbookedActiveUnits) {
-        if (remaining <= 0) break;
-        if (parseManualRoomStatusFromNotes(u.notes)) continue;
-        reservedFromInventoryUnitIds.add(u.id);
-        remaining -= 1;
-      }
-    }
-
-    for (const unit of units) {
-      const bookingsForUnit = overlappingBookings.filter((b) => b.roomUnitId === unit.id);
-      const firstBooking = bookingsForUnit[0] ?? null;
-      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED");
-      const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
-      const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
-      const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
-      const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
-
-      // Confirmed/pending bookings show as RESERVED until front desk sets OCCUPIED on the unit.
-      let status: RoomBoardStatus;
-      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus });
-      if (fromBooking !== null) {
-        status = fromBooking;
-      } else if (closedOut) {
-        status = "MAINTENANCE";
-      } else if (manualStatus) {
-        status = manualStatus;
-      } else if (!unit.isActive) {
-        status = "MAINTENANCE";
-      } else if (beyondInventoryCap) {
-        status = "MAINTENANCE";
-      } else if (reservedFromInventoryUnitIds.has(unit.id)) {
-        status = "RESERVED";
-      } else if (aggregateAvailable <= 0) {
-        status = "RESERVED";
-      } else {
-        status = "AVAILABLE";
-      }
-      statusCounts[status] += 1;
-
-      cards.push({
-        unitId: unit.id,
-        unitName: unit.name,
-        roomTypeId: roomType.id,
-        name: roomType.name,
-        status,
-        guestName: firstBooking?.guest?.fullName ?? firstBooking?.guest?.phoneE164 ?? null,
-        checkIn: firstBooking?.checkIn ?? null,
-        checkOut: firstBooking?.checkOut ?? null,
-        bookingId: firstBooking?.id ?? null,
-        isUnassignedBooking: false,
-        adults: firstBooking ? firstBooking.adults : null,
-        children: firstBooking ? firstBooking.children : null,
-        bookingNights: firstBooking ? firstBooking.nights : null
-      });
-    }
-
-    const unassignedForType = overlappingBookings.filter(
-      (b) => b.roomTypeId === roomType.id && !b.roomUnitId
-    );
-    for (const b of unassignedForType) {
-      const hasConfirmed = b.status === "CONFIRMED";
-      const hasPending = b.status === "PENDING";
-      let status: RoomBoardStatus;
-      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
-      if (fromBooking !== null) {
-        status = fromBooking;
-      } else {
-        status = "RESERVED";
-      }
-      statusCounts[status] += 1;
-      cards.push({
-        unitId: null,
-        unitName: "Unassigned",
-        roomTypeId: roomType.id,
-        name: roomType.name,
-        status,
-        guestName: b.guest?.fullName ?? b.guest?.phoneE164 ?? null,
-        checkIn: b.checkIn,
-        checkOut: b.checkOut,
-        bookingId: b.id,
-        isUnassignedBooking: true,
-        adults: b.adults,
-        children: b.children,
-        bookingNights: b.nights
-      });
-    }
-  }
-
-  let filteredCards = cards;
-  if (filterRoomTypeId) filteredCards = filteredCards.filter((c) => c.roomTypeId === filterRoomTypeId);
-  if (filterUnitId) filteredCards = filteredCards.filter((c) => c.unitId === filterUnitId);
-  if (filterStatus) filteredCards = filteredCards.filter((c) => c.status === filterStatus);
-
-  const totalRooms = cards.length;
+    roomTypes,
+    cards,
+    filteredCards,
+    statusCounts,
+    totalRooms,
+    updatedNotice,
+    manualCheckInNotice,
+    manualCheckOutNotice,
+    invoiceSentFromCheckIn,
+    invoiceErrFromCheckIn,
+    printInvoiceScript
+  } = view;
 
   const roomTypeOptions = roomTypes
     .map((rt) => `<option value="${escapeHtml(rt.id)}" ${rt.id === filterRoomTypeId ? "selected" : ""}>${escapeHtml(rt.name)}</option>`)
