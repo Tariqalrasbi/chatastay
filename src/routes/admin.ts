@@ -36,6 +36,14 @@ import {
   verifyPin
 } from "../core/authSecurity";
 import { buildPasswordResetEmail } from "../core/emailTemplates";
+import {
+  createNotification,
+  createRoleRoutedNotification,
+  getUnreadCount,
+  listUserNotifications,
+  markAllNotificationsRead,
+  markNotificationRead
+} from "../core/notifications";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -673,6 +681,157 @@ function getAdminLiveScript(): string {
 <\/script>`;
 }
 
+function getAdminNotificationScript(): string {
+  return `<script>
+(function () {
+  var POLL_MS = 9000;
+  var notifBtn = document.getElementById("adminNotifBell");
+  var notifBadge = document.getElementById("adminNotifBadge");
+  var notifList = document.getElementById("adminNotifList");
+  var notifEmpty = document.getElementById("adminNotifEmpty");
+  var notifReadAll = document.getElementById("adminNotifReadAll");
+  var muteBtn = document.getElementById("adminNotifMute");
+  var panel = document.getElementById("adminNotifPanel");
+  var attentionStrip = document.getElementById("adminAttentionStrip");
+  var attentionList = document.getElementById("adminAttentionList");
+  if (!notifBtn || !notifBadge || !notifList || !notifEmpty || !notifReadAll || !muteBtn || !panel) return;
+
+  var knownIds = new Set();
+  var soundMuted = localStorage.getItem("notifSoundMuted") === "true";
+  var iconOn = "🔔";
+  var iconOff = "🔕";
+  muteBtn.textContent = soundMuted ? iconOff : iconOn;
+  muteBtn.title = soundMuted ? "Enable alert sound" : "Mute alert sound";
+
+  function esc(s) {
+    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  }
+  function sevClass(sev) {
+    if (sev === "critical") return "critical";
+    if (sev === "high") return "high";
+    if (sev === "normal") return "normal";
+    return "info";
+  }
+  function shouldBeep(sev) {
+    return sev === "critical" || sev === "high";
+  }
+  function beep() {
+    if (soundMuted) return;
+    if (document.visibilityState !== "visible") return;
+    try {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var o = ctx.createOscillator();
+      var g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.setValueAtTime(880, ctx.currentTime);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.04, ctx.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.16);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start();
+      o.stop(ctx.currentTime + 0.18);
+    } catch (e) {}
+  }
+  function updateBadge(n) {
+    var count = Number(n || 0);
+    notifBadge.textContent = String(Math.min(99, count));
+    notifBadge.hidden = count <= 0;
+  }
+  function renderList(items) {
+    notifList.innerHTML = "";
+    if (!items || !items.length) {
+      notifEmpty.hidden = false;
+      return;
+    }
+    notifEmpty.hidden = true;
+    items.forEach(function (item) {
+      var li = document.createElement("li");
+      li.className = "admin-notif-item sev-" + sevClass(item.severity);
+      li.innerHTML =
+        '<a href="' + esc(item.link || "#") + '" data-notif-id="' + esc(item.id) + '">' +
+        '<div class="admin-notif-title">' + esc(item.title || item.type || "Notification") + "</div>" +
+        '<div class="admin-notif-body">' + esc(item.body || "") + "</div>" +
+        "</a>";
+      notifList.appendChild(li);
+    });
+  }
+  function renderAttention(items) {
+    if (!attentionStrip || !attentionList) return;
+    var urgent = (items || []).filter(function (x) { return x && x.readAt == null && (x.severity === "critical" || x.severity === "high"); }).slice(0, 5);
+    if (!urgent.length) {
+      attentionStrip.hidden = true;
+      attentionList.innerHTML = "";
+      return;
+    }
+    attentionStrip.hidden = false;
+    attentionList.innerHTML = urgent
+      .map(function (n) {
+        var href = n.link || "#";
+        return '<li><a href="' + esc(href) + '" style="color:#7f1d1d;text-decoration:none"><strong>' + esc(n.title || "Alert") + ":</strong> " + esc(n.body || "") + "</a></li>";
+      })
+      .join("");
+  }
+  async function fetchUnreadCount() {
+    var r = await fetch("/auth/notifications/unread-count", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!r.ok) return;
+    var j = await r.json();
+    updateBadge(j.unreadCount || 0);
+  }
+  async function fetchLatest() {
+    var r = await fetch("/auth/notifications?limit=10", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!r.ok) return;
+    var j = await r.json();
+    var items = Array.isArray(j.notifications) ? j.notifications : [];
+    for (var i = 0; i < items.length; i++) {
+      var n = items[i];
+      if (!knownIds.has(n.id)) {
+        knownIds.add(n.id);
+        if (n.readAt == null && shouldBeep(n.severity)) beep();
+      }
+    }
+    renderList(items);
+    renderAttention(items);
+  }
+  notifBtn.addEventListener("click", function () {
+    panel.hidden = !panel.hidden;
+  });
+  document.addEventListener("click", function (e) {
+    if (panel.hidden) return;
+    var t = e.target;
+    if (!panel.contains(t) && !notifBtn.contains(t)) panel.hidden = true;
+  });
+  notifList.addEventListener("click", async function (e) {
+    var t = e.target;
+    var a = t && t.closest ? t.closest("[data-notif-id]") : null;
+    if (!a) return;
+    var id = a.getAttribute("data-notif-id");
+    if (!id) return;
+    fetch("/auth/notifications/" + encodeURIComponent(id) + "/read", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } })
+      .catch(function () {});
+  });
+  notifReadAll.addEventListener("click", async function () {
+    await fetch("/auth/notifications/read-all", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } }).catch(function () {});
+    fetchUnreadCount();
+    fetchLatest();
+  });
+  muteBtn.addEventListener("click", function () {
+    soundMuted = !soundMuted;
+    localStorage.setItem("notifSoundMuted", soundMuted ? "true" : "false");
+    muteBtn.textContent = soundMuted ? iconOff : iconOn;
+    muteBtn.title = soundMuted ? "Enable alert sound" : "Mute alert sound";
+  });
+
+  function poll() {
+    fetchUnreadCount();
+    fetchLatest();
+  }
+  poll();
+  window.setInterval(poll, POLL_MS);
+})();
+<\/script>`;
+}
+
 function renderLayout(content: string, authenticated: boolean): string {
   const layout = readView("layout.html");
   const perm = authenticated ? auditActorContext.getStore()?.session?.permissions : undefined;
@@ -806,7 +965,7 @@ function renderLayout(content: string, authenticated: boolean): string {
     .replace("{{sectionTabs}}", sectionTabsHtml)
     .replace("{{logoutAction}}", logoutHtml)
     .replace("{{content}}", content)
-    .replace("{{extraScripts}}", authenticated ? getAdminLiveScript() : "");
+    .replace("{{extraScripts}}", authenticated ? getAdminLiveScript() + getAdminNotificationScript() : "");
 }
 
 function renderHkLayout(params: { title: string; content: string; active: "tasks" | "board" }): string {
@@ -819,7 +978,8 @@ function renderHkLayout(params: { title: string; content: string; active: "tasks
     .replace("{{pageTitle}}", escapeHtml(params.title))
     .replace("{{navLinks}}", navLinks)
     .replace("{{logoutForm}}", logoutForm)
-    .replace("{{content}}", params.content);
+    .replace("{{content}}", params.content)
+    .replace("{{extraScripts}}", getAdminNotificationScript());
 }
 
 function renderPage(pageFile: string, authenticated: boolean): string {
@@ -1716,6 +1876,8 @@ async function notifyHousekeepingStaff(opts: {
   body: string;
   type: string;
   payloadJson?: string;
+  severity?: "critical" | "high" | "normal" | "info";
+  link?: string;
 }): Promise<void> {
   const users = await prisma.hotelUser.findMany({
     where: { hotelId: opts.hotelId, isActive: true },
@@ -1725,16 +1887,17 @@ async function notifyHousekeepingStaff(opts: {
     if (!u.email) continue;
     const matrix = effectivePermissionsForHotelUser(u.email, u.role);
     if (!hasPermission(matrix, "HOUSEKEEPING", "VIEW")) continue;
-    await prisma.notification.create({
-      data: {
-        hotelId: opts.hotelId,
-        hotelUserId: u.id,
-        type: opts.type,
-        title: opts.title,
-        body: opts.body,
-        payloadJson: opts.payloadJson,
-        status: "PENDING"
-      }
+    await createNotification({
+      hotelId: opts.hotelId,
+      userId: u.id,
+      title: opts.title,
+      body: opts.body,
+      category: "housekeeping",
+      severity: opts.severity ?? "high",
+      link: opts.link ?? "/admin/housekeeping",
+      sourceType: opts.type,
+      sourceId: undefined,
+      requiresAttention: (opts.severity ?? "high") !== "info"
     });
   }
 }
@@ -2420,6 +2583,56 @@ authRouter.post("/email-login", async (req, res) => {
     return;
   }
   res.json({ ok: true, redirectTo });
+});
+
+authRouter.get("/notifications", async (req, res) => {
+  const session = getSession(req);
+  if (!session || !session.staffId || session.staffId === "STAFF-SUPERADMIN") {
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  const limitRaw = Number(req.query.limit ?? 10);
+  const unreadOnly = String(req.query.unreadOnly ?? "").trim() === "1";
+  const notifications = await listUserNotifications(session.staffId, {
+    limit: Number.isFinite(limitRaw) ? limitRaw : 10,
+    unreadOnly
+  });
+  res.json({ ok: true, notifications });
+});
+
+authRouter.get("/notifications/unread-count", async (req, res) => {
+  const session = getSession(req);
+  if (!session || !session.staffId || session.staffId === "STAFF-SUPERADMIN") {
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  const unreadCount = await getUnreadCount(session.staffId);
+  res.json({ ok: true, unreadCount });
+});
+
+authRouter.post("/notifications/:id/read", async (req, res) => {
+  const session = getSession(req);
+  if (!session || !session.staffId || session.staffId === "STAFF-SUPERADMIN") {
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  const id = String(req.params.id ?? "").trim();
+  if (!id) {
+    res.status(400).json({ ok: false, error: "invalid_id" });
+    return;
+  }
+  const updated = await markNotificationRead(id, session.staffId);
+  res.json({ ok: true, updated });
+});
+
+authRouter.post("/notifications/read-all", async (req, res) => {
+  const session = getSession(req);
+  if (!session || !session.staffId || session.staffId === "STAFF-SUPERADMIN") {
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  const updatedCount = await markAllNotificationsRead(session.staffId);
+  res.json({ ok: true, updatedCount });
 });
 
 adminRouter.post("/logout", (req, res) => {
@@ -3575,6 +3788,38 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
     entityId: unit.id,
     metadata: { status, source: "room_board" }
   });
+
+  if (status === "MAINTENANCE" || status === "CLEANING") {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const nextArrival = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        status: BookingStatus.CONFIRMED,
+        checkIn: { gte: now, lte: soon }
+      },
+      orderBy: { checkIn: "asc" },
+      select: { id: true, checkIn: true, referenceCode: true }
+    });
+    if (status === "MAINTENANCE" || nextArrival) {
+      await createRoleRoutedNotification({
+        hotelId: hotel.id,
+        roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
+        title: status === "MAINTENANCE" ? "Room moved to maintenance" : "Room status requires attention",
+        body:
+          status === "MAINTENANCE"
+            ? `Room ${unit.id} is now in maintenance mode and may affect upcoming stays.`
+            : `Room ${unit.id} is cleaning with an arrival in the next 24 hours${nextArrival?.referenceCode ? ` (${nextArrival.referenceCode})` : ""}.`,
+        category: "rooms",
+        severity: status === "MAINTENANCE" ? "high" : "critical",
+        link: "/admin/room-board",
+        sourceType: "ROOM_BOARD_UNIT_STATUS",
+        sourceId: unit.id,
+        requiresAttention: true
+      }).catch(() => undefined);
+    }
+  }
 
   if (returnTo === "/admin/profile") {
     res.redirect("/admin/profile?unitUpdated=1");
@@ -11662,6 +11907,18 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     entityId: task.id,
     metadata: { roomUnitId: task.roomUnitId, assignedToUserId: session.staffId, shift }
   });
+  await createNotification({
+    hotelId: hotel.id,
+    userId: session.staffId,
+    title: "Housekeeping task claimed",
+    body: "You claimed a room cleaning task.",
+    category: "housekeeping",
+    severity: "high",
+    link: "/admin/housekeeping",
+    sourceType: "HOUSEKEEPING_TASK_CLAIMED",
+    sourceId: task.id,
+    requiresAttention: true
+  }).catch(() => undefined);
   res.redirect("/admin/housekeeping");
 });
 
@@ -11713,6 +11970,18 @@ adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ 
       shift
     }
   });
+  await createNotification({
+    hotelId: hotel.id,
+    userId: assignee.id,
+    title: "Task reassigned to you",
+    body: `${assignee.fullName}, a housekeeping task has been assigned/reassigned to you.`,
+    category: "housekeeping",
+    severity: "high",
+    link: "/admin/housekeeping",
+    sourceType: "HOUSEKEEPING_TASK_REASSIGNED",
+    sourceId: task.id,
+    requiresAttention: true
+  }).catch(() => undefined);
   res.redirect("/admin/housekeeping");
 });
 

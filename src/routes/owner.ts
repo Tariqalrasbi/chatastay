@@ -402,6 +402,38 @@ function ownerLayout(content: string, authenticated: boolean): string {
       ].join("")
     : '<a href="/owner/login">Login</a>';
 
+  const ownerNotifScript = authenticated
+    ? `<script>
+(function () {
+  var btn = document.getElementById("ownerNotifBell");
+  var badge = document.getElementById("ownerNotifBadge");
+  var panel = document.getElementById("ownerNotifPanel");
+  var list = document.getElementById("ownerNotifList");
+  if (!btn || !badge || !panel || !list) return;
+  btn.addEventListener("click", function () { panel.hidden = !panel.hidden; });
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!panel.hidden && !panel.contains(t) && !btn.contains(t)) panel.hidden = true;
+  });
+  function esc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  async function poll() {
+    var r = await fetch("/owner/alerts/summary", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!r.ok) return;
+    var j = await r.json();
+    var unread = Number(j.critical || 0) + Number(j.warning || 0);
+    badge.hidden = unread <= 0;
+    badge.textContent = String(Math.min(99, unread));
+    var top = Array.isArray(j.items) ? j.items : [];
+    list.innerHTML = top.map(function (it) {
+      return '<li style="margin:0;padding:8px 10px;border-bottom:1px solid #e2e8f0"><a href="' + esc(it.href || "/owner/alerts") + '" style="text-decoration:none;color:#0f172a"><strong>' + esc(it.title || "Alert") + "</strong><div style=\"font-size:12px;color:#5f6b7a\">" + esc(it.detail || "") + "</div></a></li>";
+    }).join("");
+  }
+  poll();
+  window.setInterval(poll, 10000);
+})();
+</script>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -469,6 +501,11 @@ function ownerLayout(content: string, authenticated: boolean): string {
       nav form { margin: 0; }
       .content {
         padding: 24px;
+      }
+      .owner-topbar {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 10px;
       }
       .panel {
         background: var(--card);
@@ -582,9 +619,20 @@ function ownerLayout(content: string, authenticated: boolean): string {
         <nav>${navHtml}</nav>
       </aside>
       <main class="content">
+        <div class="owner-topbar">
+          <div style="position:relative">
+            <button id="ownerNotifBell" type="button" style="border:1px solid var(--border);background:#fff;border-radius:999px;width:36px;height:36px;cursor:pointer">🔔</button>
+            <span id="ownerNotifBadge" hidden style="position:absolute;top:-5px;right:-5px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;font-size:11px;line-height:18px;text-align:center;padding:0 4px;font-weight:700">0</span>
+            <div id="ownerNotifPanel" hidden style="position:absolute;top:42px;right:0;width:min(360px,calc(100vw - 40px));max-height:380px;overflow:auto;border:1px solid var(--border);border-radius:12px;background:#fff;box-shadow:0 16px 36px rgba(15,23,42,.15);z-index:999">
+              <div style="padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;font-weight:700">Platform alerts</div>
+              <ul id="ownerNotifList" style="list-style:none;margin:0;padding:0"></ul>
+            </div>
+          </div>
+        </div>
         <section class="panel">${content}</section>
       </main>
     </div>
+    ${ownerNotifScript}
   </body>
 </html>`;
 }
@@ -1074,6 +1122,23 @@ ownerRouter.get("/alerts", requireOwnerAuth, async (req, res) => {
 </p>`;
 
   res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.get("/alerts/summary", requireOwnerAuth, async (_req, res) => {
+  const snapshot = await loadPlatformAlerts();
+  const items = snapshot.alerts.slice(0, 8).map((a) => ({
+    title: a.title,
+    detail: a.detail,
+    href: a.href,
+    severity: a.severity
+  }));
+  res.json({
+    ok: true,
+    critical: snapshot.counts.critical,
+    warning: snapshot.counts.warning,
+    info: snapshot.counts.info,
+    items
+  });
 });
 
 ownerRouter.get("/digest", requireOwnerAuth, async (req, res) => {

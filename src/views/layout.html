@@ -155,6 +155,124 @@
         border: 1px solid var(--border);
         border-radius: 12px;
         background: #f7faf9;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        align-items: flex-start;
+      }
+      .top-subnav-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .admin-notif-wrap {
+        position: relative;
+        flex: 0 0 auto;
+      }
+      .admin-notif-bell {
+        border: 1px solid var(--border);
+        background: #fff;
+        border-radius: 999px;
+        width: 38px;
+        height: 38px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 17px;
+      }
+      .admin-notif-badge {
+        position: absolute;
+        top: -5px;
+        right: -4px;
+        min-width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        padding: 0 5px;
+        font-size: 11px;
+        line-height: 18px;
+        text-align: center;
+        background: #ef4444;
+        color: #fff;
+        font-weight: 700;
+      }
+      .admin-notif-panel {
+        position: absolute;
+        top: 44px;
+        right: 0;
+        width: min(360px, calc(100vw - 40px));
+        max-height: 420px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 16px 36px rgba(15, 23, 42, 0.15);
+        z-index: 10020;
+      }
+      .admin-notif-panel-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .admin-notif-actions {
+        display: flex;
+        gap: 6px;
+      }
+      .admin-notif-actions button {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: #fff;
+        padding: 3px 8px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .admin-notif-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .admin-notif-item a {
+        display: block;
+        padding: 10px 12px;
+        text-decoration: none;
+        color: var(--text);
+        border-left: 4px solid transparent;
+        border-bottom: 1px solid #eef2f7;
+      }
+      .admin-notif-item:last-child a {
+        border-bottom: 0;
+      }
+      .admin-notif-item.sev-critical a { border-left-color: #dc2626; background: #fef2f2; }
+      .admin-notif-item.sev-high a { border-left-color: #f59e0b; background: #fffbeb; }
+      .admin-notif-item.sev-normal a { border-left-color: #0b6e6e; }
+      .admin-notif-item.sev-info a { border-left-color: #64748b; }
+      .admin-notif-title { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+      .admin-notif-body { font-size: 12px; color: var(--muted); line-height: 1.35; }
+      .admin-notif-empty {
+        font-size: 12px;
+        color: var(--muted);
+        padding: 12px;
+      }
+      .attention-strip {
+        margin: 0 0 12px;
+        border: 1px solid #fecaca;
+        background: #fff5f5;
+        border-radius: 12px;
+        padding: 10px 12px;
+      }
+      .attention-strip h4 {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+      .attention-strip ul {
+        margin: 0;
+        padding-left: 18px;
+      }
+      .attention-strip li {
+        margin: 4px 0;
+        font-size: 13px;
       }
       .section-tabs {
         display: none;
@@ -575,7 +693,28 @@
         <div class="sidebar-logout">{{logoutAction}}</div>
       </aside>
       <main class="content">
-        <div class="top-subnav">{{sectionTabs}}</div>
+        <div class="top-subnav">
+          <div class="top-subnav-main">{{sectionTabs}}</div>
+          <div class="admin-notif-wrap">
+            <button id="adminNotifBell" class="admin-notif-bell" type="button" title="Notifications">🔔</button>
+            <span id="adminNotifBadge" class="admin-notif-badge" hidden>0</span>
+            <div id="adminNotifPanel" class="admin-notif-panel" hidden>
+              <div class="admin-notif-panel-head">
+                <strong style="font-size:13px">Notifications</strong>
+                <div class="admin-notif-actions">
+                  <button id="adminNotifMute" type="button" title="Mute alert sound">🔔</button>
+                  <button id="adminNotifReadAll" type="button">Read all</button>
+                </div>
+              </div>
+              <ul id="adminNotifList" class="admin-notif-list"></ul>
+              <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
+            </div>
+          </div>
+        </div>
+        <section id="adminAttentionStrip" class="attention-strip" hidden>
+          <h4>Attention Needed</h4>
+          <ul id="adminAttentionList"></ul>
+        </section>
         <section class="panel">{{content}}</section>
       </main>
     </div>

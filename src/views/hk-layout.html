@@ -102,6 +102,60 @@
         padding: 20px;
         box-shadow: 0 6px 24px rgba(15, 23, 42, 0.06);
       }
+      .hk-topbar {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 10px;
+      }
+      .admin-notif-wrap { position: relative; }
+      .admin-notif-bell {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        width: 36px;
+        height: 36px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .admin-notif-badge {
+        position: absolute;
+        top: -5px;
+        right: -5px;
+        min-width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        background: #ef4444;
+        color: #fff;
+        font-size: 11px;
+        line-height: 18px;
+        text-align: center;
+        padding: 0 4px;
+        font-weight: 700;
+      }
+      .admin-notif-panel {
+        position: absolute;
+        top: 40px;
+        right: 0;
+        width: min(340px, calc(100vw - 26px));
+        max-height: 360px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 16px 36px rgba(15, 23, 42, 0.15);
+        z-index: 999;
+      }
+      .admin-notif-item a { display:block; padding:9px 10px; text-decoration:none; color:var(--text); border-bottom:1px solid #eef2f7; border-left:4px solid transparent; }
+      .admin-notif-item.sev-critical a { border-left-color:#dc2626; background:#fef2f2; }
+      .admin-notif-item.sev-high a { border-left-color:#f59e0b; background:#fffbeb; }
+      .admin-notif-item.sev-normal a { border-left-color:#0b6e6e; }
+      .admin-notif-item.sev-info a { border-left-color:#64748b; }
+      .attention-strip {
+        margin-bottom: 10px;
+        border: 1px solid #fecaca;
+        background: #fff5f5;
+        border-radius: 10px;
+        padding: 8px 10px;
+      }
       h1,
       h2 {
         margin: 0 0 10px;
@@ -145,8 +199,28 @@
         <div class="logout">{{logoutForm}}</div>
       </aside>
       <main>
+        <div class="hk-topbar">
+          <div class="admin-notif-wrap">
+            <button id="adminNotifBell" class="admin-notif-bell" type="button">🔔</button>
+            <span id="adminNotifBadge" class="admin-notif-badge" hidden>0</span>
+            <div id="adminNotifPanel" class="admin-notif-panel" hidden>
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid #d8dee6">
+                <strong style="font-size:13px">Notifications</strong>
+                <button id="adminNotifReadAll" type="button" style="border:1px solid #d8dee6;background:#fff;border-radius:999px;padding:3px 8px;font-size:12px">Read all</button>
+              </div>
+              <ul id="adminNotifList" style="list-style:none;margin:0;padding:0"></ul>
+              <p id="adminNotifEmpty" style="font-size:12px;color:#5f6b7a;padding:10px">No new notifications.</p>
+              <button id="adminNotifMute" type="button" style="margin:0 10px 10px;border:1px solid #d8dee6;background:#fff;border-radius:999px;padding:4px 9px;font-size:12px">🔔</button>
+            </div>
+          </div>
+        </div>
+        <section id="adminAttentionStrip" class="attention-strip" hidden>
+          <h3 style="margin:0 0 6px;font-size:13px">Attention Needed</h3>
+          <ul id="adminAttentionList" style="margin:0;padding-left:16px"></ul>
+        </section>
         <div class="panel">{{content}}</div>
       </main>
     </div>
+    {{extraScripts}}
   </body>
 </html>

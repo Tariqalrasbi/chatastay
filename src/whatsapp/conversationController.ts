@@ -1,4 +1,4 @@
-import { ChannelProvider, ConversationState as DbConversationState, FbServiceMode, MessageDirection, Prisma } from "@prisma/client";
+import { ChannelProvider, ConversationState as DbConversationState, FbServiceMode, MessageDirection, Prisma, UserRole } from "@prisma/client";
 import { parseGuestMessage, validateParsedBookingInput } from "../core/parse";
 import { findAvailableRoomType, findAvailableRoomTypes } from "../core/availability";
 import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
@@ -24,6 +24,7 @@ import {
   type FoodFlowOutbound
 } from "./guestFoodFlow";
 import { prisma } from "../db";
+import { createRoleRoutedNotification } from "../core/notifications";
 import { logWhatsAppMessage } from "./messageLogger";
 import {
   answerFromKnowledge,
@@ -991,6 +992,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       console.error("guest journey reply notify:", e instanceof Error ? e.message : String(e));
     }
   }
+  await createRoleRoutedNotification({
+    hotelId: hotel.id,
+    roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF],
+    title: "New guest message",
+    body: `${guest.fullName ?? guest.phoneE164} sent a new message.`,
+    category: "messages",
+    severity: "normal",
+    link: `/admin/conversations/${encodeURIComponent(conversation.id)}`,
+    sourceType: "CONVERSATION_MESSAGE_INBOUND",
+    sourceId: conversation.id,
+    requiresAttention: true
+  }).catch(() => undefined);
   await logWhatsAppMessage({
     conversationId: conversation.id,
     phoneNumber: normalizedPhone,

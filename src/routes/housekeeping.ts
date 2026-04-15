@@ -2,8 +2,9 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { BookingStatus, HousekeepingTaskStatus, NotificationStatus, type Prisma } from "@prisma/client";
+import { BookingStatus, HousekeepingTaskStatus, NotificationStatus, UserRole, type Prisma } from "@prisma/client";
 import { prisma } from "../db";
+import { createNotification, createRoleRoutedNotification } from "../core/notifications";
 
 export const housekeepingRouter = Router();
 
@@ -487,6 +488,18 @@ housekeepingRouter.post("/room/:roomId/claim", requireHousekeepingEdit, async (r
       newStatus: "CLEANING",
       claimedByUserId: session.staffId
     });
+    await createNotification({
+      hotelId: session.hotelId,
+      userId: session.staffId,
+      title: "Task assigned to you",
+      body: `Room ${roomId} is now assigned to your cleaning queue.`,
+      category: "housekeeping",
+      severity: "high",
+      link: "/hk",
+      sourceType: "HK_STATUS_UPDATE",
+      sourceId: roomId,
+      requiresAttention: true
+    }).catch(() => undefined);
   }
   res.redirect("/hk");
 });
@@ -550,5 +563,19 @@ housekeepingRouter.post("/room/:roomId/status", requireHousekeepingEdit, async (
     newStatus: status,
     claimedByUserId: status === "CLEANING" ? session.staffId : null
   });
+  if (status === "MAINTENANCE") {
+    await createRoleRoutedNotification({
+      hotelId: session.hotelId,
+      roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
+      title: "Room flagged for maintenance",
+      body: `Room ${roomId} was marked maintenance by housekeeping.`,
+      category: "rooms",
+      severity: "high",
+      link: "/admin/room-board",
+      sourceType: "HK_STATUS_UPDATE",
+      sourceId: roomId,
+      requiresAttention: true
+    }).catch(() => undefined);
+  }
   res.redirect("/hk");
 });

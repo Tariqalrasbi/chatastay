@@ -1,8 +1,9 @@
-import { BookingStatus, ChannelProvider, ConversationState, PaymentStatus } from "@prisma/client";
+import { BookingStatus, ChannelProvider, ConversationState, PaymentStatus, UserRole } from "@prisma/client";
 import { recordBookingStatusChange } from "./bookingStatusHistory";
 import { allocateBookingReferenceCode } from "./bookingReference";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma } from "../db";
+import { createRoleRoutedNotification } from "./notifications";
 import { refreshGuestSegmentTagsForGuest } from "./guestSegmentation";
 import { ensureActiveFolio } from "./folioService";
 import { addDays, findAvailableRoomType, startOfDay } from "./availability";
@@ -293,6 +294,18 @@ export async function createConfirmedBookingAtomic(params: {
   await refreshGuestSegmentTagsForGuest(params.guestId).catch((err) =>
     console.error("[guest-segmentation] refresh after confirm failed:", err instanceof Error ? err.message : String(err))
   );
+  await createRoleRoutedNotification({
+    hotelId: params.hotelId,
+    roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
+    title: "New booking confirmed",
+    body: `Booking ${bookingId} is confirmed and requires operational follow-up.`,
+    category: "bookings",
+    severity: "high",
+    link: `/admin/bookings/${encodeURIComponent(bookingId)}`,
+    sourceType: "BOOKING_CONFIRMED",
+    sourceId: bookingId,
+    requiresAttention: true
+  }).catch(() => undefined);
 
   return {
     bookingId,
