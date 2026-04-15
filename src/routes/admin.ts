@@ -1469,6 +1469,89 @@ function parseHousekeepingShiftInput(input: unknown): HousekeepingShiftCode {
   return deriveHousekeepingShift(new Date());
 }
 
+/** In-progress cleans past this many minutes appear in supervisor "stalled" views. */
+const HK_SUPERVISOR_STALLED_MINUTES = 90;
+/** Unclaimed tasks with next arrival inside this window appear as "due soon". */
+const HK_SUPERVISOR_DUE_SOON_MS = 4 * 60 * 60 * 1000;
+
+type HkPortalListFilters = {
+  priority: "ALL" | HousekeepingPriorityCode;
+  shift: "ALL" | HousekeepingShiftCode;
+  mine: boolean;
+};
+
+function buildHkPortalListQueryString(f: HkPortalListFilters): string {
+  const p = new URLSearchParams();
+  if (f.priority !== "ALL") p.set("priority", f.priority);
+  if (f.shift !== "ALL") p.set("shift", f.shift);
+  if (f.mine) p.set("mine", "1");
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+function parseHkPortalListFilters(req: { query: Record<string, unknown> }): HkPortalListFilters {
+  const priorityRaw = typeof req.query.priority === "string" ? req.query.priority.trim().toUpperCase() : "ALL";
+  const priority: "ALL" | HousekeepingPriorityCode =
+    priorityRaw === "CRITICAL" || priorityRaw === "HIGH" || priorityRaw === "MEDIUM" || priorityRaw === "NORMAL" ? priorityRaw : "ALL";
+  const shiftRaw = typeof req.query.shift === "string" ? req.query.shift.trim().toUpperCase() : "ALL";
+  const shift: "ALL" | HousekeepingShiftCode =
+    shiftRaw === "MORNING" || shiftRaw === "EVENING" || shiftRaw === "NIGHT" ? shiftRaw : "ALL";
+  const mineRaw = typeof req.query.mine === "string" ? req.query.mine.trim().toLowerCase() : "";
+  const mine = mineRaw === "1" || mineRaw === "true" || mineRaw === "yes";
+  return { priority, shift, mine };
+}
+
+function hkPortalListHiddenInputs(f: HkPortalListFilters): string {
+  const parts: string[] = [];
+  if (f.priority !== "ALL") parts.push(`<input type="hidden" name="hkListPriority" value="${escapeHtml(f.priority)}" />`);
+  if (f.shift !== "ALL") parts.push(`<input type="hidden" name="hkListShift" value="${escapeHtml(f.shift)}" />`);
+  if (f.mine) parts.push('<input type="hidden" name="hkListMine" value="1" />');
+  return parts.join("");
+}
+
+function redirectPathPreservingHkListFilters(path: string, body: Record<string, unknown>): string {
+  const qMark = path.indexOf("?");
+  const pathname = qMark === -1 ? path : path.slice(0, qMark);
+  const existing = qMark === -1 ? "" : path.slice(qMark + 1);
+  const sp = new URLSearchParams(existing);
+  const priority = String(body.hkListPriority ?? "").trim().toUpperCase();
+  if (priority === "CRITICAL" || priority === "HIGH" || priority === "MEDIUM" || priority === "NORMAL") sp.set("priority", priority);
+  else sp.delete("priority");
+  const shift = String(body.hkListShift ?? "").trim().toUpperCase();
+  if (shift === "MORNING" || shift === "EVENING" || shift === "NIGHT") sp.set("shift", shift);
+  else sp.delete("shift");
+  if (String(body.hkListMine ?? "").trim() === "1") sp.set("mine", "1");
+  else sp.delete("mine");
+  const tail = sp.toString();
+  return tail ? `${pathname}?${tail}` : pathname;
+}
+
+function housekeepingDashboardHref(
+  current: {
+    claimView: string;
+    shift: string;
+    priority: string;
+    exception: "none" | "stalled" | "duesoon";
+    statsDate: string;
+  },
+  overrides: Partial<{
+    claimView: string;
+    shift: string;
+    priority: string;
+    exception: "none" | "stalled" | "duesoon";
+    statsDate: string;
+  }>
+): string {
+  const p = new URLSearchParams();
+  p.set("claimView", overrides.claimView ?? current.claimView);
+  p.set("shift", overrides.shift ?? current.shift);
+  p.set("priority", overrides.priority ?? current.priority);
+  const ex = overrides.exception !== undefined ? overrides.exception : current.exception;
+  if (ex !== "none") p.set("exception", ex === "stalled" ? "stalled" : "duesoon");
+  p.set("statsDate", overrides.statsDate ?? current.statsDate);
+  return `/admin/housekeeping?${p.toString()}`;
+}
+
 function housekeepingDurationMinutes(start: Date | null | undefined, end: Date | null | undefined): number | null {
   if (!start || !end) return null;
   const diff = end.getTime() - start.getTime();
@@ -1483,21 +1566,90 @@ function formatDurationMinutes(mins: number | null): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+/** Rule-based housekeeping urgency (no duplicate task store; explainable for staff). */
+function evaluateHousekeepingTaskPriority(params: {
+  bookingCheckIn?: Date | null;
+  bookingGuestVip?: boolean;
+  taskSource?: HousekeepingTaskSource;
+  /** Departing stay linked to the HK task (e.g. checkout clean). */
+  linkedBookingCheckOut?: Date | null;
+  /** Confirmed arrival on this unit with check-in calendar day = today. */
+  hasArrivalToday?: boolean;
+}): { level: HousekeepingPriorityCode; reason: string } {
+  const now = new Date();
+  const startToday = startOfDay(now);
+  const beforeStandardCheckIn = now.getHours() < 15;
+  const checkIn = params.bookingCheckIn ? startOfDay(params.bookingCheckIn) : null;
+  const dayDiff =
+    checkIn !== null ? Math.round((checkIn.getTime() - startToday.getTime()) / 86400000) : null;
+  const checkoutDay = params.linkedBookingCheckOut ? startOfDay(params.linkedBookingCheckOut) : null;
+  const checkoutToday = checkoutDay !== null && checkoutDay.getTime() === startToday.getTime();
+  const sameDayTurnover = Boolean(checkoutToday && params.hasArrivalToday);
+
+  if (params.bookingGuestVip && dayDiff !== null && dayDiff <= 0) {
+    return { level: "CRITICAL", reason: "VIP arrival today" };
+  }
+  if (sameDayTurnover) {
+    return { level: "CRITICAL", reason: "Same-day turnaround — arrival with checkout today" };
+  }
+  if (dayDiff === 0 && beforeStandardCheckIn) {
+    return { level: "HIGH", reason: "Same-day arrival — early service window" };
+  }
+  if (params.bookingGuestVip && dayDiff === 1) {
+    return { level: "HIGH", reason: "VIP arrival tomorrow" };
+  }
+  if (params.taskSource === HousekeepingTaskSource.CHECKOUT && checkoutToday) {
+    return { level: "HIGH", reason: "Checkout today — prepare for next guest" };
+  }
+  if (dayDiff === 0 || dayDiff === 1) {
+    return { level: "MEDIUM", reason: "Arrival due today or tomorrow" };
+  }
+  if (params.taskSource === HousekeepingTaskSource.CHECKOUT) {
+    return { level: "MEDIUM", reason: "Post-checkout cleaning" };
+  }
+  if (params.taskSource === HousekeepingTaskSource.FRONTDESK) {
+    return { level: "MEDIUM", reason: "Front desk cleaning request" };
+  }
+  return { level: "NORMAL", reason: "Standard cleaning queue" };
+}
+
+function housekeepingPriorityRank(level: HousekeepingPriorityCode): number {
+  switch (level) {
+    case "CRITICAL":
+      return 0;
+    case "HIGH":
+      return 1;
+    case "MEDIUM":
+      return 2;
+    default:
+      return 3;
+  }
+}
+
 function computeHousekeepingPriority(params: {
   bookingCheckIn?: Date | null;
   bookingGuestVip?: boolean;
 }): HousekeepingPriorityCode {
-  if (!params.bookingCheckIn) return "NORMAL";
-  const now = new Date();
-  const startToday = startOfDay(now);
-  const inDate = startOfDay(params.bookingCheckIn);
-  const dayDiff = Math.round((inDate.getTime() - startToday.getTime()) / 86400000);
-  const beforeStandardCheckIn = now.getHours() < 15;
-  if (params.bookingGuestVip && dayDiff <= 0) return "CRITICAL";
-  if (dayDiff === 0 && beforeStandardCheckIn) return "HIGH";
-  if (params.bookingGuestVip && dayDiff === 1) return "HIGH";
-  if (dayDiff === 0 || dayDiff === 1) return "MEDIUM";
-  return "NORMAL";
+  return evaluateHousekeepingTaskPriority({
+    bookingCheckIn: params.bookingCheckIn,
+    bookingGuestVip: params.bookingGuestVip
+  }).level;
+}
+
+async function loadHousekeepingCleanerWorkloads(hotelId: string): Promise<Array<{ id: string; name: string; inProgress: number }>> {
+  const hkUsers = await prisma.hotelUser.findMany({
+    where: { hotelId, isActive: true, role: UserRole.HOUSEKEEPING },
+    select: { id: true, fullName: true }
+  });
+  const rows: Array<{ id: string; name: string; inProgress: number }> = [];
+  for (const u of hkUsers) {
+    const inProgress = await prisma.housekeepingTask.count({
+      where: { hotelId, assignedToUserId: u.id, status: HousekeepingTaskStatus.IN_PROGRESS }
+    });
+    rows.push({ id: u.id, name: u.fullName, inProgress });
+  }
+  rows.sort((a, b) => a.inProgress - b.inProgress || a.name.localeCompare(b.name));
+  return rows;
 }
 
 async function notifyHousekeepingStaff(opts: {
@@ -3137,6 +3289,8 @@ adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) 
     return;
   }
   const session = getSession(req)!;
+  const hkListFilters = parseHkPortalListFilters(req);
+  const hkListHidden = hkPortalListHiddenInputs(hkListFilters);
   const assignNotice =
     req.query.assign === "blocked"
       ? '<p class="badge alert">That room was claimed by another teammate.</p>'
@@ -3151,17 +3305,105 @@ adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) 
     take: 200,
     include: {
       roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
-      assignedTo: { select: { fullName: true } }
+      assignedTo: { select: { fullName: true } },
+      booking: { select: { id: true, checkIn: true, checkOut: true, guest: { select: { isVip: true } } } }
     }
   });
+  const hkRoomIds = Array.from(new Set(openTasks.map((t) => t.roomUnitId)));
+  const hkUpcoming = new Map<string, { checkIn: Date; isVip: boolean }>();
+  const hkTodayStart = startOfDay(new Date());
+  if (hkRoomIds.length > 0) {
+    const hkArrivals = await prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: { in: hkRoomIds },
+        status: BookingStatus.CONFIRMED,
+        checkIn: { gte: hkTodayStart }
+      },
+      orderBy: [{ checkIn: "asc" }, { createdAt: "asc" }],
+      select: { roomUnitId: true, checkIn: true, guest: { select: { isVip: true } } }
+    });
+    for (const b of hkArrivals) {
+      if (!b.roomUnitId) continue;
+      if (!hkUpcoming.has(b.roomUnitId)) {
+        hkUpcoming.set(b.roomUnitId, { checkIn: b.checkIn, isVip: b.guest.isVip });
+      }
+    }
+  }
+  const hkLoads = await loadHousekeepingCleanerWorkloads(hotel.id);
+  const hkSuggest = hkLoads[0]?.name;
+  const hkDecorated = openTasks.map((t) => {
+    const hkShift = parseHousekeepingShift(t.notes) ?? deriveHousekeepingShift(t.startedAt ?? t.createdAt);
+    const hint = t.booking?.checkIn
+      ? { checkIn: t.booking.checkIn, isVip: t.booking.guest?.isVip === true }
+      : hkUpcoming.get(t.roomUnitId);
+    const hasArrivalToday = Boolean(hint && startOfDay(hint.checkIn).getTime() === hkTodayStart.getTime());
+    const ev = evaluateHousekeepingTaskPriority({
+      bookingCheckIn: hint?.checkIn,
+      bookingGuestVip: hint?.isVip === true,
+      taskSource: t.source,
+      linkedBookingCheckOut: t.booking?.checkOut ?? null,
+      hasArrivalToday
+    });
+    return {
+      ...t,
+      hkShift,
+      hkPriority: ev.level,
+      hkReason: ev.reason,
+      nextArrivalAt: hint?.checkIn ?? null
+    };
+  });
+  const hkFiltered = hkDecorated.filter((t) => {
+    if (hkListFilters.mine && t.assignedToUserId !== session.staffId) return false;
+    if (hkListFilters.shift !== "ALL" && t.hkShift !== hkListFilters.shift) return false;
+    if (hkListFilters.priority !== "ALL" && t.hkPriority !== hkListFilters.priority) return false;
+    return true;
+  });
+  const hkSorted = [...hkFiltered].sort((a, b) => {
+    const d = housekeepingPriorityRank(a.hkPriority) - housekeepingPriorityRank(b.hkPriority);
+    if (d !== 0) return d;
+    const at = a.nextArrivalAt ? a.nextArrivalAt.getTime() : Number.MAX_SAFE_INTEGER;
+    const bt = b.nextArrivalAt ? b.nextArrivalAt.getTime() : Number.MAX_SAFE_INTEGER;
+    if (at !== bt) return at - bt;
+    return a.createdAt.getTime() - b.createdAt.getTime();
+  });
+  const hkChip = (label: string, target: HkPortalListFilters) => {
+    const active =
+      hkListFilters.mine === target.mine &&
+      hkListFilters.priority === target.priority &&
+      hkListFilters.shift === target.shift;
+    const href = "/admin/hk" + buildHkPortalListQueryString(target);
+    const style = active
+      ? "border:2px solid #128c7e;background:#e6fffa;font-weight:700"
+      : "border:1px solid #d8dee6;background:#fff;font-weight:500";
+    return `<a href="${href}" style="padding:6px 10px;border-radius:999px;font-size:12px;text-decoration:none;color:#111;${style}">${escapeHtml(label)}</a>`;
+  };
+  const hkFilterBar = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;align-items:center">
+<span class="muted" style="font-size:12px;width:100%">Quick filters</span>
+${hkChip("All", { mine: false, priority: "ALL", shift: "ALL" })}
+${hkChip("My tasks", { mine: true, priority: hkListFilters.priority, shift: hkListFilters.shift })}
+${hkChip("Critical", { mine: hkListFilters.mine, priority: "CRITICAL", shift: hkListFilters.shift })}
+${hkChip("High", { mine: hkListFilters.mine, priority: "HIGH", shift: hkListFilters.shift })}
+${hkChip("Medium", { mine: hkListFilters.mine, priority: "MEDIUM", shift: hkListFilters.shift })}
+${hkChip("Morning", { mine: hkListFilters.mine, priority: hkListFilters.priority, shift: "MORNING" })}
+${hkChip("Evening", { mine: hkListFilters.mine, priority: hkListFilters.priority, shift: "EVENING" })}
+${hkChip("Night", { mine: hkListFilters.mine, priority: hkListFilters.priority, shift: "NIGHT" })}
+</div>`;
   const shiftSelect = () => `<select name="shift" style="padding:4px 6px;border:1px solid #d8dee6;border-radius:8px">
     <option value="MORNING">Morning</option>
     <option value="EVENING">Evening</option>
     <option value="NIGHT">Night</option>
   </select>`;
-  const rows = openTasks
+  const rows = hkSorted
     .map((t) => {
       const roomLabel = `${escapeHtml(t.roomUnit.name)} (${escapeHtml(t.roomUnit.roomType.name)})`;
+      const priColor =
+        t.hkPriority === "CRITICAL" ? "#b91c1c" : t.hkPriority === "HIGH" ? "#dc2626" : t.hkPriority === "MEDIUM" ? "#ca8a04" : "#475569";
+      const priCell = `<span style="font-size:11px;font-weight:700;padding:2px 7px;border-radius:999px;background:${priColor};color:#fff">${t.hkPriority}</span><div class="muted" style="font-size:10px;margin-top:4px;line-height:1.35">${escapeHtml(t.hkReason)}</div>`;
+      const suggestLine =
+        !t.assignedToUserId && hkSuggest
+          ? `<div class="muted" style="font-size:11px;margin-top:4px">Suggested: ${escapeHtml(hkSuggest)}</div>`
+          : "";
       const assignee = t.assignedToUserId
         ? t.assignedToUserId === session.staffId
           ? `<span class="badge ok">You</span>`
@@ -3175,28 +3417,41 @@ adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) 
             : "";
       let actions = "";
       if (t.status === HousekeepingTaskStatus.PENDING && !t.assignedToUserId) {
-        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/assign" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Claim</button></form>`;
+        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/assign" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${hkListHidden}${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Claim</button></form>`;
       } else if (t.status === HousekeepingTaskStatus.PENDING && t.assignedToUserId === session.staffId && !t.startedAt) {
-        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/start-cleaning" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#0b6e6e;color:#fff;font-weight:700;cursor:pointer">Start cleaning</button></form>`;
+        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/start-cleaning" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${hkListHidden}${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#0b6e6e;color:#fff;font-weight:700;cursor:pointer">Start cleaning</button></form>`;
       } else if (
         (t.status === HousekeepingTaskStatus.IN_PROGRESS || t.status === HousekeepingTaskStatus.PENDING) &&
         t.assignedToUserId === session.staffId &&
         t.startedAt
       ) {
-        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 6px 0 0"><input type="hidden" name="targetStatus" value="AVAILABLE" /><button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Mark ready</button></form>
-        <form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0"><input type="hidden" name="targetStatus" value="MAINTENANCE" /><button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#6b21a8;color:#fff;font-weight:700;cursor:pointer">Maintenance</button></form>`;
+        actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 6px 0 0">${hkListHidden}<input type="hidden" name="targetStatus" value="AVAILABLE" /><button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Mark ready</button></form>
+        <form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0">${hkListHidden}<input type="hidden" name="targetStatus" value="MAINTENANCE" /><button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#6b21a8;color:#fff;font-weight:700;cursor:pointer">Maintenance</button></form>`;
       } else if (t.assignedToUserId && t.assignedToUserId !== session.staffId) {
         actions = '<span class="muted">In use by another housekeeper</span>';
       }
-      return `<tr><td>${roomLabel}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
+      return `<tr><td>${roomLabel}</td><td>${priCell}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${suggestLine}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
     })
     .join("");
+  const hkCrit = hkDecorated.filter((t) => t.hkPriority === "CRITICAL").length;
+  const hkProg = hkDecorated.filter((t) => t.status === HousekeepingTaskStatus.IN_PROGRESS).length;
+  const hkShowingNote =
+    hkFiltered.length !== hkDecorated.length
+      ? `<p class="muted" style="font-size:12px;margin:0 0 8px">Showing <strong>${hkFiltered.length}</strong> of <strong>${hkDecorated.length}</strong> open tasks (filters active).</p>`
+      : "";
   const content = `<h2>My tasks</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — claim a room, start cleaning, then mark ready or maintenance.</p>
+<p class="muted">${escapeHtml(hotel.displayName)} — sorted by urgency. Use filters to focus your queue; claim, start cleaning, then mark ready or maintenance.</p>
 ${assignNotice}
+${hkFilterBar}
+${hkShowingNote}
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-bottom:12px">
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;background:#fff"><strong>Open</strong><div>${hkDecorated.length}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;background:#fff"><strong>Critical</strong><div>${hkCrit}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;background:#fff"><strong>In progress</strong><div>${hkProg}</div></div>
+</div>
 <table style="width:100%;border-collapse:collapse;margin-top:12px">
-<thead><tr><th>Room</th><th>Status</th><th>Assignment</th><th>Actions</th></tr></thead>
-<tbody>${rows || '<tr><td colspan="4" class="muted">No open tasks.</td></tr>'}</tbody>
+<thead><tr><th>Room</th><th>Priority</th><th>Status</th><th>Assignment</th><th>Actions</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="5" class="muted">No open tasks.</td></tr>'}</tbody>
 </table>`;
   res.type("html").send(renderHkLayout({ title: "My tasks", active: "tasks", content }));
 });
@@ -3206,15 +3461,16 @@ adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPort
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const shift = parseHousekeepingShiftInput(req.body.shift);
+  const hkBody = req.body as Record<string, unknown>;
   if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
-    res.redirect("/admin/hk");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
     return;
   }
   const task = await prisma.housekeepingTask.findFirst({
     where: { id: taskId, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING, assignedToUserId: null }
   });
   if (!task) {
-    res.redirect("/admin/hk?assign=blocked");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk?assign=blocked", hkBody));
     return;
   }
   const claim = await prisma.housekeepingTask.updateMany({
@@ -3229,7 +3485,7 @@ adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPort
       entityId: task.id,
       metadata: { roomUnitId: task.roomUnitId, blockedForUserId: session.staffId }
     });
-    res.redirect("/admin/hk?assign=blocked");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk?assign=blocked", hkBody));
     return;
   }
   const refreshed = await prisma.housekeepingTask.findUnique({ where: { id: task.id }, select: { notes: true } });
@@ -3249,7 +3505,7 @@ adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPort
       claimedAt: new Date().toISOString()
     }
   });
-  res.redirect("/admin/hk");
+  res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
 });
 
 adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
@@ -3257,8 +3513,9 @@ adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekee
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const shift = parseHousekeepingShiftInput(req.body.shift);
+  const hkBody = req.body as Record<string, unknown>;
   if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
-    res.redirect("/admin/hk");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
     return;
   }
   const task = await prisma.housekeepingTask.findFirst({
@@ -3271,7 +3528,7 @@ adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekee
     }
   });
   if (!task) {
-    res.redirect("/admin/hk?start=blocked");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk?start=blocked", hkBody));
     return;
   }
   const upd = await prisma.housekeepingTask.updateMany({
@@ -3285,7 +3542,7 @@ adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekee
     data: { status: HousekeepingTaskStatus.IN_PROGRESS, startedAt: new Date() }
   });
   if (upd.count === 0) {
-    res.redirect("/admin/hk?start=blocked");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk?start=blocked", hkBody));
     return;
   }
   await prisma.roomUnit.update({
@@ -3314,7 +3571,7 @@ adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekee
       shift
     }
   });
-  res.redirect("/admin/hk");
+  res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
 });
 
 adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
@@ -3323,8 +3580,9 @@ adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPo
   const taskId = String(req.params.taskId ?? "");
   const targetStatusRaw = String(req.body.targetStatus ?? "AVAILABLE").trim().toUpperCase();
   const targetStatus: RoomBoardStatus = targetStatusRaw === "MAINTENANCE" ? "MAINTENANCE" : "AVAILABLE";
+  const hkBody = req.body as Record<string, unknown>;
   if (!hotel || !session) {
-    res.redirect("/admin/hk");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
     return;
   }
   const task = await prisma.housekeepingTask.findFirst({
@@ -3336,15 +3594,15 @@ adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPo
     include: { roomUnit: { select: { notes: true } } }
   });
   if (!task) {
-    res.redirect("/admin/hk");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
     return;
   }
   if (!task.startedAt) {
-    res.redirect("/admin/hk?complete=need-start");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk?complete=need-start", hkBody));
     return;
   }
   if (task.assignedToUserId && session.staffId !== task.assignedToUserId) {
-    res.redirect("/admin/hk");
+    res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
     return;
   }
   await prisma.$transaction(async (tx) => {
@@ -3385,7 +3643,7 @@ adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPo
       portal: "hk"
     }
   });
-  res.redirect("/admin/hk");
+  res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
 });
 
 adminRouter.get("/hk/room-board", requireAuth, requireHousekeepingPortal, requirePermission("ROOMS", "VIEW"), async (req, res) => {
@@ -10614,6 +10872,9 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   const priorityRaw = typeof req.query.priority === "string" ? req.query.priority.trim().toUpperCase() : "ALL";
   const priorityFilter: "ALL" | HousekeepingPriorityCode =
     priorityRaw === "CRITICAL" || priorityRaw === "HIGH" || priorityRaw === "MEDIUM" || priorityRaw === "NORMAL" ? priorityRaw : "ALL";
+  const exceptionRaw = typeof req.query.exception === "string" ? req.query.exception.trim().toLowerCase() : "";
+  const exceptionFilter: "none" | "stalled" | "duesoon" =
+    exceptionRaw === "stalled" ? "stalled" : exceptionRaw === "duesoon" || exceptionRaw === "due-soon" ? "duesoon" : "none";
   const statsDate = parseDateInput(req.query.statsDate, startOfDay(new Date()));
   const statsDayStart = startOfDay(statsDate);
   const statsDayEnd = endOfDay(statsDate);
@@ -10625,12 +10886,13 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     include: {
       roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
       assignedTo: { select: { fullName: true, email: true } },
-      booking: { select: { id: true, referenceCode: true, checkIn: true, guest: { select: { isVip: true } } } }
+      booking: { select: { id: true, referenceCode: true, checkIn: true, checkOut: true, guest: { select: { isVip: true } } } }
     }
   });
 
   const roomIds = Array.from(new Set(openTasks.map((t) => t.roomUnitId)));
   const upcomingByRoom = new Map<string, { checkIn: Date; isVip: boolean }>();
+  const todayStart = startOfDay(new Date());
   if (roomIds.length > 0) {
     const arrivals = await prisma.booking.findMany({
       where: {
@@ -10650,15 +10912,31 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     }
   }
 
+  const cleanerWorkloads = await loadHousekeepingCleanerWorkloads(hotel.id);
+  const suggestedCleanerName = cleanerWorkloads[0]?.name;
+
   const openTaskDecorated = openTasks.map((t) => {
     const shift = parseHousekeepingShift(t.notes) ?? deriveHousekeepingShift(t.startedAt ?? t.createdAt);
     const arrivalHint = t.booking?.checkIn ? { checkIn: t.booking.checkIn, isVip: t.booking.guest?.isVip === true } : upcomingByRoom.get(t.roomUnitId);
-    const priority = computeHousekeepingPriority({
+    const hasArrivalToday = Boolean(
+      arrivalHint && startOfDay(arrivalHint.checkIn).getTime() === todayStart.getTime()
+    );
+    const ev = evaluateHousekeepingTaskPriority({
       bookingCheckIn: arrivalHint?.checkIn,
-      bookingGuestVip: arrivalHint?.isVip === true
+      bookingGuestVip: arrivalHint?.isVip === true,
+      taskSource: t.source,
+      linkedBookingCheckOut: t.booking?.checkOut ?? null,
+      hasArrivalToday
     });
     const elapsed = t.startedAt ? housekeepingDurationMinutes(t.startedAt, new Date()) : null;
-    return { ...t, hkShift: shift, hkPriority: priority, elapsedMinutes: elapsed };
+    return {
+      ...t,
+      hkShift: shift,
+      hkPriority: ev.level,
+      hkReason: ev.reason,
+      nextArrivalAt: arrivalHint?.checkIn ?? null,
+      elapsedMinutes: elapsed
+    };
   });
 
   const recentDone = await prisma.housekeepingTask.findMany({
@@ -10710,12 +10988,38 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     }
     if (shiftFilter !== "ALL" && t.hkShift !== shiftFilter) return false;
     if (priorityFilter !== "ALL" && t.hkPriority !== priorityFilter) return false;
+    if (exceptionFilter === "stalled") {
+      if (t.status !== HousekeepingTaskStatus.IN_PROGRESS || !t.startedAt) return false;
+      if ((housekeepingDurationMinutes(t.startedAt, new Date()) ?? 0) < HK_SUPERVISOR_STALLED_MINUTES) return false;
+    }
+    if (exceptionFilter === "duesoon") {
+      const nowExc = new Date();
+      if (t.assignedToUserId) return false;
+      if (!t.nextArrivalAt) return false;
+      const arrT = t.nextArrivalAt.getTime();
+      const nowT = nowExc.getTime();
+      if (arrT <= nowT) return false;
+      if (arrT > nowT + HK_SUPERVISOR_DUE_SOON_MS) return false;
+    }
     return true;
   });
 
-  const rowHtml = (t: (typeof filteredOpenTasks)[0]) => {
+  const sortedOpenTasks = [...filteredOpenTasks].sort((a, b) => {
+    const pr = housekeepingPriorityRank(a.hkPriority) - housekeepingPriorityRank(b.hkPriority);
+    if (pr !== 0) return pr;
+    const at = a.nextArrivalAt ? a.nextArrivalAt.getTime() : Number.MAX_SAFE_INTEGER;
+    const bt = b.nextArrivalAt ? b.nextArrivalAt.getTime() : Number.MAX_SAFE_INTEGER;
+    if (at !== bt) return at - bt;
+    return a.createdAt.getTime() - b.createdAt.getTime();
+  });
+
+  const rowHtml = (t: (typeof sortedOpenTasks)[0]) => {
     const roomLabel = `${t.roomUnit.name} (${t.roomUnit.roomType.name})`;
     const assigneeName = t.assignedTo ? escapeHtml(t.assignedTo.fullName) : "Unassigned";
+    const suggestLine =
+      !t.assignedToUserId && suggestedCleanerName
+        ? `<div class="muted" style="font-size:11px;margin-top:4px">Suggested: ${escapeHtml(suggestedCleanerName)} (lightest in-progress load)</div>`
+        : "";
     const assignee =
       t.assignedToUserId && staffId && t.assignedToUserId === staffId
         ? `<span class="badge ok">Claimed by me — ${assigneeName}</span>`
@@ -10761,8 +11065,8 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
       <td>${escapeHtml(roomLabel)}</td>
       <td>${escapeHtml(t.status)}</td>
       <td>${escapeHtml(t.source)}</td>
-      <td>${assignee}${claimedAt}<div style="margin-top:4px;font-size:11px;color:#475569">Elapsed: ${escapeHtml(formatDurationMinutes(t.elapsedMinutes))}</div></td>
-      <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:${priorityBadgeColor};color:#fff">${t.hkPriority}</span></td>
+      <td>${assignee}${suggestLine}${claimedAt}<div style="margin-top:4px;font-size:11px;color:#475569">Elapsed: ${escapeHtml(formatDurationMinutes(t.elapsedMinutes))}</div></td>
+      <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:${priorityBadgeColor};color:#fff">${t.hkPriority}</span><div class="muted" style="font-size:10px;margin-top:4px;line-height:1.35">${escapeHtml(t.hkReason)}</div></td>
       <td><span class="badge pending">${t.hkShift}</span></td>
       <td>${ref}</td>
       <td style="white-space:nowrap">${claimBtn}${doneBtn}${maintenanceBtn}${reassignSelect}</td>
@@ -10823,12 +11127,43 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   const completedDurations = completedForStats.map((t) => housekeepingDurationMinutes(t.startedAt, t.completedAt)).filter((x): x is number => x !== null);
   const completedAvg = completedDurations.length ? Math.round(completedDurations.reduce((a, b) => a + b, 0) / completedDurations.length) : null;
   const inProgressCount = openTaskDecorated.filter((t) => t.status === HousekeepingTaskStatus.IN_PROGRESS).length;
+  const unclaimedCritical = openTaskDecorated.filter(
+    (t) => !t.assignedToUserId && t.hkPriority === "CRITICAL"
+  ).length;
+  const unclaimedHigh = openTaskDecorated.filter((t) => !t.assignedToUserId && t.hkPriority === "HIGH").length;
   const byPriorityCounts = {
     CRITICAL: openTaskDecorated.filter((t) => t.hkPriority === "CRITICAL").length,
     HIGH: openTaskDecorated.filter((t) => t.hkPriority === "HIGH").length,
     MEDIUM: openTaskDecorated.filter((t) => t.hkPriority === "MEDIUM").length,
     NORMAL: openTaskDecorated.filter((t) => t.hkPriority === "NORMAL").length
   };
+  const hkDashQuery = {
+    claimView,
+    shift: shiftFilter,
+    priority: priorityFilter,
+    exception: exceptionFilter,
+    statsDate: formatDateForInput(statsDate)
+  };
+  const nowSupervisor = new Date();
+  const stalledCleaningCount = openTaskDecorated.filter(
+    (t) =>
+      t.status === HousekeepingTaskStatus.IN_PROGRESS &&
+      t.startedAt &&
+      (housekeepingDurationMinutes(t.startedAt, nowSupervisor) ?? 0) >= HK_SUPERVISOR_STALLED_MINUTES
+  ).length;
+  const dueSoonUnclaimedCount = openTaskDecorated.filter((t) => {
+    if (t.assignedToUserId) return false;
+    if (!t.nextArrivalAt) return false;
+    const arrT = t.nextArrivalAt.getTime();
+    const nowT = nowSupervisor.getTime();
+    if (arrT <= nowT) return false;
+    if (arrT > nowT + HK_SUPERVISOR_DUE_SOON_MS) return false;
+    return true;
+  }).length;
+  const workloadRows = cleanerWorkloads
+    .slice(0, 12)
+    .map((w) => `<tr><td>${escapeHtml(w.name)}</td><td>${w.inProgress}</td></tr>`)
+    .join("");
 
   const content = `
 <h2>Housekeeping</h2>
@@ -10837,6 +11172,7 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
 ${alertsHtml}
 <section style="margin-bottom:14px">
   <form method="get" action="/admin/housekeeping" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <input type="hidden" name="statsDate" value="${formatDateForInput(statsDate)}" />
     <span class="muted" style="font-size:12px">Task view</span>
     <select name="claimView" onchange="this.form.submit()" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
       <option value="all" ${claimView === "all" ? "selected" : ""}>All open rooms</option>
@@ -10857,24 +11193,60 @@ ${alertsHtml}
       <option value="MEDIUM" ${priorityFilter === "MEDIUM" ? "selected" : ""}>Medium</option>
       <option value="NORMAL" ${priorityFilter === "NORMAL" ? "selected" : ""}>Normal</option>
     </select>
+    <select name="exception" onchange="this.form.submit()" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" title="Supervisor exception views">
+      <option value="" ${exceptionFilter === "none" ? "selected" : ""}>No exception filter</option>
+      <option value="stalled" ${exceptionFilter === "stalled" ? "selected" : ""}>Stalled cleans (≥${HK_SUPERVISOR_STALLED_MINUTES} min)</option>
+      <option value="duesoon" ${exceptionFilter === "duesoon" ? "selected" : ""}>Arrival due soon (unclaimed, 4h)</option>
+    </select>
     <span class="muted" style="font-size:12px">${filteredOpenTasks.length} task(s)</span>
   </form>
 </section>
 <section style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px">
   <article class="stat"><h3>Open tasks</h3><p>${openTaskDecorated.length}</p></article>
   <article class="stat"><h3>In progress</h3><p>${inProgressCount}</p></article>
+  <article class="stat"><h3>Unclaimed critical</h3><p>${unclaimedCritical}</p></article>
+  <article class="stat"><h3>Unclaimed high</h3><p>${unclaimedHigh}</p></article>
   <article class="stat"><h3>Completed (${formatDateForInput(statsDate)})</h3><p>${completedForStats.length}</p></article>
   <article class="stat"><h3>Avg clean time</h3><p>${escapeHtml(formatDurationMinutes(completedAvg))}</p></article>
 </section>
+<section style="margin-bottom:14px;border:1px solid #fecdd3;background:#fffafb;border-radius:12px;padding:12px">
+  <h3 style="margin:0 0 6px;font-size:15px">Supervisor exceptions</h3>
+  <p class="muted" style="margin:0 0 10px;font-size:12px">Risk-focused shortcuts: urgent unclaimed work, in-progress cleans past <strong>${HK_SUPERVISOR_STALLED_MINUTES} minutes</strong>, and unclaimed rooms with a guest arrival in the next <strong>4 hours</strong>.</p>
+  <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.55">
+    <li><strong>${unclaimedCritical}</strong> critical + <strong>${unclaimedHigh}</strong> high still unclaimed —
+      <a href="${escapeHtml(housekeepingDashboardHref(hkDashQuery, { claimView: "unclaimed", priority: "CRITICAL", exception: "none" }))}">Critical queue</a>,
+      <a href="${escapeHtml(housekeepingDashboardHref(hkDashQuery, { claimView: "unclaimed", priority: "HIGH", exception: "none" }))}">High queue</a>,
+      <a href="${escapeHtml(housekeepingDashboardHref(hkDashQuery, { claimView: "unclaimed", priority: "ALL", exception: "none" }))}">All unclaimed</a>
+    </li>
+    <li><strong>${stalledCleaningCount}</strong> in progress over ${HK_SUPERVISOR_STALLED_MINUTES} min —
+      <a href="${escapeHtml(housekeepingDashboardHref(hkDashQuery, { claimView: "all", priority: "ALL", exception: "stalled" }))}">View stalled</a>
+    </li>
+    <li><strong>${dueSoonUnclaimedCount}</strong> unclaimed with next arrival within 4h —
+      <a href="${escapeHtml(housekeepingDashboardHref(hkDashQuery, { claimView: "all", priority: "ALL", exception: "duesoon" }))}">View due soon</a>
+    </li>
+  </ul>
+</section>
 <section style="margin-bottom:16px">
-  <p class="muted" style="margin:0">Priority queue: Critical ${byPriorityCounts.CRITICAL} · High ${byPriorityCounts.HIGH} · Medium ${byPriorityCounts.MEDIUM} · Normal ${byPriorityCounts.NORMAL}</p>
+  <p class="muted" style="margin:0">Priority queue: Critical ${byPriorityCounts.CRITICAL} · High ${byPriorityCounts.HIGH} · Medium ${byPriorityCounts.MEDIUM} · Normal ${byPriorityCounts.NORMAL}. Open list is sorted by urgency, then next arrival.</p>
+</section>
+<section style="margin-bottom:18px;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">
+  <div style="border:1px solid #d8dee6;border-radius:12px;padding:12px;background:#fff">
+    <h3 style="margin:0 0 8px;font-size:15px">Cleaner workload (in progress)</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">HOUSEKEEPING-role users only. Suggestion uses lightest load for unclaimed rooms.</p>
+    <div style="overflow:auto;max-height:220px">
+      <table class="data-table" style="min-width:200px;font-size:13px">
+        <thead><tr><th>Cleaner</th><th>Active</th></tr></thead>
+        <tbody>${workloadRows || '<tr><td colspan="2" class="muted">No housekeeping-role users.</td></tr>'}</tbody>
+      </table>
+    </div>
+  </div>
 </section>
 <section>
   <h3>Open tasks</h3>
   <div style="overflow:auto">
   <table class="data-table" style="min-width:720px">
     <thead><tr><th>Room</th><th>Status</th><th>Source</th><th>Assigned</th><th>Priority</th><th>Shift</th><th>Booking ref</th><th></th></tr></thead>
-    <tbody>${filteredOpenTasks.length ? filteredOpenTasks.map(rowHtml).join("") : '<tr><td colspan="8" class="muted">No open housekeeping tasks in this view.</td></tr>'}</tbody>
+    <tbody>${sortedOpenTasks.length ? sortedOpenTasks.map(rowHtml).join("") : '<tr><td colspan="8" class="muted">No open housekeeping tasks in this view.</td></tr>'}</tbody>
   </table>
   </div>
 </section>
@@ -10893,6 +11265,7 @@ ${alertsHtml}
     <input type="hidden" name="claimView" value="${claimView}" />
     <input type="hidden" name="shift" value="${shiftFilter}" />
     <input type="hidden" name="priority" value="${priorityFilter}" />
+    ${exceptionFilter !== "none" ? `<input type="hidden" name="exception" value="${exceptionFilter === "stalled" ? "stalled" : "duesoon"}" />` : ""}
     <label class="muted" style="font-size:12px">Stats date</label>
     <input type="date" name="statsDate" value="${formatDateForInput(statsDate)}" onchange="this.form.submit()" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
   </form>
