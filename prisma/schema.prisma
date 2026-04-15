@@ -331,6 +331,10 @@ model HotelUser {
   username     String?
   pinHash      String?
   passwordHash String
+  passwordResetTokenHash String?
+  passwordResetExpiresAt DateTime?
+  passwordResetRequestedAt DateTime?
+  lastLoginAt  DateTime?
   role         UserRole @default(MANAGER)
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())

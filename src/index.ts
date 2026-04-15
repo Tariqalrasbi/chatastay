@@ -28,6 +28,11 @@ app.use("/static", express.static(path.join(process.cwd(), "src", "public")));
 app.get("/", (_req, res) => {
   res.json({ name: "chatastay", status: "ok" });
 });
+app.get("/reset-password", (req, res) => {
+  const token = String(req.query.token ?? "").trim();
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  res.redirect(`/admin/reset-password${query}`);
+});
 
 app.use("/api", apiRouter);
 app.use("/auth", authRouter);

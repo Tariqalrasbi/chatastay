@@ -28,6 +28,14 @@ import {
 } from "@prisma/client";
 import Stripe from "stripe";
 import { sendEmail } from "../core/email";
+import {
+  generateSecureToken,
+  hashPassword as hashSecret,
+  hashToken,
+  verifyPassword as verifySecret,
+  verifyPin
+} from "../core/authSecurity";
+import { buildPasswordResetEmail } from "../core/emailTemplates";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -167,6 +175,9 @@ const passwordResetTtlMs = 15 * 60 * 1000; // 15 minutes
 const resetRequestRateLimitWindowMs = 15 * 60 * 1000;
 const resetRequestRateLimitMax = 5;
 const resetRequestRateLimit = new Map<string, number[]>();
+const staffLoginRateLimitWindowMs = 10 * 60 * 1000;
+const staffLoginRateLimitMaxFailures = 8;
+const staffLoginFailures = new Map<string, number[]>();
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
 
 function hashPassword(password: string): string {
@@ -320,7 +331,7 @@ function issueAdminSession(res: Response, params: { staffId: string; email: stri
 }
 
 function hashResetToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
+  return hashToken(token);
 }
 
 function resetRateLimitKey(req: Request, email: string): string {
@@ -337,19 +348,42 @@ function isResetRateLimited(req: Request, email: string): boolean {
   return hits.length > resetRequestRateLimitMax;
 }
 
+function getRequestIp(req: Request): string {
+  return (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() || req.ip || "unknown";
+}
+
+function staffLoginRateLimitKey(req: Request, hotelId: string, username: string): string {
+  return `${getRequestIp(req)}:${hotelId}:${username}`;
+}
+
+function isStaffLoginRateLimited(req: Request, hotelId: string, username: string): boolean {
+  const key = staffLoginRateLimitKey(req, hotelId, username);
+  const now = Date.now();
+  const failures = (staffLoginFailures.get(key) ?? []).filter((at) => now - at <= staffLoginRateLimitWindowMs);
+  staffLoginFailures.set(key, failures);
+  return failures.length >= staffLoginRateLimitMaxFailures;
+}
+
+function recordStaffLoginFailure(req: Request, hotelId: string, username: string): void {
+  const key = staffLoginRateLimitKey(req, hotelId, username);
+  const now = Date.now();
+  const failures = (staffLoginFailures.get(key) ?? []).filter((at) => now - at <= staffLoginRateLimitWindowMs);
+  failures.push(now);
+  staffLoginFailures.set(key, failures);
+}
+
+function clearStaffLoginFailures(req: Request, hotelId: string, username: string): void {
+  staffLoginFailures.delete(staffLoginRateLimitKey(req, hotelId, username));
+}
+
 async function sendPasswordResetEmail(to: string, resetLink: string): Promise<boolean> {
   try {
+    const message = buildPasswordResetEmail({ resetLink, expiresMinutes: 15 });
     await sendEmail({
       to,
       subject: "Reset your ChatAstay password",
-      html:
-        `<p>You requested a password reset.</p>` +
-        `<p><a href="${escapeHtml(resetLink)}">Reset password</a> (link expires in 15 minutes and can be used once).</p>` +
-        `<p>If you did not request this, ignore this email.</p>`,
-      text:
-        `You requested a password reset.\n\n` +
-        `Use this link within 15 minutes (single-use): ${resetLink}\n\n` +
-        `If you did not request this, ignore this email.`
+      html: message.html,
+      text: message.text
     });
     return true;
   } catch (err) {
@@ -1791,6 +1825,8 @@ function requireHousekeepingPortal(req: Request, res: Response, next: NextFuncti
 
 function pickPostLoginRedirect(role: string): string {
   if (role === "HOUSEKEEPING") return "/admin/hk";
+  if (role === "FRONTDESK") return "/admin/room-board";
+  if (role === "MANAGER" || role === "OWNER" || role === "ADMIN") return "/admin/profile";
   return "/admin/dashboard";
 }
 
@@ -1968,27 +2004,30 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
     data: {
       hotelId: hotel.id,
       actorEmail: normalized,
-      action: "AUTH_PASSWORD_RESET_REQUEST",
+      action: "PASSWORD_RESET_REQUESTED",
       entityType: "Auth",
       entityId: user?.id ?? null,
-      metadataJson: JSON.stringify({ outcome: user?.isActive ? "accepted" : "ignored" })
+      metadataJson: JSON.stringify({
+        outcome: user?.isActive ? "accepted" : "ignored",
+        ip: getRequestIp(req)
+      })
     }
   });
   if (!user?.isActive || !user.email) return;
 
-  const token = crypto.randomBytes(32).toString("hex");
+  const token = generateSecureToken();
   const tokenHash = hashResetToken(token);
   const expiresAt = new Date(Date.now() + passwordResetTtlMs);
-  await prisma.passwordResetToken.create({
+  await prisma.hotelUser.update({
+    where: { id: user.id },
     data: {
-      hotelUserId: user.id,
-      tokenHash,
-      expiresAt,
-      requestedIp: (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() || req.ip || null
+      passwordResetTokenHash: tokenHash,
+      passwordResetExpiresAt: expiresAt,
+      passwordResetRequestedAt: new Date()
     }
   });
   const resetBase = (process.env.APP_BASE_URL || appBaseUrl).replace(/\/$/, "") || "https://chatastay.com";
-  const resetLink = `${resetBase}/admin/reset-password?token=${encodeURIComponent(token)}`;
+  const resetLink = `${resetBase}/reset-password?token=${encodeURIComponent(token)}`;
   const sent = await sendPasswordResetEmail(user.email, resetLink);
   if (!sent) {
     await prisma.auditLog.create({
@@ -1996,7 +2035,7 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
         hotelId: hotel.id,
         actorUserId: user.id,
         actorEmail: user.email,
-        action: "AUTH_PASSWORD_RESET_FAILED",
+        action: "PASSWORD_RESET_INVALID_TOKEN",
         entityType: "Auth",
         entityId: user.id,
         metadataJson: JSON.stringify({ reason: "email_send_failed" })
@@ -2008,17 +2047,24 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
 async function consumePasswordResetToken(rawToken: string, newPassword: string): Promise<{ ok: boolean; reason?: string }> {
   if (!rawToken || newPassword.length < 8) return { ok: false, reason: "invalid_input" };
   const tokenHash = hashResetToken(rawToken);
-  const row = await prisma.passwordResetToken.findUnique({
-    where: { tokenHash },
-    include: { hotelUser: { select: { id: true, hotelId: true, email: true, role: true, isActive: true } } }
+  const user = await prisma.hotelUser.findFirst({
+    where: { passwordResetTokenHash: tokenHash },
+    select: {
+      id: true,
+      hotelId: true,
+      email: true,
+      role: true,
+      isActive: true,
+      passwordResetExpiresAt: true
+    }
   });
-  if (!row || row.usedAt || row.expiresAt.getTime() <= Date.now() || !row.hotelUser.isActive) {
+  if (!user || !user.isActive) {
     const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
     if (hotel) {
       await prisma.auditLog.create({
         data: {
           hotelId: hotel.id,
-          action: "AUTH_PASSWORD_RESET_FAILED",
+          action: "PASSWORD_RESET_INVALID_TOKEN",
           entityType: "Auth",
           metadataJson: JSON.stringify({ reason: "invalid_or_expired_token" })
         }
@@ -2026,23 +2072,38 @@ async function consumePasswordResetToken(rawToken: string, newPassword: string):
     }
     return { ok: false, reason: "invalid_or_expired" };
   }
+  if (!user.passwordResetExpiresAt || user.passwordResetExpiresAt.getTime() <= Date.now()) {
+    await prisma.auditLog.create({
+      data: {
+        hotelId: user.hotelId,
+        actorUserId: user.id,
+        actorEmail: user.email ?? undefined,
+        action: "PASSWORD_RESET_EXPIRED",
+        entityType: "Auth",
+        entityId: user.id
+      }
+    });
+    return { ok: false, reason: "invalid_or_expired" };
+  }
+  const passwordHash = await hashSecret(newPassword);
   await prisma.$transaction(async (tx) => {
     await tx.hotelUser.update({
-      where: { id: row.hotelUserId },
-      data: { passwordHash: hashPassword(newPassword) }
-    });
-    await tx.passwordResetToken.update({
-      where: { id: row.id },
-      data: { usedAt: new Date() }
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        passwordResetTokenHash: null,
+        passwordResetExpiresAt: null,
+        passwordResetRequestedAt: null
+      }
     });
     await tx.auditLog.create({
       data: {
-        hotelId: row.hotelUser.hotelId,
-        actorUserId: row.hotelUser.id,
-        actorEmail: row.hotelUser.email ?? undefined,
-        action: "AUTH_PASSWORD_RESET_SUCCESS",
+        hotelId: user.hotelId,
+        actorUserId: user.id,
+        actorEmail: user.email ?? undefined,
+        action: "PASSWORD_RESET_COMPLETED",
         entityType: "Auth",
-        entityId: row.hotelUser.id
+        entityId: user.id
       }
     });
   });
@@ -2062,13 +2123,17 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
       where: { hotelId_email: { hotelId: hotel.id, email } }
     });
     if (hotelUser?.isActive && hotelUser.passwordHash) {
-      if (verifyPassword(password, hotelUser.passwordHash)) {
+      if (await verifySecret(password, hotelUser.passwordHash)) {
         const effectivePermissions = effectivePermissionsForHotelUser(email, hotelUser.role);
         issueAdminSession(res, {
           staffId: hotelUser.id,
           email,
           role: String(hotelUser.role),
           permissions: effectivePermissions
+        });
+        await prisma.hotelUser.update({
+          where: { id: hotelUser.id },
+          data: { lastLoginAt: new Date() }
         });
         return String(hotelUser.role);
       }
@@ -2093,41 +2158,86 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
   if (!username || pin.length < 4) return null;
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) return null;
-  const hotelUser = await prisma.hotelUser.findUnique({
-    where: { hotelId_username: { hotelId: hotel.id, username } }
-  });
-  if (!hotelUser?.isActive || !hotelUser.pinHash) {
+  if (isStaffLoginRateLimited(req, hotel.id, username)) {
     await prisma.auditLog.create({
       data: {
         hotelId: hotel.id,
         actorEmail: username,
-        action: "AUTH_STAFF_LOGIN_FAILED",
+        action: "STAFF_LOGIN_FAILED",
         entityType: "Auth",
-        metadataJson: JSON.stringify({ reason: "user_not_found_or_pin_missing" })
+        metadataJson: JSON.stringify({ reason: "rate_limited", ip: getRequestIp(req) })
       }
     });
     return null;
   }
-  if (!verifyPassword(pin, hotelUser.pinHash)) {
+  const hotelUser = await prisma.hotelUser.findUnique({
+    where: { hotelId_username: { hotelId: hotel.id, username } }
+  });
+  if (!hotelUser?.isActive || !hotelUser.pinHash) {
+    recordStaffLoginFailure(req, hotel.id, username);
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorEmail: username,
+        action: "STAFF_LOGIN_FAILED",
+        entityType: "Auth",
+        metadataJson: JSON.stringify({ reason: "user_not_found_or_pin_missing", ip: getRequestIp(req) })
+      }
+    });
+    return null;
+  }
+  if (!["FRONTDESK", "HOUSEKEEPING", "STAFF"].includes(String(hotelUser.role))) {
+    recordStaffLoginFailure(req, hotel.id, username);
     await prisma.auditLog.create({
       data: {
         hotelId: hotel.id,
         actorUserId: hotelUser.id,
         actorEmail: hotelUser.email ?? username,
-        action: "AUTH_STAFF_LOGIN_FAILED",
+        action: "STAFF_LOGIN_FAILED",
         entityType: "Auth",
         entityId: hotelUser.id,
-        metadataJson: JSON.stringify({ reason: "pin_invalid" })
+        metadataJson: JSON.stringify({ reason: "role_not_allowed", role: String(hotelUser.role), ip: getRequestIp(req) })
       }
     });
     return null;
   }
+  if (!(await verifyPin(pin, hotelUser.pinHash))) {
+    recordStaffLoginFailure(req, hotel.id, username);
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorUserId: hotelUser.id,
+        actorEmail: hotelUser.email ?? username,
+        action: "STAFF_LOGIN_FAILED",
+        entityType: "Auth",
+        entityId: hotelUser.id,
+        metadataJson: JSON.stringify({ reason: "pin_invalid", ip: getRequestIp(req) })
+      }
+    });
+    return null;
+  }
+  clearStaffLoginFailures(req, hotel.id, username);
+  await prisma.auditLog.create({
+    data: {
+      hotelId: hotel.id,
+      actorUserId: hotelUser.id,
+      actorEmail: hotelUser.email ?? username,
+      action: "STAFF_LOGIN_SUCCESS",
+      entityType: "Auth",
+      entityId: hotelUser.id,
+      metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
+    }
+  });
   const effectivePermissions = effectivePermissionsForHotelUser(hotelUser.email ?? username, hotelUser.role);
   issueAdminSession(res, {
     staffId: hotelUser.id,
     email: hotelUser.email ?? username,
     role: String(hotelUser.role),
     permissions: effectivePermissions
+  });
+  await prisma.hotelUser.update({
+    where: { id: hotelUser.id },
+    data: { lastLoginAt: new Date() }
   });
   return String(hotelUser.role);
 }
@@ -2174,10 +2284,10 @@ adminRouter.get("/reset-password", async (req, res) => {
   const token = String(req.query.token ?? "").trim();
   const valid = Boolean(
     token &&
-      (await prisma.passwordResetToken.findUnique({
-        where: { tokenHash: hashResetToken(token) },
-        select: { id: true, usedAt: true, expiresAt: true }
-      }).then((r) => r && !r.usedAt && r.expiresAt.getTime() > Date.now()))
+      (await prisma.hotelUser.findFirst({
+        where: { passwordResetTokenHash: hashResetToken(token) },
+        select: { id: true, isActive: true, passwordResetExpiresAt: true }
+      }).then((r) => Boolean(r?.isActive && r.passwordResetExpiresAt && r.passwordResetExpiresAt.getTime() > Date.now())))
   );
   if (!valid) {
     const content = `
@@ -2249,10 +2359,12 @@ authRouter.post("/reset-password", async (req, res) => {
   if (!consumed.ok) {
     const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
     if (hotel) {
+      const action =
+        consumed.reason === "invalid_or_expired" ? "PASSWORD_RESET_INVALID_TOKEN" : consumed.reason === "invalid_input" ? "PASSWORD_RESET_INVALID_TOKEN" : "PASSWORD_RESET_EXPIRED";
       await prisma.auditLog.create({
         data: {
           hotelId: hotel.id,
-          action: "AUTH_PASSWORD_RESET_FAILED",
+          action,
           entityType: "Auth",
           metadataJson: JSON.stringify({ reason: consumed.reason ?? "unknown" })
         }
@@ -2262,6 +2374,12 @@ authRouter.post("/reset-password", async (req, res) => {
     return;
   }
   res.json({ ok: true });
+});
+
+authRouter.get("/reset-password", (req, res) => {
+  const token = String(req.query.token ?? "").trim();
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  res.redirect(`/admin/reset-password${query}`);
 });
 
 authRouter.post("/staff-login", async (req, res) => {

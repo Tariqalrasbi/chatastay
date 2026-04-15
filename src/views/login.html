@@ -2,7 +2,7 @@
 <p class="muted">Sign in to manage Al Ashkhara Beach Resort bookings from WhatsApp.</p>
 
 <form method="post" action="/admin/login" style="max-width: 420px">
-  <h3 style="margin:0 0 8px;font-size:16px">Option 1: Email login</h3>
+  <h3 style="margin:0 0 8px;font-size:16px">Email login</h3>
   <label for="email">Email</label><br />
   <input
     id="email"
@@ -27,10 +27,11 @@
   >
     Sign In
   </button>
+  <p class="muted" style="margin-top: 12px"><a href="/admin/forgot-password">Forgot Password?</a></p>
 </form>
 
 <form method="post" action="/auth/staff-login" style="max-width: 420px; margin-top: 18px">
-  <h3 style="margin:0 0 8px;font-size:16px">Option 2: Staff login (username + PIN)</h3>
+  <h3 style="margin:0 0 8px;font-size:16px">Staff login (username + PIN)</h3>
   <label for="staffUsername">Username</label><br />
   <input
     id="staffUsername"
@@ -59,5 +60,4 @@
   </button>
 </form>
 
-<p class="muted" style="margin-top: 12px"><a href="/admin/forgot-password">Forgot Password?</a></p>
 <p class="muted" style="margin-top: 6px">Demo: admin@chatastay.local / admin123</p>
