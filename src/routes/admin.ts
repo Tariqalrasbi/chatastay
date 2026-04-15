@@ -617,12 +617,20 @@ function renderLayout(content: string, authenticated: boolean): string {
     hasPermission(perm, "ROOMS", "EDIT");
   const canNavOutlet =
     !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "ROOMS", "VIEW");
+  const canNavFb =
+    !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW");
+  const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
   const navHtml = authenticated
     ? [
-        '<a class="top-level-link" data-top-group="dashboard" href="/admin/room-board">Dashboard</a>',
+        '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
         '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
-        '<a class="top-level-link" data-top-group="account" href="/admin/profile">Account</a>',
-        '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>'
+        '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
+        ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B</a>'] : []),
+        ...(canNavComms
+          ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
+          : []),
+        '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>',
+        '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>'
       ].join("")
     : '<a href="/admin/login">Login</a>';
   const logoutHtml = authenticated
@@ -631,43 +639,53 @@ function renderLayout(content: string, authenticated: boolean): string {
   const sectionTabsHtml = authenticated
     ? [
         '<div class="section-tabs" data-section="dashboard">',
-        '<a href="/admin/room-board">Room Board</a>',
-        ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
-        '<a href="/admin/handover-sheet">Handover Sheet</a>',
-        "</div>",
-        '<div class="section-tabs" data-section="frontdesk">',
-        '<a href="/admin/front-desk/check-in">Manual check-in</a>',
-        '<a href="/admin/front-desk/check-out">Manual check-out</a>',
-        '<a href="/admin/shifts">Shifts</a>',
-        '<a href="/admin/shift-close">Shift close</a>',
+        '<a href="/admin/profile">Overview</a>',
         "</div>",
         '<div class="section-tabs" data-section="reservations">',
         '<a href="/admin/bookings">Bookings</a>',
-        '<a href="/admin/fb/menu">F&amp;B master</a>',
-        ...(canNavOutlet ? ['<a href="/admin/restaurant-ops">Restaurant ops guide</a>'] : []),
-        '<a href="/admin/outlet-dashboard">Outlet board</a>',
         '<a href="/admin/calendar">Calendar</a>',
-        '<a href="/admin/conversations" data-admin-conv-link>Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
-        '<a href="/admin/rooms">Room Rate</a>',
-        '<a href="/admin/inventory">Room Availability</a>',
+        '<a href="/admin/inventory">Availability</a>',
+        '<a href="/admin/rooms">Rates</a>',
         '<a href="/admin/offers">Offers</a>',
+        "</div>",
+        '<div class="section-tabs" data-section="rooms">',
+        '<a href="/admin/room-board">Room board</a>',
+        ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
+        '<a href="/admin/handover-sheet">Handover</a>',
+        '<a href="/admin/front-desk/check-in">Check-in</a>',
+        '<a href="/admin/front-desk/check-out">Check-out</a>',
+        '<a href="/admin/shifts">Shifts</a>',
+        '<a href="/admin/shift-close">Shift close</a>',
+        '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
+        "</div>",
+        '<div class="section-tabs" data-section="fb">',
+        '<a href="/admin/fb/menu">F&amp;B master</a>',
+        ...(canNavOutlet
+          ? [
+              '<a href="/admin/outlet-dashboard">Outlet board</a>',
+              '<a href="/admin/outlet-orders">Outlet orders</a>',
+              '<a href="/admin/restaurant-ops">Restaurant operations guide</a>'
+            ]
+          : []),
+        "</div>",
+        '<div class="section-tabs" data-section="comms">',
+        '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
         '<a href="/admin/campaigns">Campaigns</a>',
         "</div>",
         '<div class="section-tabs" data-section="account">',
-        '<a href="/admin/profile">Hotel Profile</a>',
-        '<a href="/admin/users">Users</a>',
+        '<a href="/admin/setup">Settings</a>',
+        '<a href="/admin/users">Users &amp; permissions</a>',
         '<a href="/admin/subscription">Subscription</a>',
         '<a href="/admin/billing">Billing</a>',
         '<a href="/admin/integrations">Integrations</a>',
-        '<a href="/admin/setup">Settings</a>',
         "</div>",
         '<div class="section-tabs" data-section="insights">',
         '<a href="/admin/reports-center">Reports</a>',
-        '<a href="/admin/management-kpi">Management KPI</a>',
+        '<a href="/admin/management-kpi">KPI dashboard</a>',
         '<a href="/admin/daily-digest">Daily digest</a>',
-        '<a href="/admin/ai-analytics">AI Analytics</a>',
-        '<a href="/admin/booking-funnel">Booking Funnel</a>',
-        '<a href="/admin/routing-health">Routing Health</a>',
+        '<a href="/admin/ai-analytics">AI analytics</a>',
+        '<a href="/admin/booking-funnel">Booking funnel</a>',
+        '<a href="/admin/routing-health">Routing health</a>',
         "</div>"
       ].join("")
     : "";
@@ -2306,8 +2324,8 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
     .join("");
 
   const content = `
-<h2>Hotel Profile</h2>
-<p class="muted">Main overview for ${escapeHtml(hotel.displayName)}.</p>
+<h2>Property overview</h2>
+<p class="muted">Operational snapshot for ${escapeHtml(hotel.displayName)}.</p>
 <div class="actions">
   <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
   <a class="btn-link" href="/admin/rooms">Rooms</a>

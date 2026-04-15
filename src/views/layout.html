@@ -179,6 +179,18 @@
         border-color: transparent;
         color: #083d2d;
       }
+      .section-tabs .nav-tab-placeholder {
+        display: inline-block;
+        border: 1px dashed var(--border);
+        border-radius: 999px;
+        padding: 7px 11px;
+        color: var(--muted);
+        background: rgba(248, 250, 249, 0.95);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: default;
+        user-select: none;
+      }
       .content {
         padding: 24px;
         min-width: 0;
@@ -602,19 +614,51 @@
         };
         const currentPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
         const groupByPath = (path) => {
-          if (path.startsWith("/admin/front-desk")) return "frontdesk";
+          if (path === "/admin/profile") return "dashboard";
+          if (
+            path.startsWith("/admin/users") ||
+            path.startsWith("/admin/subscription") ||
+            path.startsWith("/admin/billing") ||
+            path.startsWith("/admin/integrations") ||
+            path.startsWith("/admin/setup")
+          )
+            return "account";
+          if (
+            path.startsWith("/admin/reports") ||
+            path.startsWith("/admin/management-kpi") ||
+            path.startsWith("/admin/daily-digest") ||
+            path.startsWith("/admin/ai-analytics") ||
+            path.startsWith("/admin/booking-funnel") ||
+            path.startsWith("/admin/routing-health")
+          )
+            return "insights";
+          if (
+            path.startsWith("/admin/fb") ||
+            path.startsWith("/admin/restaurant-ops") ||
+            path.startsWith("/admin/outlet-dashboard") ||
+            path.startsWith("/admin/outlet-orders")
+          )
+            return "fb";
+          if (path.startsWith("/admin/conversations") || path.startsWith("/admin/campaigns")) return "comms";
           if (
             path.startsWith("/admin/bookings") ||
             path.startsWith("/admin/calendar") ||
-            path.startsWith("/admin/conversations") ||
-            path.startsWith("/admin/rooms") ||
             path.startsWith("/admin/inventory") ||
             path.startsWith("/admin/offers") ||
-            path.startsWith("/admin/fb")
+            path.startsWith("/admin/guests") ||
+            path.startsWith("/admin/rooms")
           )
             return "reservations";
-          if (path.startsWith("/admin/profile") || path.startsWith("/admin/users") || path.startsWith("/admin/subscription") || path.startsWith("/admin/billing") || path.startsWith("/admin/integrations") || path.startsWith("/admin/setup")) return "account";
-          if (path.startsWith("/admin/reports") || path.startsWith("/admin/ai-analytics") || path.startsWith("/admin/booking-funnel") || path.startsWith("/admin/routing-health")) return "insights";
+          if (
+            path.startsWith("/admin/room-board") ||
+            path.startsWith("/admin/housekeeping") ||
+            path.startsWith("/admin/handover-sheet") ||
+            path.startsWith("/admin/front-desk") ||
+            path.startsWith("/admin/shifts") ||
+            path.startsWith("/admin/shift-close") ||
+            path.startsWith("/admin/shift-report")
+          )
+            return "rooms";
           return "dashboard";
         };
         const activeGroup = groupByPath(currentPath);
@@ -665,20 +709,44 @@
             "WhatsApp-first booking ops": "إدارة الحجوزات عبر واتساب",
             "Dashboard": "لوحة التحكم",
             "Reservations": "الحجوزات",
-            "Account": "الحساب",
+            "Rooms": "الغرف",
+            "F&B": "المطاعم والمشروبات",
+            "Messages": "الرسائل",
             "Insights": "الرؤى",
+            "Overview": "نظرة عامة",
+            "Property overview": "نظرة عامة على العقار",
             "Hotel Profile": "ملف الفندق",
             "Room Board": "لوحة الغرف",
-            "Rooms": "الغرف",
+            "Room board": "لوحة الغرف",
             "Inventory": "المخزون",
+            "Availability": "التوفر",
+            "Rates": "الأسعار",
             "Bookings": "الحجوزات",
             "Calendar": "التقويم",
             "Conversations": "المحادثات",
+            "Guest conversations": "محادثات الضيوف",
+            "Campaigns": "الحملات",
+            "Users & permissions": "المستخدمون والصلاحيات",
             "Users": "المستخدمون",
             "Subscription": "الاشتراك",
             "Billing": "الفواتير",
             "Integrations": "التكاملات",
             "Settings": "الإعدادات",
+            "Handover": "تسليم المناوبة",
+            "Check-in": "تسجيل الوصول",
+            "Check-out": "تسجيل المغادرة",
+            "Maintenance": "الصيانة",
+            "Shift close": "إقفال المناوبة",
+            "Outlet board": "لوحة المنافذ",
+            "Outlet orders": "طلبات المنافذ",
+            "Restaurant operations guide": "دليل تشغيل المطعم",
+            "KPI dashboard": "لوحة مؤشرات الأداء",
+            "AI analytics": "تحليلات الذكاء الاصطناعي",
+            "Booking funnel": "قمع الحجز",
+            "Routing health": "صحة التوجيه",
+            "F&B master": "القائمة الرئيسية للمطاعم والمشروبات",
+            "Housekeeping": "التدبير المنزلي",
+            "Daily digest": "الملخص اليومي",
             "Reports": "التقارير",
             "Logout": "تسجيل الخروج",
             "Login": "تسجيل الدخول",
