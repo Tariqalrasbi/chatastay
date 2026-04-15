@@ -2148,7 +2148,12 @@ adminRouter.get("/login", (req, res) => {
     return;
   }
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
-  const content = resetNotice + readView("login.html");
+  const authErrorNotice =
+    req.query.auth === "error" ? '<p class="badge alert">Sign in is temporarily unavailable. Please try again.</p>' : "";
+  const staffNotice = req.query.staff === "failed" ? '<p class="badge alert">Staff sign in failed. Check your username and PIN.</p>' : "";
+  const staffErrorNotice =
+    req.query.staff === "error" ? '<p class="badge alert">Staff sign in is temporarily unavailable. Please try again.</p>' : "";
+  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + readView("login.html");
   res.type("html").send(renderLayout(content, false));
 });
 
@@ -2280,29 +2285,6 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD ?? "admin123";
 
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
-  if (hotel) {
-    const hotelUser = await prisma.hotelUser.findUnique({
-      where: { hotelId_email: { hotelId: hotel.id, email } }
-    });
-    if (hotelUser?.isActive && hotelUser.passwordHash) {
-      if (await verifySecret(password, hotelUser.passwordHash)) {
-        const effectivePermissions = effectivePermissionsForHotelUser(email, hotelUser.role);
-        issueAdminSession(res, {
-          staffId: hotelUser.id,
-          email,
-          role: String(hotelUser.role),
-          permissions: effectivePermissions
-        });
-        await prisma.hotelUser.update({
-          where: { id: hotelUser.id },
-          data: { lastLoginAt: new Date() }
-        });
-        return String(hotelUser.role);
-      }
-    }
-  }
-
   if (email === adminEmail && password === adminPassword) {
     issueAdminSession(res, {
       staffId: "STAFF-SUPERADMIN",
@@ -2312,106 +2294,143 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
     });
     return "MANAGER";
   }
+  try {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+    if (hotel) {
+      const hotelUser = await prisma.hotelUser.findUnique({
+        where: { hotelId_email: { hotelId: hotel.id, email } }
+      });
+      if (hotelUser?.isActive && hotelUser.passwordHash) {
+        if (await verifySecret(password, hotelUser.passwordHash)) {
+          const effectivePermissions = effectivePermissionsForHotelUser(email, hotelUser.role);
+          issueAdminSession(res, {
+            staffId: hotelUser.id,
+            email,
+            role: String(hotelUser.role),
+            permissions: effectivePermissions
+          });
+          await prisma.hotelUser.update({
+            where: { id: hotelUser.id },
+            data: { lastLoginAt: new Date() }
+          });
+          return String(hotelUser.role);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[Auth] email login failed safely:", err instanceof Error ? err.message : err);
+    return null;
+  }
   return null;
 }
 
 async function authenticateStaffLogin(req: Request, res: Response): Promise<string | null> {
-  const username = String(req.body.username ?? "").trim().toLowerCase();
-  const pin = String(req.body.pin ?? "").trim();
-  if (!username || pin.length < 4) return null;
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
-  if (!hotel) return null;
-  if (isStaffLoginRateLimited(req, hotel.id, username)) {
-    await prisma.auditLog.create({
-      data: {
-        hotelId: hotel.id,
-        actorEmail: username,
-        action: "STAFF_LOGIN_FAILED",
-        entityType: "Auth",
-        metadataJson: JSON.stringify({ reason: "rate_limited", ip: getRequestIp(req) })
-      }
-    });
-    return null;
-  }
-  const hotelUser = await prisma.hotelUser.findUnique({
-    where: { hotelId_username: { hotelId: hotel.id, username } }
-  });
-  if (!hotelUser?.isActive || !hotelUser.pinHash) {
-    recordStaffLoginFailure(req, hotel.id, username);
-    await prisma.auditLog.create({
-      data: {
-        hotelId: hotel.id,
-        actorEmail: username,
-        action: "STAFF_LOGIN_FAILED",
-        entityType: "Auth",
-        metadataJson: JSON.stringify({ reason: "user_not_found_or_pin_missing", ip: getRequestIp(req) })
-      }
-    });
-    return null;
-  }
-  if (!["FRONTDESK", "HOUSEKEEPING", "STAFF"].includes(String(hotelUser.role))) {
-    recordStaffLoginFailure(req, hotel.id, username);
-    await prisma.auditLog.create({
-      data: {
-        hotelId: hotel.id,
-        actorUserId: hotelUser.id,
-        actorEmail: hotelUser.email ?? username,
-        action: "STAFF_LOGIN_FAILED",
-        entityType: "Auth",
-        entityId: hotelUser.id,
-        metadataJson: JSON.stringify({ reason: "role_not_allowed", role: String(hotelUser.role), ip: getRequestIp(req) })
-      }
-    });
-    return null;
-  }
-  if (!(await verifyPin(pin, hotelUser.pinHash))) {
-    recordStaffLoginFailure(req, hotel.id, username);
-    await prisma.auditLog.create({
-      data: {
-        hotelId: hotel.id,
-        actorUserId: hotelUser.id,
-        actorEmail: hotelUser.email ?? username,
-        action: "STAFF_LOGIN_FAILED",
-        entityType: "Auth",
-        entityId: hotelUser.id,
-        metadataJson: JSON.stringify({ reason: "pin_invalid", ip: getRequestIp(req) })
-      }
-    });
-    return null;
-  }
-  clearStaffLoginFailures(req, hotel.id, username);
-  await prisma.auditLog.create({
-    data: {
-      hotelId: hotel.id,
-      actorUserId: hotelUser.id,
-      actorEmail: hotelUser.email ?? username,
-      action: "STAFF_LOGIN_SUCCESS",
-      entityType: "Auth",
-      entityId: hotelUser.id,
-      metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
+  try {
+    const username = String(req.body.username ?? "").trim().toLowerCase();
+    const pin = String(req.body.pin ?? "").trim();
+    if (!username || pin.length < 4) return null;
+    const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (!hotel) return null;
+    if (isStaffLoginRateLimited(req, hotel.id, username)) {
+      await prisma.auditLog.create({
+        data: {
+          hotelId: hotel.id,
+          actorEmail: username,
+          action: "STAFF_LOGIN_FAILED",
+          entityType: "Auth",
+          metadataJson: JSON.stringify({ reason: "rate_limited", ip: getRequestIp(req) })
+        }
+      });
+      return null;
     }
-  });
-  const effectivePermissions = effectivePermissionsForHotelUser(hotelUser.email ?? username, hotelUser.role);
-  issueAdminSession(res, {
-    staffId: hotelUser.id,
-    email: hotelUser.email ?? username,
-    role: String(hotelUser.role),
-    permissions: effectivePermissions
-  });
-  await prisma.hotelUser.update({
-    where: { id: hotelUser.id },
-    data: { lastLoginAt: new Date() }
-  });
-  return String(hotelUser.role);
+    const hotelUser = await prisma.hotelUser.findUnique({
+      where: { hotelId_username: { hotelId: hotel.id, username } }
+    });
+    if (!hotelUser?.isActive || !hotelUser.pinHash) {
+      recordStaffLoginFailure(req, hotel.id, username);
+      await prisma.auditLog.create({
+        data: {
+          hotelId: hotel.id,
+          actorEmail: username,
+          action: "STAFF_LOGIN_FAILED",
+          entityType: "Auth",
+          metadataJson: JSON.stringify({ reason: "user_not_found_or_pin_missing", ip: getRequestIp(req) })
+        }
+      });
+      return null;
+    }
+    if (!["FRONTDESK", "HOUSEKEEPING", "STAFF"].includes(String(hotelUser.role))) {
+      recordStaffLoginFailure(req, hotel.id, username);
+      await prisma.auditLog.create({
+        data: {
+          hotelId: hotel.id,
+          actorUserId: hotelUser.id,
+          actorEmail: hotelUser.email ?? username,
+          action: "STAFF_LOGIN_FAILED",
+          entityType: "Auth",
+          entityId: hotelUser.id,
+          metadataJson: JSON.stringify({ reason: "role_not_allowed", role: String(hotelUser.role), ip: getRequestIp(req) })
+        }
+      });
+      return null;
+    }
+    if (!(await verifyPin(pin, hotelUser.pinHash))) {
+      recordStaffLoginFailure(req, hotel.id, username);
+      await prisma.auditLog.create({
+        data: {
+          hotelId: hotel.id,
+          actorUserId: hotelUser.id,
+          actorEmail: hotelUser.email ?? username,
+          action: "STAFF_LOGIN_FAILED",
+          entityType: "Auth",
+          entityId: hotelUser.id,
+          metadataJson: JSON.stringify({ reason: "pin_invalid", ip: getRequestIp(req) })
+        }
+      });
+      return null;
+    }
+    clearStaffLoginFailures(req, hotel.id, username);
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorUserId: hotelUser.id,
+        actorEmail: hotelUser.email ?? username,
+        action: "STAFF_LOGIN_SUCCESS",
+        entityType: "Auth",
+        entityId: hotelUser.id,
+        metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
+      }
+    });
+    const effectivePermissions = effectivePermissionsForHotelUser(hotelUser.email ?? username, hotelUser.role);
+    issueAdminSession(res, {
+      staffId: hotelUser.id,
+      email: hotelUser.email ?? username,
+      role: String(hotelUser.role),
+      permissions: effectivePermissions
+    });
+    await prisma.hotelUser.update({
+      where: { id: hotelUser.id },
+      data: { lastLoginAt: new Date() }
+    });
+    return String(hotelUser.role);
+  } catch (err) {
+    console.error("[Auth] staff login failed safely:", err instanceof Error ? err.message : err);
+    return null;
+  }
 }
 
 adminRouter.post("/login", async (req, res) => {
-  const role = await authenticateEmailLogin(req, res);
-  if (role) {
-    res.redirect(pickPostLoginRedirect(role));
-    return;
+  try {
+    const role = await authenticateEmailLogin(req, res);
+    if (role) {
+      res.redirect(pickPostLoginRedirect(role));
+      return;
+    }
+    res.status(401).type("html").send(renderPage("login.html", false));
+  } catch (err) {
+    console.error("[Auth] /admin/login unexpected error:", err instanceof Error ? err.message : err);
+    res.redirect("/admin/login?auth=error");
   }
-  res.status(401).type("html").send(renderPage("login.html", false));
 });
 
 adminRouter.get("/forgot-password", (req, res) => {
@@ -2546,43 +2565,63 @@ authRouter.get("/reset-password", (req, res) => {
 });
 
 authRouter.post("/staff-login", async (req, res) => {
-  const role = await authenticateStaffLogin(req, res);
-  if (!role) {
-    const accept = String(req.headers.accept ?? "").toLowerCase();
-    if (accept.includes("text/html")) {
-      res.redirect("/admin/login?staff=failed");
+  try {
+    const role = await authenticateStaffLogin(req, res);
+    if (!role) {
+      const accept = String(req.headers.accept ?? "").toLowerCase();
+      if (accept.includes("text/html")) {
+        res.redirect("/admin/login?staff=failed");
+        return;
+      }
+      res.status(401).json({ ok: false, error: "invalid_credentials" });
       return;
     }
-    res.status(401).json({ ok: false, error: "invalid_credentials" });
-    return;
+    const redirectTo = pickPostLoginRedirect(role);
+    const accept = String(req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/html")) {
+      res.redirect(redirectTo);
+      return;
+    }
+    res.json({ ok: true, redirectTo });
+  } catch (err) {
+    console.error("[Auth] /auth/staff-login unexpected error:", err instanceof Error ? err.message : err);
+    const accept = String(req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/html")) {
+      res.redirect("/admin/login?staff=error");
+      return;
+    }
+    res.status(500).json({ ok: false, error: "staff_login_unavailable" });
   }
-  const redirectTo = pickPostLoginRedirect(role);
-  const accept = String(req.headers.accept ?? "").toLowerCase();
-  if (accept.includes("text/html")) {
-    res.redirect(redirectTo);
-    return;
-  }
-  res.json({ ok: true, redirectTo });
 });
 
 authRouter.post("/email-login", async (req, res) => {
-  const role = await authenticateEmailLogin(req, res);
-  if (!role) {
-    const accept = String(req.headers.accept ?? "").toLowerCase();
-    if (accept.includes("text/html")) {
-      res.redirect("/admin/login");
+  try {
+    const role = await authenticateEmailLogin(req, res);
+    if (!role) {
+      const accept = String(req.headers.accept ?? "").toLowerCase();
+      if (accept.includes("text/html")) {
+        res.redirect("/admin/login");
+        return;
+      }
+      res.status(401).json({ ok: false, error: "invalid_credentials" });
       return;
     }
-    res.status(401).json({ ok: false, error: "invalid_credentials" });
-    return;
+    const redirectTo = pickPostLoginRedirect(role);
+    const accept = String(req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/html")) {
+      res.redirect(redirectTo);
+      return;
+    }
+    res.json({ ok: true, redirectTo });
+  } catch (err) {
+    console.error("[Auth] /auth/email-login unexpected error:", err instanceof Error ? err.message : err);
+    const accept = String(req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/html")) {
+      res.redirect("/admin/login?auth=error");
+      return;
+    }
+    res.status(500).json({ ok: false, error: "email_login_unavailable" });
   }
-  const redirectTo = pickPostLoginRedirect(role);
-  const accept = String(req.headers.accept ?? "").toLowerCase();
-  if (accept.includes("text/html")) {
-    res.redirect(redirectTo);
-    return;
-  }
-  res.json({ ok: true, redirectTo });
 });
 
 authRouter.get("/notifications", async (req, res) => {
