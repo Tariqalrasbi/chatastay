@@ -349,6 +349,22 @@ model HotelUser {
   hkTasksAssigned              HousekeepingTask[]     @relation("HKTaskAssignedTo")
   hkTasksCreated               HousekeepingTask[]     @relation("HKTaskCreatedBy")
   hkTasksCompleted             HousekeepingTask[]     @relation("HKTaskCompletedBy")
+  passwordResetTokens          PasswordResetToken[]
+}
+
+/// Single-use password reset challenge for email-based auth.
+model PasswordResetToken {
+  id          String    @id @default(cuid())
+  hotelUserId String
+  hotelUser   HotelUser @relation(fields: [hotelUserId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  requestedIp String?
+  createdAt   DateTime  @default(now())
+
+  @@index([hotelUserId, createdAt])
+  @@index([expiresAt])
 }
 
 /// Locked cashier / front-desk shift close with cash reconciliation (folio-based).

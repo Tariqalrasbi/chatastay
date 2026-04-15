@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import path from "node:path";
 import { apiRouter } from "./routes/api";
-import { adminRouter } from "./routes/admin";
+import { adminRouter, authRouter } from "./routes/admin";
 import { housekeepingRouter } from "./routes/housekeeping";
 import { guestRouter } from "./routes/guest";
 import { ownerRouter } from "./routes/owner";
@@ -30,6 +30,7 @@ app.get("/", (_req, res) => {
 });
 
 app.use("/api", apiRouter);
+app.use("/auth", authRouter);
 app.use("/admin", adminRouter);
 app.use("/hk", housekeepingRouter);
 app.use("/guest", guestRouter);

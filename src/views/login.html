@@ -2,6 +2,7 @@
 <p class="muted">Sign in to manage Al Ashkhara Beach Resort bookings from WhatsApp.</p>
 
 <form method="post" action="/admin/login" style="max-width: 420px">
+  <h3 style="margin:0 0 8px;font-size:16px">Option 1: Email login</h3>
   <label for="email">Email</label><br />
   <input
     id="email"
@@ -25,6 +26,36 @@
     style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700"
   >
     Sign In
+  </button>
+</form>
+
+<form method="post" action="/auth/staff-login" style="max-width: 420px; margin-top: 18px">
+  <h3 style="margin:0 0 8px;font-size:16px">Option 2: Staff login (username + PIN)</h3>
+  <label for="staffUsername">Username</label><br />
+  <input
+    id="staffUsername"
+    type="text"
+    name="username"
+    required
+    style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px"
+  />
+
+  <label for="staffPin">PIN</label><br />
+  <input
+    id="staffPin"
+    type="password"
+    name="pin"
+    minlength="4"
+    maxlength="12"
+    required
+    style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px"
+  />
+
+  <button
+    type="submit"
+    style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #0b6e6e; color: #fff; font-weight: 700"
+  >
+    Staff Sign In
   </button>
 </form>
 

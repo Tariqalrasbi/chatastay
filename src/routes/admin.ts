@@ -27,7 +27,7 @@ import {
   UserRole
 } from "@prisma/client";
 import Stripe from "stripe";
-import nodemailer from "nodemailer";
+import { sendEmail } from "../core/email";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -95,6 +95,7 @@ import {
 } from "../channelManager/bookingComArchitecture";
 
 export const adminRouter = Router();
+export const authRouter = Router();
 
 const viewsDir = path.join(process.cwd(), "src", "views");
 const sessionCookieName = "chatastay_admin_session";
@@ -162,8 +163,10 @@ const auditActorContext = new AsyncLocalStorage<{
   staffEmail?: string;
   session?: AdminSession;
 }>();
-const passwordResetTtlMs = 60 * 60 * 1000; // 1 hour
-const passwordResetTokens = new Map<string, { email: string; expiresAt: number }>();
+const passwordResetTtlMs = 15 * 60 * 1000; // 15 minutes
+const resetRequestRateLimitWindowMs = 15 * 60 * 1000;
+const resetRequestRateLimitMax = 5;
+const resetRequestRateLimit = new Map<string, number[]>();
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
 
 function hashPassword(password: string): string {
@@ -302,34 +305,55 @@ function effectivePermissionsForHotelUser(email: string, role: UserRole): Permis
   return normalizePermissionMatrix(store[email.toLowerCase()] ?? defaultPermissionsForRole(role));
 }
 
+function issueAdminSession(res: Response, params: { staffId: string; email: string; role: string; permissions: PermissionMatrix }): void {
+  const token = crypto.randomUUID();
+  activeSessions.set(token, {
+    staffId: params.staffId,
+    email: params.email,
+    role: params.role,
+    permissions: params.permissions
+  });
+  res.setHeader(
+    "Set-Cookie",
+    `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
+  );
+}
+
+function hashResetToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function resetRateLimitKey(req: Request, email: string): string {
+  const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() || req.ip || "unknown";
+  return `${ip}:${email}`;
+}
+
+function isResetRateLimited(req: Request, email: string): boolean {
+  const key = resetRateLimitKey(req, email);
+  const now = Date.now();
+  const hits = (resetRequestRateLimit.get(key) ?? []).filter((at) => now - at <= resetRequestRateLimitWindowMs);
+  hits.push(now);
+  resetRequestRateLimit.set(key, hits);
+  return hits.length > resetRequestRateLimitMax;
+}
+
 async function sendPasswordResetEmail(to: string, resetLink: string): Promise<boolean> {
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  const from = process.env.MAIL_FROM || process.env.ADMIN_EMAIL || "noreply@chatastay.local";
-  if (!host || !user || !pass) {
-    if (process.env.NODE_ENV !== "production") {
-      console.warn("[Admin] Password reset: SMTP not configured. Reset link (dev only):", resetLink);
-    }
-    return false;
-  }
   try {
-    const transporter = nodemailer.createTransport({
-      host,
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === "true",
-      auth: { user, pass }
-    });
-    await transporter.sendMail({
-      from,
+    await sendEmail({
       to,
-      subject: "Reset your admin password",
-      text: `You requested a password reset. Open this link within 1 hour to set a new password:\n\n${resetLink}\n\nIf you did not request this, ignore this email.`,
-      html: `<p>You requested a password reset. <a href="${escapeHtml(resetLink)}">Click here</a> to set a new password (link expires in 1 hour).</p><p>If you did not request this, ignore this email.</p>`
+      subject: "Reset your ChatAstay password",
+      html:
+        `<p>You requested a password reset.</p>` +
+        `<p><a href="${escapeHtml(resetLink)}">Reset password</a> (link expires in 15 minutes and can be used once).</p>` +
+        `<p>If you did not request this, ignore this email.</p>`,
+      text:
+        `You requested a password reset.\n\n` +
+        `Use this link within 15 minutes (single-use): ${resetLink}\n\n` +
+        `If you did not request this, ignore this email.`
     });
     return true;
   } catch (err) {
-    console.error("[Admin] Password reset email failed:", err instanceof Error ? err.message : err);
+    console.error("[Auth] Password reset email failed:", err instanceof Error ? err.message : err);
     return false;
   }
 }
@@ -1929,7 +1953,103 @@ adminRouter.get("/login", (req, res) => {
   res.type("html").send(renderLayout(content, false));
 });
 
-adminRouter.post("/login", async (req, res) => {
+async function createPasswordResetForEmail(email: string, req: Request): Promise<void> {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return;
+  if (isResetRateLimited(req, normalized)) return;
+
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) return;
+  const user = await prisma.hotelUser.findUnique({
+    where: { hotelId_email: { hotelId: hotel.id, email: normalized } },
+    select: { id: true, email: true, isActive: true }
+  });
+  await prisma.auditLog.create({
+    data: {
+      hotelId: hotel.id,
+      actorEmail: normalized,
+      action: "AUTH_PASSWORD_RESET_REQUEST",
+      entityType: "Auth",
+      entityId: user?.id ?? null,
+      metadataJson: JSON.stringify({ outcome: user?.isActive ? "accepted" : "ignored" })
+    }
+  });
+  if (!user?.isActive || !user.email) return;
+
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashResetToken(token);
+  const expiresAt = new Date(Date.now() + passwordResetTtlMs);
+  await prisma.passwordResetToken.create({
+    data: {
+      hotelUserId: user.id,
+      tokenHash,
+      expiresAt,
+      requestedIp: (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() || req.ip || null
+    }
+  });
+  const resetBase = (process.env.APP_BASE_URL || appBaseUrl).replace(/\/$/, "") || "https://chatastay.com";
+  const resetLink = `${resetBase}/admin/reset-password?token=${encodeURIComponent(token)}`;
+  const sent = await sendPasswordResetEmail(user.email, resetLink);
+  if (!sent) {
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "AUTH_PASSWORD_RESET_FAILED",
+        entityType: "Auth",
+        entityId: user.id,
+        metadataJson: JSON.stringify({ reason: "email_send_failed" })
+      }
+    });
+  }
+}
+
+async function consumePasswordResetToken(rawToken: string, newPassword: string): Promise<{ ok: boolean; reason?: string }> {
+  if (!rawToken || newPassword.length < 8) return { ok: false, reason: "invalid_input" };
+  const tokenHash = hashResetToken(rawToken);
+  const row = await prisma.passwordResetToken.findUnique({
+    where: { tokenHash },
+    include: { hotelUser: { select: { id: true, hotelId: true, email: true, role: true, isActive: true } } }
+  });
+  if (!row || row.usedAt || row.expiresAt.getTime() <= Date.now() || !row.hotelUser.isActive) {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (hotel) {
+      await prisma.auditLog.create({
+        data: {
+          hotelId: hotel.id,
+          action: "AUTH_PASSWORD_RESET_FAILED",
+          entityType: "Auth",
+          metadataJson: JSON.stringify({ reason: "invalid_or_expired_token" })
+        }
+      });
+    }
+    return { ok: false, reason: "invalid_or_expired" };
+  }
+  await prisma.$transaction(async (tx) => {
+    await tx.hotelUser.update({
+      where: { id: row.hotelUserId },
+      data: { passwordHash: hashPassword(newPassword) }
+    });
+    await tx.passwordResetToken.update({
+      where: { id: row.id },
+      data: { usedAt: new Date() }
+    });
+    await tx.auditLog.create({
+      data: {
+        hotelId: row.hotelUser.hotelId,
+        actorUserId: row.hotelUser.id,
+        actorEmail: row.hotelUser.email ?? undefined,
+        action: "AUTH_PASSWORD_RESET_SUCCESS",
+        entityType: "Auth",
+        entityId: row.hotelUser.id
+      }
+    });
+  });
+  return { ok: true };
+}
+
+async function authenticateEmailLogin(req: Request, res: Response): Promise<string | null> {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const password = String(req.body.password ?? "");
 
@@ -1943,41 +2063,81 @@ adminRouter.post("/login", async (req, res) => {
     });
     if (hotelUser?.isActive && hotelUser.passwordHash) {
       if (verifyPassword(password, hotelUser.passwordHash)) {
-        const store = readPermissionStore();
         const effectivePermissions = effectivePermissionsForHotelUser(email, hotelUser.role);
-        const token = crypto.randomUUID();
-        activeSessions.set(token, {
+        issueAdminSession(res, {
           staffId: hotelUser.id,
           email,
           role: String(hotelUser.role),
           permissions: effectivePermissions
         });
-        res.setHeader(
-          "Set-Cookie",
-          `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
-        );
-        res.redirect(pickPostLoginRedirect(String(hotelUser.role)));
-        return;
+        return String(hotelUser.role);
       }
     }
   }
 
   if (email === adminEmail && password === adminPassword) {
-    const token = crypto.randomUUID();
-    activeSessions.set(token, {
+    issueAdminSession(res, {
       staffId: "STAFF-SUPERADMIN",
       email,
       role: "MANAGER",
       permissions: getPermissionsForEmail(email)
     });
-    res.setHeader(
-      "Set-Cookie",
-      `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
-    );
-    res.redirect("/admin/dashboard");
+    return "MANAGER";
+  }
+  return null;
+}
+
+async function authenticateStaffLogin(req: Request, res: Response): Promise<string | null> {
+  const username = String(req.body.username ?? "").trim().toLowerCase();
+  const pin = String(req.body.pin ?? "").trim();
+  if (!username || pin.length < 4) return null;
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) return null;
+  const hotelUser = await prisma.hotelUser.findUnique({
+    where: { hotelId_username: { hotelId: hotel.id, username } }
+  });
+  if (!hotelUser?.isActive || !hotelUser.pinHash) {
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorEmail: username,
+        action: "AUTH_STAFF_LOGIN_FAILED",
+        entityType: "Auth",
+        metadataJson: JSON.stringify({ reason: "user_not_found_or_pin_missing" })
+      }
+    });
+    return null;
+  }
+  if (!verifyPassword(pin, hotelUser.pinHash)) {
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorUserId: hotelUser.id,
+        actorEmail: hotelUser.email ?? username,
+        action: "AUTH_STAFF_LOGIN_FAILED",
+        entityType: "Auth",
+        entityId: hotelUser.id,
+        metadataJson: JSON.stringify({ reason: "pin_invalid" })
+      }
+    });
+    return null;
+  }
+  const effectivePermissions = effectivePermissionsForHotelUser(hotelUser.email ?? username, hotelUser.role);
+  issueAdminSession(res, {
+    staffId: hotelUser.id,
+    email: hotelUser.email ?? username,
+    role: String(hotelUser.role),
+    permissions: effectivePermissions
+  });
+  return String(hotelUser.role);
+}
+
+adminRouter.post("/login", async (req, res) => {
+  const role = await authenticateEmailLogin(req, res);
+  if (role) {
+    res.redirect(pickPostLoginRedirect(role));
     return;
   }
-
   res.status(401).type("html").send(renderPage("login.html", false));
 });
 
@@ -1989,7 +2149,7 @@ adminRouter.get("/forgot-password", (req, res) => {
   const notice = req.query.sent ? '<p class="badge ok">If an account exists for that email, we sent a reset link. Check your inbox and spam folder.</p>' : "";
   const content = `
 <h2>Forgot Password</h2>
-<p class="muted">Enter the email address for your admin account. We will send a secure reset link (valid for 1 hour).</p>
+<p class="muted">Enter the email address for your admin account. We will send a secure reset link (valid for 15 minutes).</p>
 ${notice}
 <form method="post" action="/admin/forgot-password" style="max-width: 420px">
   <label for="email">Email</label><br />
@@ -2002,42 +2162,24 @@ ${notice}
 
 adminRouter.post("/forgot-password", async (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
-  const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
-
-  let shouldSend = email === adminEmail;
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
-  if (hotel && !shouldSend) {
-    const user = await prisma.hotelUser.findUnique({
-      where: { hotelId_email: { hotelId: hotel.id, email } }
-    });
-    shouldSend = Boolean(user?.isActive);
-  }
-
-  if (shouldSend) {
-    const now = Date.now();
-    for (const [t, data] of passwordResetTokens.entries()) {
-      if (data.expiresAt <= now) passwordResetTokens.delete(t);
-    }
-    const token = crypto.randomBytes(32).toString("hex");
-    passwordResetTokens.set(token, { email, expiresAt: now + passwordResetTtlMs });
-    const baseUrl = (process.env.APP_URL || "").replace(/\/$/, "") || `${req.protocol}://${req.get("host") || "localhost:3000"}`;
-    const resetLink = `${baseUrl}/admin/reset-password?token=${encodeURIComponent(token)}`;
-    await sendPasswordResetEmail(email, resetLink);
-  }
-
+  await createPasswordResetForEmail(email, req);
   res.redirect("/admin/forgot-password?sent=1");
 });
 
-adminRouter.get("/reset-password", (req, res) => {
+adminRouter.get("/reset-password", async (req, res) => {
   if (isAuthenticated(req)) {
     res.redirect("/admin/dashboard");
     return;
   }
   const token = String(req.query.token ?? "").trim();
-  const challenge = token ? passwordResetTokens.get(token) : undefined;
-  const valid = challenge && challenge.expiresAt > Date.now();
+  const valid = Boolean(
+    token &&
+      (await prisma.passwordResetToken.findUnique({
+        where: { tokenHash: hashResetToken(token) },
+        select: { id: true, usedAt: true, expiresAt: true }
+      }).then((r) => r && !r.usedAt && r.expiresAt.getTime() > Date.now()))
+  );
   if (!valid) {
-    if (token) passwordResetTokens.delete(token);
     const content = `
 <h2>Reset Password</h2>
 <p class="badge alert">This reset link is invalid or has expired. Request a new one from the <a href="/admin/forgot-password">forgot password</a> page.</p>
@@ -2064,15 +2206,6 @@ adminRouter.post("/reset-password", async (req, res) => {
   const token = String(req.body.token ?? "").trim();
   const newPassword = String(req.body.newPassword ?? "");
   const confirmPassword = String(req.body.confirmPassword ?? "");
-  const challenge = token ? passwordResetTokens.get(token) : undefined;
-  const valid = challenge && challenge.expiresAt > Date.now();
-  if (!valid) {
-    if (token) passwordResetTokens.delete(token);
-    res.status(400).type("html").send(
-      renderLayout("<h2>Reset Password</h2><p class=\"badge alert\">This reset link is invalid or has expired.</p><p><a href=\"/admin/forgot-password\">Request a new link</a></p>", false)
-    );
-    return;
-  }
   if (newPassword.length < 8 || newPassword !== confirmPassword) {
     const content = `
 <h2>Set new password</h2>
@@ -2088,38 +2221,87 @@ adminRouter.post("/reset-password", async (req, res) => {
     res.status(400).type("html").send(renderLayout(content, false));
     return;
   }
-
-  const email = challenge!.email;
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
-  if (!hotel) {
-    passwordResetTokens.delete(token);
-    res.redirect("/admin/login");
+  const consumed = await consumePasswordResetToken(token, newPassword);
+  if (!consumed.ok) {
+    res.status(400).type("html").send(
+      renderLayout("<h2>Reset Password</h2><p class=\"badge alert\">This reset link is invalid or has expired.</p><p><a href=\"/admin/forgot-password\">Request a new link</a></p>", false)
+    );
     return;
   }
-
-  const existing = await prisma.hotelUser.findUnique({
-    where: { hotelId_email: { hotelId: hotel.id, email } }
-  });
-  if (existing) {
-    await prisma.hotelUser.update({
-      where: { hotelId_email: { hotelId: hotel.id, email } },
-      data: { passwordHash: hashPassword(newPassword) }
-    });
-  } else {
-    await prisma.hotelUser.create({
-      data: {
-        hotelId: hotel.id,
-        email,
-        fullName: "Admin",
-        passwordHash: hashPassword(newPassword),
-        role: UserRole.MANAGER,
-        isActive: true
-      }
-    });
-  }
-
-  passwordResetTokens.delete(token);
   res.redirect("/admin/login?reset=1");
+});
+
+authRouter.post("/request-password-reset", async (req, res) => {
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  await createPasswordResetForEmail(email, req);
+  const accept = String(req.headers.accept ?? "").toLowerCase();
+  if (accept.includes("text/html")) {
+    res.redirect("/admin/forgot-password?sent=1");
+    return;
+  }
+  res.json({ ok: true, message: "If an account exists for that email, a reset link was sent." });
+});
+
+authRouter.post("/reset-password", async (req, res) => {
+  const token = String(req.body.token ?? "").trim();
+  const newPassword = String(req.body.newPassword ?? "");
+  const consumed = await consumePasswordResetToken(token, newPassword);
+  if (!consumed.ok) {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+    if (hotel) {
+      await prisma.auditLog.create({
+        data: {
+          hotelId: hotel.id,
+          action: "AUTH_PASSWORD_RESET_FAILED",
+          entityType: "Auth",
+          metadataJson: JSON.stringify({ reason: consumed.reason ?? "unknown" })
+        }
+      });
+    }
+    res.status(400).json({ ok: false, error: "invalid_or_expired_token" });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+authRouter.post("/staff-login", async (req, res) => {
+  const role = await authenticateStaffLogin(req, res);
+  if (!role) {
+    const accept = String(req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/html")) {
+      res.redirect("/admin/login?staff=failed");
+      return;
+    }
+    res.status(401).json({ ok: false, error: "invalid_credentials" });
+    return;
+  }
+  const redirectTo = pickPostLoginRedirect(role);
+  const accept = String(req.headers.accept ?? "").toLowerCase();
+  if (accept.includes("text/html")) {
+    res.redirect(redirectTo);
+    return;
+  }
+  res.json({ ok: true, redirectTo });
+});
+
+authRouter.post("/email-login", async (req, res) => {
+  const role = await authenticateEmailLogin(req, res);
+  if (!role) {
+    const accept = String(req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/html")) {
+      res.redirect("/admin/login");
+      return;
+    }
+    res.status(401).json({ ok: false, error: "invalid_credentials" });
+    return;
+  }
+  const redirectTo = pickPostLoginRedirect(role);
+  const accept = String(req.headers.accept ?? "").toLowerCase();
+  if (accept.includes("text/html")) {
+    res.redirect(redirectTo);
+    return;
+  }
+  res.json({ ok: true, redirectTo });
 });
 
 adminRouter.post("/logout", (req, res) => {
@@ -2244,13 +2426,19 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>Invalid user input.</p>", true));
     return;
   }
-  const allowedRoles = new Set(["MANAGER", "STAFF", "FRONTDESK", "FINANCE", "HOUSEKEEPING"]);
+  const roleMap: Record<string, UserRole> = {
+    MANAGER: UserRole.MANAGER,
+    STAFF: UserRole.STAFF,
+    FRONTDESK: UserRole.FRONTDESK,
+    FINANCE: UserRole.FINANCE,
+    HOUSEKEEPING: UserRole.HOUSEKEEPING
+  };
   if (role === "HOUSEKEEPING" && !username && !email) {
     res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>For housekeeping, set at least a username or email.</p>", true));
     return;
   }
   const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
-  const roleSafe = allowedRoles.has(role) ? role : "MANAGER";
+  const roleSafe = roleMap[role] ?? UserRole.MANAGER;
   const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
   const createData = {
     hotelId: hotel.id,
@@ -2259,7 +2447,7 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     username,
     passwordHash: hashPassword(password),
     pinHash,
-    role: roleSafe as "MANAGER" | "STAFF" | "FRONTDESK" | "FINANCE" | "HOUSEKEEPING",
+    role: roleSafe,
     isActive: true
   };
   if (email) {
