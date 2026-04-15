@@ -2112,7 +2112,7 @@ adminRouter.post("/reset-password", async (req, res) => {
         email,
         fullName: "Admin",
         passwordHash: hashPassword(newPassword),
-        role: "MANAGER",
+        role: UserRole.MANAGER,
         isActive: true
       }
     });
