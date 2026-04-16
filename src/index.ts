@@ -11,6 +11,7 @@ import { logWhatsAppStartupHints } from "./whatsapp/send";
 import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
 import { startOwnerDailyDigestScheduler } from "./jobs/ownerDailyDigestJob";
 import { startHotelDailyDigestScheduler } from "./jobs/hotelDailyDigestJob";
+import { startGuestAutoFollowupScheduler } from "./jobs/guestAutoFollowupJob";
 
 const app = express();
 const rawPort = process.env.PORT ?? "3000";
@@ -51,6 +52,7 @@ const server = app.listen(port, host, () => {
   startPreArrivalReminderScheduler();
   startOwnerDailyDigestScheduler();
   startHotelDailyDigestScheduler();
+  startGuestAutoFollowupScheduler();
 });
 
 server.on("error", (err: NodeJS.ErrnoException) => {

@@ -298,6 +298,7 @@ model Hotel {
   paymentAllocations PaymentAllocation[]
   bookingStatusHistories BookingStatusHistory[]
   notifications         Notification[]
+  guestFollowUps        GuestFollowUp[]
   marketingCampaigns    MarketingCampaign[]
   hotelDailyDigestLogs  HotelDailyDigestLog[]
   frontDeskShifts       FrontDeskShift[]
@@ -514,6 +515,7 @@ model Guest {
   folioTransactions FolioTransaction[]
   folios         Folio[]
   notifications  Notification[]
+  guestFollowUps GuestFollowUp[]
   marketingCampaignRecipients MarketingCampaignRecipient[]
 
   @@unique([hotelId, phoneE164])
@@ -589,6 +591,7 @@ model Conversation {
   bookings      Booking[]
   sessions      ConversationSession[]
   bookingDrafts BookingDraft[]
+  guestFollowUps GuestFollowUp[]
 }
 
 model Message {
@@ -658,6 +661,7 @@ model Booking {
   statusHistory  BookingStatusHistory[]
   auditLogEntries AuditLog[] @relation("BookingAuditLogs")
   housekeepingTasks HousekeepingTask[]
+  guestFollowUps GuestFollowUp[]
 
   @@unique([hotelId, referenceCode])
   @@index([hotelId, referenceCode])
@@ -1211,6 +1215,31 @@ model Notification {
   @@index([hotelId, guestId])
   @@index([hotelId, hotelUserId])
   @@index([hotelId, createdAt])
+}
+
+/// Lightweight auto-followup queue for recovery and re-engagement messages.
+model GuestFollowUp {
+  id             String   @id @default(cuid())
+  hotelId        String
+  hotel          Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  guestId        String
+  guest          Guest    @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  bookingId      String?
+  booking        Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  type           String
+  status         String   @default("PENDING")
+  dedupeKey      String   @unique
+  scheduledFor   DateTime
+  sentAt         DateTime?
+  cancelledAt    DateTime?
+  payloadJson    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([hotelId, status, scheduledFor])
+  @@index([hotelId, guestId, type])
 }
 
 model ConversationSession {
