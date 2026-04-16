@@ -963,7 +963,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       where: {
         hotelId: hotel.id,
         guestId: guest.id,
-        state: { in: [DbConversationState.NEW, DbConversationState.QUALIFYING, DbConversationState.QUOTED, DbConversationState.PAYMENT_PENDING] }
+        state: {
+          in: [
+            DbConversationState.NEW,
+            DbConversationState.QUALIFYING,
+            DbConversationState.QUOTED,
+            DbConversationState.PAYMENT_PENDING,
+            DbConversationState.CONFIRMED
+          ]
+        }
       },
       orderBy: { updatedAt: "desc" }
     })) ??
@@ -1034,6 +1042,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   const currentState = normalizeSessionState(persisted.stage);
   const conversationMode = getConversationMode(persisted.conversationMode);
   const normalizedInputText = normalizeText(input.text);
+  const hasOperationalBookingContext =
+    Boolean(persisted.bookingStep) ||
+    isActiveBookingState(currentState) ||
+    currentState === "confirmed" ||
+    conversation.state === DbConversationState.CONFIRMED ||
+    Boolean(persisted.checkIn && persisted.checkOut) ||
+    Boolean(persisted.suggestedRoomTypeId || persisted.suggestedRoomTypeName || persisted.totalAmount);
 
   if (conversationMode === "AGENT_MODE") {
     return;
@@ -1334,6 +1349,51 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
     return;
+  }
+
+  if (needsLanguageSelection(persisted.language) && hasOperationalBookingContext) {
+    // Keep guests in the active booking/service thread; avoid re-onboarding prompts mid-journey.
+    persisted.language = "en";
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId: conversation.id,
+      phoneE164: normalizedPhone,
+      state: {
+        language: "en",
+        stage: persisted.stage || "new",
+        lastActivityAt: new Date().toISOString(),
+        conversationMode: persisted.conversationMode || "BOOKING_MODE",
+        awaitingGuestName: persisted.awaitingGuestName,
+        awaitingBookingLookup: persisted.awaitingBookingLookup,
+        myBookingCandidateIds: persisted.myBookingCandidateIds,
+        phoneNumberId: hotel.phoneNumberId,
+        checkIn: persisted.checkIn,
+        checkOut: persisted.checkOut,
+        checkInOptions: persisted.checkInOptions,
+        checkOutOptions: persisted.checkOutOptions,
+        manualCheckInDate: persisted.manualCheckInDate,
+        manualCheckOutDate: persisted.manualCheckOutDate,
+        guestCount: persisted.guestCount,
+        roomCount: persisted.roomCount,
+        capacityPickRoomTypes: persisted.capacityPickRoomTypes,
+        adultCount: persisted.adultCount,
+        childCount: persisted.childCount,
+        bookingRoomOffers: persisted.bookingRoomOffers,
+        suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+        suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+        suggestedPropertyId: persisted.suggestedPropertyId,
+        nightlyRate: persisted.nightlyRate,
+        nights: persisted.nights,
+        totalAmount: persisted.totalAmount,
+        bookingStep: persisted.bookingStep,
+        bookingMealPlanCode: persisted.bookingMealPlanCode,
+        fbCartDraft: persisted.fbCartDraft,
+        pendingPrebookOrder: persisted.pendingPrebookOrder,
+        bookingFlowReturn: persisted.bookingFlowReturn
+      }
+    });
+    persisted.language = "en";
   }
 
   if (needsLanguageSelection(persisted.language)) {
