@@ -43,6 +43,7 @@ import {
 import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send";
 import { guestReceptionistHandoffMessage } from "./guestNotifications";
 import { handleGuestJourneyInboundReply, type GuestJourneyOperationalReply } from "./preArrivalGuestReplyNotify";
+import { buildGuestJourneyOrchestratedReply } from "./guestMessageOrchestration";
 import {
   buildCheckInListSections,
   buildCheckOutListSections,
@@ -1170,72 +1171,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest);
     const activitiesFromMemory =
       guestMemoryBundle.memory.preferredActivities?.some((a) => a === "dune_buggy" || a === "bbq") ?? false;
-    let replyBody = "Thank you, we have noted your update and our team will coordinate with you if needed.";
-    if (guestJourneyOperationalReply.upsellType === "upgrade_interest") {
-      if (guestMemoryBundle.memory.hadComplaint) {
-        replyBody =
-          "Thank you for your message. If you would like to explore a different room category, our team can share options with care.";
-      } else if (repeatUpsellSoft) {
-        replyBody =
-          "Whenever you are ready, we have premium room types that may suit you from previous stays. There is no pressure — reply if you would like options.";
-      } else {
-        replyBody =
-          "We also have upgraded room options available for a more enhanced experience. Let us know if you would like to explore upgrade options.";
-      }
-    } else if (guestJourneyOperationalReply.upsellType === "add_on_interest") {
-      replyBody =
-        "We can also arrange additional services such as extra beds, decorations, or meals. Let us know if you would like to add any.";
-    } else if (guestJourneyOperationalReply.upsellType === "activities_interest") {
-      replyBody = activitiesFromMemory
-        ? "We can arrange favourite experiences again — including dune buggy and BBQ options when it suits you. Reply if you would like more details."
-        : "We offer activities such as sand biking, dune buggies, and BBQ experiences. Let us know if you would like more details.";
-    } else if (guestJourneyOperationalReply.category === "arrival_time_update") {
-      const etaPart = guestJourneyOperationalReply.parsedEta
-        ? ` around ${guestJourneyOperationalReply.parsedEta}`
-        : " with your expected arrival time";
-      replyBody = `Thank you, we have noted your arrival${etaPart}. We look forward to welcoming you. If you need parking, luggage assistance, or anything else before arrival, just reply here.`;
-    } else if (guestJourneyOperationalReply.category === "late_arrival") {
-      replyBody =
-        "Thank you for letting us know. We have noted your late arrival. If your arrival time changes further or you need any assistance before reaching the resort, please reply here and our team will assist.";
-    } else if (guestJourneyOperationalReply.category === "on_the_way") {
-      replyBody =
-        "Thank you, we have noted that you are on the way. We look forward to welcoming you. If you need parking or luggage assistance on arrival, please reply here.";
-    } else if (guestJourneyOperationalReply.category === "arrival_support_request") {
-      replyBody =
-        "Thank you. We have noted your request and our team will coordinate with you. If you would like, you can also share your expected arrival time here.";
-    } else if (guestJourneyOperationalReply.category === "early_checkin_request") {
-      replyBody =
-        "We may be able to offer early check-in for an additional fee, subject to availability. Please let us know if you would like us to arrange this for you.";
-    } else if (guestJourneyOperationalReply.category === "late_checkout_request") {
-      replyBody =
-        "We can offer a late check-out option for an additional charge, depending on availability. Let us know if you would like us to arrange it.";
-    } else if (guestJourneyOperationalReply.category === "special_request") {
-      replyBody = "Thank you for your request. We have noted it and our team will coordinate accordingly.";
-    } else if (guestJourneyOperationalReply.category === "payment_issue") {
-      replyBody =
-        "Thank you for informing us. It seems there may have been an issue with the payment. Our team will review this and assist you shortly. If needed, we will guide you on the next step.";
-    } else if (guestJourneyOperationalReply.category === "booking_modification") {
-      replyBody =
-        "Thank you for your request. We have noted your booking modification and our team will review availability and get back to you shortly.";
-    } else if (guestJourneyOperationalReply.category === "cancellation_request") {
-      replyBody =
-        "Thank you for your request. We have received your cancellation request and will process it according to the booking policy. Our team will confirm shortly.";
-    } else if (guestJourneyOperationalReply.category === "refund_request") {
-      replyBody =
-        "Thank you for your message. We have noted your refund request. Our team will review it based on the booking policy and update you shortly.";
-    } else if (guestJourneyOperationalReply.category === "complaint") {
-      replyBody =
-        "We are very sorry to hear this. Thank you for bringing it to our attention. Our team will address this as soon as possible.";
-    } else if (guestJourneyOperationalReply.category === "dissatisfaction") {
-      replyBody =
-        "We truly appreciate your feedback and are sorry your experience did not meet expectations. Our team will review this and assist you.";
-    } else if (guestJourneyOperationalReply.category === "escalation") {
-      replyBody =
-        "We sincerely apologize for the inconvenience. Your concern is important to us and has been escalated to our team for immediate attention.";
-    }
+    const orchestrated = buildGuestJourneyOrchestratedReply({
+      journey: guestJourneyOperationalReply,
+      memory: { hadComplaint: guestMemoryBundle.memory.hadComplaint },
+      repeatGuestSoft: repeatUpsellSoft,
+      activitiesFromMemory
+    });
     await sendWhatsAppText({
       to: normalizedPhone,
-      body: replyBody,
+      body: orchestrated.replyBody,
       phoneNumberId: hotel.phoneNumberId,
       conversationId: conversation.id
     });
@@ -1244,8 +1188,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: replyBody,
-        aiIntent: `GUEST_${guestJourneyOperationalReply.category.toUpperCase()}`,
+        body: orchestrated.replyBody,
+        aiIntent: orchestrated.aiIntent,
         aiConfidence: 0.97
       }
     });
@@ -1286,8 +1230,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         ],
         title: "Guest operational request needs follow-up",
         body:
-          guestJourneyOperationalReply.guestResponse === "accepted" && guestJourneyOperationalReply.upsellType
-            ? `${followBody} Upsell interest: ${guestJourneyOperationalReply.upsellType}.`
+          orchestrated.staffUpsellAppend && orchestrated.meta.effectiveUpsellType
+            ? `${followBody} Upsell interest: ${orchestrated.meta.effectiveUpsellType}.`
             : followBody,
         category: "messages",
         severity: cat === "escalation" || cat === "complaint" ? "critical" : "high",

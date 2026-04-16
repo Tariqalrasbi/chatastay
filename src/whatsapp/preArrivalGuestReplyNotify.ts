@@ -5,6 +5,7 @@ import {
   mergeSpecialRequestSnippet,
   noteGuestComplaintInMemory
 } from "../core/lightGuestMemory";
+import { deriveCommerceTone, mapOperationalIntentToRole, rolePriority } from "./guestMessageOrchestration";
 
 const NOTIFY_TYPE = "GUEST_JOURNEY_REPLY";
 type GuestOperationalIntentCategory =
@@ -153,6 +154,17 @@ function detectUpsellMetadata(params: {
   if (!category) return {};
   const t = text.toLowerCase();
   const ignored = /\b(no|no thanks|not now|maybe later|skip)\b/.test(t);
+  /** Support / payment / policy paths must not attach sales upsell signals to the same inbound message. */
+  if (
+    category === "complaint" ||
+    category === "dissatisfaction" ||
+    category === "payment_issue" ||
+    category === "cancellation_request" ||
+    category === "refund_request" ||
+    category === "escalation"
+  ) {
+    return {};
+  }
   const highValueBooking = booking.totalAmount >= 220;
   const longStay = booking.nights >= 3;
   const daysBeforeCheckIn = Math.floor((booking.checkIn.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
@@ -279,6 +291,8 @@ export async function handleGuestJourneyInboundReply(params: {
   const body = category
     ? `${guestLabel} (${ref}) sent ${category.replaceAll("_", " ")} update: ${preview}`
     : `${guestLabel} (${ref}) replied after an automated stay message: ${preview}`;
+  const orchRole = category ? mapOperationalIntentToRole(category) : null;
+  const commerceTone = category ? deriveCommerceTone(upsellMeta.upsellType, category) : null;
   const metadata = {
     bookingId: booking.id,
     conversationId: params.conversationId,
@@ -293,7 +307,11 @@ export async function handleGuestJourneyInboundReply(params: {
     guestResponse: upsellMeta.guestResponse ?? null,
     upsellTriggerReason: upsellMeta.upsellTriggerReason ?? null,
     upsellShown: Boolean(upsellMeta.upsellType),
-    upsellShownAt: upsellMeta.upsellType ? new Date().toISOString() : null
+    upsellShownAt: upsellMeta.upsellType ? new Date().toISOString() : null,
+    orchestrationRole: orchRole,
+    orchestrationPriority: orchRole ? rolePriority(orchRole) : null,
+    orchestrationCommerceTone: commerceTone,
+    invokedHandler: "guest_journey_operational"
   };
 
   await prisma.$transaction([
