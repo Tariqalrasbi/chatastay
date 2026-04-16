@@ -17,6 +17,7 @@ type GuestOperationalIntentCategory =
   | "complaint"
   | "dissatisfaction"
   | "escalation";
+type UpsellResponse = "accepted" | "ignored";
 
 export type GuestJourneyOperationalReply = {
   matched: boolean;
@@ -28,6 +29,8 @@ export type GuestJourneyOperationalReply = {
   requiresStaffFollowUp?: boolean;
   /** When set, used by conversationController for createRoleRoutedNotification */
   staffFollowUpRoles?: UserRole[];
+  upsellType?: "early_checkin_paid" | "late_checkout_paid" | "upgrade_interest" | "add_on_interest" | "activities_interest";
+  guestResponse?: UpsellResponse;
 };
 
 function staffFollowUpRolesForCategory(category: GuestOperationalIntentCategory): UserRole[] {
@@ -130,6 +133,23 @@ function parseEtaText(text: string): string | null {
   return null;
 }
 
+function detectUpsellMetadata(
+  category: GuestOperationalIntentCategory | null,
+  text: string
+): { upsellType?: GuestJourneyOperationalReply["upsellType"]; guestResponse?: UpsellResponse } {
+  if (!category) return {};
+  const t = text.toLowerCase();
+  const ignored = /\b(no|no thanks|not now|maybe later|skip)\b/.test(t);
+  if (category === "early_checkin_request") return { upsellType: "early_checkin_paid", guestResponse: ignored ? "ignored" : "accepted" };
+  if (category === "late_checkout_request") return { upsellType: "late_checkout_paid", guestResponse: ignored ? "ignored" : "accepted" };
+  if (/\b(upgrade|better room|bigger room|suite)\b/.test(t)) return { upsellType: "upgrade_interest", guestResponse: ignored ? "ignored" : "accepted" };
+  if (/\b(extra bed|decoration|decorations|meals|meal plan|transport|transfer)\b/.test(t))
+    return { upsellType: "add_on_interest", guestResponse: ignored ? "ignored" : "accepted" };
+  if (/\b(sand bike|sand biking|dune buggy|bbq|tour|tours|experience|experiences|activity|activities)\b/.test(t))
+    return { upsellType: "activities_interest", guestResponse: ignored ? "ignored" : "accepted" };
+  return {};
+}
+
 function categoryToIntent(category: GuestOperationalIntentCategory): string {
   if (category === "arrival_time_update") return "GUEST_ARRIVAL_TIME_UPDATE";
   if (category === "late_arrival") return "GUEST_LATE_ARRIVAL";
@@ -195,6 +215,7 @@ export async function handleGuestJourneyInboundReply(params: {
 
   const category = detectGuestOperationalIntentCategory(params.messageBody);
   const parsedEta = parseEtaText(params.messageBody);
+  const upsellMeta = detectUpsellMetadata(category, params.messageBody);
   const aiIntent = category ? categoryToIntent(category) : "GUEST_JOURNEY_REPLY";
   const requiresStaffFollowUp =
     category != null &&
@@ -228,7 +249,9 @@ export async function handleGuestJourneyInboundReply(params: {
     category: category ?? "guest_journey_guest_message",
     parsedEta,
     rawMessage: params.messageBody,
-    detectedAt: new Date().toISOString()
+    detectedAt: new Date().toISOString(),
+    upsellType: upsellMeta.upsellType ?? null,
+    guestResponse: upsellMeta.guestResponse ?? null
   };
 
   await prisma.$transaction([
@@ -270,7 +293,9 @@ export async function handleGuestJourneyInboundReply(params: {
     rawMessage: params.messageBody,
     parsedEta,
     requiresStaffFollowUp,
-    staffFollowUpRoles
+    staffFollowUpRoles,
+    upsellType: upsellMeta.upsellType,
+    guestResponse: upsellMeta.guestResponse
   };
 }
 

@@ -286,6 +286,8 @@ const BOOKING_SUBMENU_LIST = {
 };
 
 const BOOKING_NAV_HINT = "\n\nTip: reply *back* for the previous step, or *menu* for the main menu.";
+const BOOKING_UPSELL_SOFT_OFFER =
+  "Optional: We can also arrange paid early check-in, late check-out, room upgrades, add-ons, and activities. Reply here if you want details.";
 const QUESTION_MODE_ENTRY =
   "You can ask me anything about the hotel: rooms, amenities, check-in times, policies, location, and more. What would you like to know?\n\nReply *menu* anytime to return to the main menu.";
 
@@ -858,7 +860,7 @@ async function buildTurnResult(params: {
         `Nights: ${offer.nights}`,
         `Total price: ${offer.total.toFixed(2)} ${params.currency}`,
         "",
-        "Tap a button below or reply YES to confirm, EDIT to change, NO to cancel."
+        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
       ].join("\n"),
       responseButtons: QUOTE_BUTTONS,
       updateSession: {
@@ -1057,7 +1059,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
   if (guestJourneyOperationalReply?.matched && guestJourneyOperationalReply.category) {
     let replyBody = "Thank you, we have noted your update and our team will coordinate with you if needed.";
-    if (guestJourneyOperationalReply.category === "arrival_time_update") {
+    if (guestJourneyOperationalReply.upsellType === "upgrade_interest") {
+      replyBody =
+        "We also have upgraded room options available for a more enhanced experience. Let us know if you would like to explore upgrade options.";
+    } else if (guestJourneyOperationalReply.upsellType === "add_on_interest") {
+      replyBody =
+        "We can also arrange additional services such as extra beds, decorations, or meals. Let us know if you would like to add any.";
+    } else if (guestJourneyOperationalReply.upsellType === "activities_interest") {
+      replyBody =
+        "We offer activities such as sand biking, dune buggies, and BBQ experiences. Let us know if you would like more details.";
+    } else if (guestJourneyOperationalReply.category === "arrival_time_update") {
       const etaPart = guestJourneyOperationalReply.parsedEta
         ? ` around ${guestJourneyOperationalReply.parsedEta}`
         : " with your expected arrival time";
@@ -1073,10 +1084,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         "Thank you. We have noted your request and our team will coordinate with you. If you would like, you can also share your expected arrival time here.";
     } else if (guestJourneyOperationalReply.category === "early_checkin_request") {
       replyBody =
-        "Thank you for your request. Early check-in is subject to availability. Our team will do their best to accommodate and will confirm closer to your arrival.";
+        "We may be able to offer early check-in for an additional fee, subject to availability. Please let us know if you would like us to arrange this for you.";
     } else if (guestJourneyOperationalReply.category === "late_checkout_request") {
       replyBody =
-        "Thank you for your request. Late check-out is subject to availability. We will do our best to accommodate and confirm it closer to your departure.";
+        "We can offer a late check-out option for an additional charge, depending on availability. Let us know if you would like us to arrange it.";
     } else if (guestJourneyOperationalReply.category === "special_request") {
       replyBody = "Thank you for your request. We have noted it and our team will coordinate accordingly.";
     } else if (guestJourneyOperationalReply.category === "payment_issue") {
@@ -1153,7 +1164,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           UserRole.STAFF
         ],
         title: "Guest operational request needs follow-up",
-        body: followBody,
+        body:
+          guestJourneyOperationalReply.guestResponse === "accepted" && guestJourneyOperationalReply.upsellType
+            ? `${followBody} Upsell interest: ${guestJourneyOperationalReply.upsellType}.`
+            : followBody,
         category: "messages",
         severity: cat === "escalation" || cat === "complaint" ? "critical" : "high",
         link: `/admin/conversations/${encodeURIComponent(conversation.id)}`,
@@ -1364,7 +1378,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           : null,
         `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
         "",
-        "Tap a button below or reply YES to confirm, EDIT to change, NO to cancel."
+        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
       ]
         .filter((x): x is string => typeof x === "string")
         .join("\n");
@@ -2236,7 +2250,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
       `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
       "",
-      "Tap a button below or reply YES to confirm, EDIT to change, NO to cancel."
+      `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
     ].join("\n");
     try {
       await sendWhatsAppButtons({
@@ -3552,7 +3566,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
           `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
           "",
-          "Tap a button below or reply YES to confirm, EDIT to change, NO to cancel."
+          `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
         ]
           .filter((x): x is string => typeof x === "string")
           .join("\n");
