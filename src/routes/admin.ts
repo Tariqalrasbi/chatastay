@@ -1909,6 +1909,13 @@ function isOptionalHousekeepingSchemaError(err: unknown): boolean {
   return msg.includes("housekeepingtask") || msg.includes("notification");
 }
 
+function isHotelUserSchemaMismatchError(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  const msg = raw.toLowerCase();
+  if (!msg.includes("hoteluser")) return false;
+  return msg.includes("no such table") || msg.includes("no such column");
+}
+
 function parseCookies(req: Request): Record<string, string> {
   const rawCookie = req.headers.cookie;
   if (!rawCookie) return {};
@@ -2696,29 +2703,60 @@ function parsePermissionsFromBody(body: Record<string, unknown>): PermissionMatr
 }
 
 adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
-  if (!hotel) {
-    res.type("html").send(renderLayout("<h2>Users</h2><p>No hotel data found.</p>", true));
+  let users: Array<{
+    fullName: string | null;
+    email: string | null;
+    username: string | null;
+    role: UserRole | string | null;
+    isActive: boolean | null;
+  }> = [];
+  try {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+    if (!hotel) {
+      res.type("html").send(renderLayout("<h2>Users</h2><p>No hotel data found.</p>", true));
+      return;
+    }
+    users = await prisma.hotelUser.findMany({
+      where: { hotelId: hotel.id },
+      orderBy: { createdAt: "desc" },
+      select: {
+        fullName: true,
+        email: true,
+        username: true,
+        role: true,
+        isActive: true
+      }
+    });
+  } catch (err) {
+    const fallback =
+      "<h2>Users &amp; permissions</h2><p class=\"badge alert\">Users page is temporarily unavailable because the user table schema is out of date.</p><p>Please run the latest Prisma migrations, then reload this page.</p>";
+    if (isHotelUserSchemaMismatchError(err)) {
+      res.type("html").send(renderLayout(fallback, true));
+      return;
+    }
+    console.error("Admin users page failed:", err instanceof Error ? err.message : String(err));
+    res
+      .status(500)
+      .type("html")
+      .send(renderLayout("<h2>Users &amp; permissions</h2><p class=\"badge alert\">Could not load users right now. Please try again.</p>", true));
     return;
   }
-  const users = await prisma.hotelUser.findMany({
-    where: { hotelId: hotel.id },
-    orderBy: { createdAt: "desc" }
-  });
   const store = readPermissionStore();
   const created = req.query.created ? '<p class="badge ok">User created with permissions.</p>' : "";
 
   const rows = users
     .map((user) => {
-      const perms = normalizePermissionMatrix(store[(user.email ?? "").toLowerCase()] ?? defaultPermissionsForRole(String(user.role)));
+      const safeEmail = typeof user.email === "string" ? user.email : "";
+      const roleKey = typeof user.role === "string" ? user.role : "MANAGER";
+      const perms = normalizePermissionMatrix(store[safeEmail.toLowerCase()] ?? defaultPermissionsForRole(roleKey));
       const modulesSummary = permissionModules
         .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
         .map((m) => permissionModuleLabels[m])
         .join(", ");
       return `<tr>
-      <td>${escapeHtml(user.fullName)}</td>
-      <td>${escapeHtml(user.email ?? user.username ?? "—")}</td>
-      <td>${escapeHtml(user.role)}</td>
+      <td>${escapeHtml(typeof user.fullName === "string" ? user.fullName : "—")}</td>
+      <td>${escapeHtml((typeof user.email === "string" && user.email) || (typeof user.username === "string" && user.username) || "—")}</td>
+      <td>${escapeHtml(roleKey)}</td>
       <td>${user.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
       <td>${escapeHtml(modulesSummary || "No permissions set")}</td>
       </tr>`;
