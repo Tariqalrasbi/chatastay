@@ -1,7 +1,163 @@
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 
 const NOTIFY_TYPE = "GUEST_JOURNEY_REPLY";
+type GuestOperationalIntentCategory =
+  | "arrival_time_update"
+  | "late_arrival"
+  | "arrival_support_request"
+  | "on_the_way"
+  | "early_checkin_request"
+  | "late_checkout_request"
+  | "special_request"
+  | "payment_issue"
+  | "booking_modification"
+  | "cancellation_request"
+  | "refund_request"
+  | "complaint"
+  | "dissatisfaction"
+  | "escalation";
+
+export type GuestJourneyOperationalReply = {
+  matched: boolean;
+  bookingId?: string;
+  referenceCode?: string | null;
+  category?: GuestOperationalIntentCategory;
+  rawMessage: string;
+  parsedEta?: string | null;
+  requiresStaffFollowUp?: boolean;
+  /** When set, used by conversationController for createRoleRoutedNotification */
+  staffFollowUpRoles?: UserRole[];
+};
+
+function staffFollowUpRolesForCategory(category: GuestOperationalIntentCategory): UserRole[] {
+  switch (category) {
+    case "payment_issue":
+    case "refund_request":
+      return [UserRole.FINANCE, UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF];
+    case "booking_modification":
+    case "cancellation_request":
+      return [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF];
+    case "complaint":
+    case "dissatisfaction":
+      return [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF];
+    case "escalation":
+      return [UserRole.MANAGER, UserRole.FRONTDESK, UserRole.STAFF];
+    case "late_checkout_request":
+      return [UserRole.FRONTDESK, UserRole.HOUSEKEEPING, UserRole.MANAGER, UserRole.STAFF];
+    default:
+      return [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF];
+  }
+}
+
+function detectGuestOperationalIntentCategory(text: string): GuestOperationalIntentCategory | null {
+  const t = text.toLowerCase();
+  // Specific intents first (avoid broad "request" matching payment/refund paths).
+  if (/\b(want (a |the )?manager|speak to (a |the )?manager|talk to (a |the )?manager|serious issue|urgent problem|escalate)\b/.test(t))
+    return "escalation";
+  if (
+    /\b(room is dirty|dirty room|ac not working|a\/c not working|air conditioning|not working|broken|problem with (the )?room|issue with (the )?room|complaint)\b/.test(t)
+  )
+    return "complaint";
+  if (
+    /\b(not satisfied|not happy|disappointed|this is not good|unhappy|very poor|terrible service|bad service)\b/.test(t)
+  )
+    return "dissatisfaction";
+  if (
+    /\b(payment failed|payment error|card not working|card declined|declined|transaction failed|charged but not confirmed|payment did not go through|could not pay)\b/.test(
+      t
+    )
+  )
+    return "payment_issue";
+  if (/\b(refund|money back|when will i get (my )?refund|when will we get (our )?refund|return my money)\b/.test(t))
+    return "refund_request";
+  if (
+    /\b(cancel (my |the )?booking|cancel (my |the )?reservation|i want to cancel|we want to cancel|please cancel|cancellation)\b/.test(
+      t
+    )
+  )
+    return "cancellation_request";
+  if (
+    /\b(change dates|change (my |the )?dates|modify (my |the )?booking|change room|different room|update guests|change number of guests|reschedule|change my booking)\b/.test(
+      t
+    )
+  )
+    return "booking_modification";
+  if (/\b(early check[- ]?in|check[- ]?in early|arriving early|arrive early)\b/.test(t)) return "early_checkin_request";
+  if (/\b(late check[- ]?out|check[- ]?out late|extend check[- ]?out|leave at \d{1,2}(?::\d{2})?\s*(am|pm)?)\b/.test(t))
+    return "late_checkout_request";
+  if (
+    /\b(extra bed|birthday|honeymoon|baby crib|crib|special request|anniversary|room decoration|decorations)\b/.test(t)
+  )
+    return "special_request";
+  if (/\b(arrangement|arrange|can you arrange|please arrange)\b/.test(t)) return "special_request";
+  if (/\b(on my way|on the way|coming now|leaving now|headed there|heading there)\b/.test(t)) return "on_the_way";
+  if (
+    /\b(late|late arrival|arrive late|after midnight|midnight|check[- ]?in will be late|delayed|delay)\b/.test(t)
+  )
+    return "late_arrival";
+  if (
+    /\b(parking|valet|luggage|bags|baggage|assist|assistance|help with bags|help with luggage|carry bags)\b/.test(t)
+  )
+    return "arrival_support_request";
+  if (/\b(arrive|arrival|eta|coming around|around|at)\b/.test(t) && parseEtaText(text)) return "arrival_time_update";
+  return null;
+}
+
+function parseEtaText(text: string): string | null {
+  const t = text.toLowerCase();
+  if (/\bafter midnight\b/.test(t)) return "after midnight";
+  const ampm = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  if (ampm) {
+    const hour = parseInt(ampm[1], 10);
+    const minute = ampm[2] ? parseInt(ampm[2], 10) : 0;
+    if (hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59) {
+      const hh = String(hour).padStart(2, "0");
+      const mm = String(minute).padStart(2, "0");
+      return `${hh}:${mm} ${ampm[3].toLowerCase()}`;
+    }
+  }
+  const twentyFour = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (twentyFour) {
+    const hh = String(parseInt(twentyFour[1], 10)).padStart(2, "0");
+    return `${hh}:${twentyFour[2]}`;
+  }
+  const aroundHour = t.match(/\b(?:around|about|eta|at)\s*(\d{1,2})\b/);
+  if (aroundHour) {
+    const h = parseInt(aroundHour[1], 10);
+    if (h >= 1 && h <= 12) return `${String(h).padStart(2, "0")}:00`;
+  }
+  return null;
+}
+
+function categoryToIntent(category: GuestOperationalIntentCategory): string {
+  if (category === "arrival_time_update") return "GUEST_ARRIVAL_TIME_UPDATE";
+  if (category === "late_arrival") return "GUEST_LATE_ARRIVAL";
+  if (category === "arrival_support_request") return "GUEST_ARRIVAL_SUPPORT_REQUEST";
+  if (category === "on_the_way") return "GUEST_ON_THE_WAY";
+  if (category === "early_checkin_request") return "GUEST_EARLY_CHECKIN_REQUEST";
+  if (category === "late_checkout_request") return "GUEST_LATE_CHECKOUT_REQUEST";
+  if (category === "special_request") return "GUEST_SPECIAL_REQUEST";
+  if (category === "payment_issue") return "GUEST_PAYMENT_ISSUE";
+  if (category === "booking_modification") return "GUEST_BOOKING_MODIFICATION";
+  if (category === "cancellation_request") return "GUEST_CANCELLATION_REQUEST";
+  if (category === "refund_request") return "GUEST_REFUND_REQUEST";
+  if (category === "complaint") return "GUEST_COMPLAINT";
+  if (category === "dissatisfaction") return "GUEST_DISSATISFACTION";
+  return "GUEST_ESCALATION";
+}
+
+function isArrivalFamilyCategory(category: GuestOperationalIntentCategory): boolean {
+  return (
+    category === "arrival_time_update" ||
+    category === "late_arrival" ||
+    category === "arrival_support_request" ||
+    category === "on_the_way" ||
+    category === "early_checkin_request" ||
+    category === "late_checkout_request" ||
+    category === "special_request"
+  );
+}
 
 /**
  * When a guest replies after any automated guest-journey WhatsApp (24h pre-arrival, check-in day, post-checkout thank-you,
@@ -14,7 +170,7 @@ export async function handleGuestJourneyInboundReply(params: {
   prismaMessageId: string;
   messageBody: string;
   providerMessageId?: string;
-}): Promise<void> {
+}): Promise<GuestJourneyOperationalReply> {
   const booking = await prisma.booking.findFirst({
     where: {
       hotelId: params.hotelId,
@@ -33,7 +189,19 @@ export async function handleGuestJourneyInboundReply(params: {
     include: { guest: true }
   });
 
-  if (!booking) return;
+  if (!booking) {
+    return { matched: false, rawMessage: params.messageBody };
+  }
+
+  const category = detectGuestOperationalIntentCategory(params.messageBody);
+  const parsedEta = parseEtaText(params.messageBody);
+  const aiIntent = category ? categoryToIntent(category) : "GUEST_JOURNEY_REPLY";
+  const requiresStaffFollowUp =
+    category != null &&
+    category !== "arrival_time_update" &&
+    category !== "on_the_way";
+  const staffFollowUpRoles =
+    category && requiresStaffFollowUp ? staffFollowUpRolesForCategory(category) : undefined;
 
   if (!booking.conversationId) {
     await prisma.booking.update({
@@ -45,13 +213,28 @@ export async function handleGuestJourneyInboundReply(params: {
   const guestLabel = booking.guest.fullName?.trim() || booking.guest.phoneE164;
   const ref = booking.referenceCode?.trim() || booking.id.slice(0, 10);
   const preview = params.messageBody.trim().slice(0, 280);
-  const title = `Guest journey reply · ${guestLabel} · ${ref}`;
-  const body = `${guestLabel} (${ref}) replied after an automated stay message: ${preview}`;
+  const title = category
+    ? `Guest ${category.replaceAll("_", " ")} · ${guestLabel} · ${ref}`
+    : `Guest journey reply · ${guestLabel} · ${ref}`;
+  const body = category
+    ? `${guestLabel} (${ref}) sent ${category.replaceAll("_", " ")} update: ${preview}`
+    : `${guestLabel} (${ref}) replied after an automated stay message: ${preview}`;
+  const metadata = {
+    bookingId: booking.id,
+    conversationId: params.conversationId,
+    referenceCode: booking.referenceCode,
+    providerMessageId: params.providerMessageId ?? null,
+    prismaMessageId: params.prismaMessageId,
+    category: category ?? "guest_journey_guest_message",
+    parsedEta,
+    rawMessage: params.messageBody,
+    detectedAt: new Date().toISOString()
+  };
 
   await prisma.$transaction([
     prisma.message.update({
       where: { id: params.prismaMessageId },
-      data: { aiIntent: "GUEST_JOURNEY_REPLY", aiConfidence: 0.95 }
+      data: { aiIntent, aiConfidence: category ? 0.97 : 0.95 }
     }),
     prisma.notification.create({
       data: {
@@ -62,17 +245,33 @@ export async function handleGuestJourneyInboundReply(params: {
         title,
         body,
         status: "PENDING",
-        payloadJson: JSON.stringify({
-          bookingId: booking.id,
-          conversationId: params.conversationId,
-          referenceCode: booking.referenceCode,
-          providerMessageId: params.providerMessageId ?? null,
-          prismaMessageId: params.prismaMessageId,
-          category: "guest_journey_guest_message"
-        })
+        payloadJson: JSON.stringify(metadata)
+      }
+    }),
+    prisma.auditLog.create({
+      data: {
+        hotelId: params.hotelId,
+        action:
+          category && isArrivalFamilyCategory(category)
+            ? "GUEST_ARRIVAL_OPERATIONAL_UPDATE"
+            : "GUEST_SERVICE_OPERATIONAL_UPDATE",
+        entityType: "BOOKING",
+        entityId: booking.id,
+        bookingId: booking.id,
+        metadataJson: JSON.stringify(metadata)
       }
     })
   ]);
+  return {
+    matched: Boolean(category),
+    bookingId: booking.id,
+    referenceCode: booking.referenceCode,
+    category: category ?? undefined,
+    rawMessage: params.messageBody,
+    parsedEta,
+    requiresStaffFollowUp,
+    staffFollowUpRoles
+  };
 }
 
 /** @deprecated Use handleGuestJourneyInboundReply */

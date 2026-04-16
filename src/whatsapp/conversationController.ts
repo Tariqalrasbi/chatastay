@@ -1079,6 +1079,27 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         "Thank you for your request. Late check-out is subject to availability. We will do our best to accommodate and confirm it closer to your departure.";
     } else if (guestJourneyOperationalReply.category === "special_request") {
       replyBody = "Thank you for your request. We have noted it and our team will coordinate accordingly.";
+    } else if (guestJourneyOperationalReply.category === "payment_issue") {
+      replyBody =
+        "Thank you for informing us. It seems there may have been an issue with the payment. Our team will review this and assist you shortly. If needed, we will guide you on the next step.";
+    } else if (guestJourneyOperationalReply.category === "booking_modification") {
+      replyBody =
+        "Thank you for your request. We have noted your booking modification and our team will review availability and get back to you shortly.";
+    } else if (guestJourneyOperationalReply.category === "cancellation_request") {
+      replyBody =
+        "Thank you for your request. We have received your cancellation request and will process it according to the booking policy. Our team will confirm shortly.";
+    } else if (guestJourneyOperationalReply.category === "refund_request") {
+      replyBody =
+        "Thank you for your message. We have noted your refund request. Our team will review it based on the booking policy and update you shortly.";
+    } else if (guestJourneyOperationalReply.category === "complaint") {
+      replyBody =
+        "We are very sorry to hear this. Thank you for bringing it to our attention. Our team will address this as soon as possible.";
+    } else if (guestJourneyOperationalReply.category === "dissatisfaction") {
+      replyBody =
+        "We truly appreciate your feedback and are sorry your experience did not meet expectations. Our team will review this and assist you.";
+    } else if (guestJourneyOperationalReply.category === "escalation") {
+      replyBody =
+        "We sincerely apologize for the inconvenience. Your concern is important to us and has been escalated to our team for immediate attention.";
     }
     await sendWhatsAppText({
       to: normalizedPhone,
@@ -1097,25 +1118,44 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     });
     if (guestJourneyOperationalReply.requiresStaffFollowUp) {
+      const cat = guestJourneyOperationalReply.category;
+      const followBody =
+        cat === "late_arrival"
+          ? `${guest.fullName ?? guest.phoneE164} reported a late arrival.`
+          : cat === "arrival_support_request"
+            ? `${guest.fullName ?? guest.phoneE164} requested arrival assistance.`
+            : cat === "early_checkin_request"
+              ? `${guest.fullName ?? guest.phoneE164} requested early check-in.`
+              : cat === "late_checkout_request"
+                ? `${guest.fullName ?? guest.phoneE164} requested late check-out.`
+                : cat === "special_request"
+                  ? `${guest.fullName ?? guest.phoneE164} sent a special request.`
+                  : cat === "payment_issue"
+                    ? `${guest.fullName ?? guest.phoneE164} reported a payment issue.`
+                    : cat === "booking_modification"
+                      ? `${guest.fullName ?? guest.phoneE164} requested a booking modification.`
+                      : cat === "cancellation_request"
+                        ? `${guest.fullName ?? guest.phoneE164} requested cancellation.`
+                        : cat === "refund_request"
+                          ? `${guest.fullName ?? guest.phoneE164} requested a refund.`
+                          : cat === "complaint"
+                            ? `${guest.fullName ?? guest.phoneE164} submitted a complaint.`
+                            : cat === "dissatisfaction"
+                              ? `${guest.fullName ?? guest.phoneE164} expressed dissatisfaction.`
+                              : cat === "escalation"
+                                ? `${guest.fullName ?? guest.phoneE164} escalated a concern.`
+                                : `${guest.fullName ?? guest.phoneE164} needs operational follow-up.`;
       await createRoleRoutedNotification({
         hotelId: hotel.id,
-        roles:
-          guestJourneyOperationalReply.category === "late_checkout_request"
-            ? [UserRole.FRONTDESK, UserRole.HOUSEKEEPING, UserRole.MANAGER, UserRole.STAFF]
-            : [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF],
+        roles: guestJourneyOperationalReply.staffFollowUpRoles ?? [
+          UserRole.FRONTDESK,
+          UserRole.MANAGER,
+          UserRole.STAFF
+        ],
         title: "Guest operational request needs follow-up",
-        body:
-          guestJourneyOperationalReply.category === "late_arrival"
-            ? `${guest.fullName ?? guest.phoneE164} reported a late arrival.`
-            : guestJourneyOperationalReply.category === "arrival_support_request"
-              ? `${guest.fullName ?? guest.phoneE164} requested arrival assistance.`
-              : guestJourneyOperationalReply.category === "early_checkin_request"
-                ? `${guest.fullName ?? guest.phoneE164} requested early check-in.`
-                : guestJourneyOperationalReply.category === "late_checkout_request"
-                  ? `${guest.fullName ?? guest.phoneE164} requested late check-out.`
-                  : `${guest.fullName ?? guest.phoneE164} sent a special request.`,
+        body: followBody,
         category: "messages",
-        severity: "high",
+        severity: cat === "escalation" || cat === "complaint" ? "critical" : "high",
         link: `/admin/conversations/${encodeURIComponent(conversation.id)}`,
         sourceType: "CONVERSATION_MESSAGE_INBOUND",
         sourceId: conversation.id,
