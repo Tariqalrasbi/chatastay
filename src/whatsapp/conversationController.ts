@@ -442,9 +442,12 @@ function isBookingSummaryReturnText(text: string): boolean {
     t === "booking summary" ||
     t === "final confirmation" ||
     t === "return to summary" ||
-    t === "resume booking" ||
-    t === "confirm"
+    t === "resume booking"
   );
+}
+
+function isQuoteConfirmActionText(text: string): boolean {
+  return /^(yes|y|confirm|confirm_booking|book|ok|okay|proceed|sure)$/i.test(text.trim());
 }
 
 /** Parse a non-negative integer from message (e.g. "2", "0", "3 adults") for structured booking steps. */
@@ -2218,6 +2221,137 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     });
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  const quoteConfirmAction = isQuoteConfirmActionText(input.text);
+  if (conversationMode === "BOOKING_MODE" && quoteConfirmAction) {
+    const confirmActionKey = `${conversation.id}:${normalizeText(input.text)}:${input.messageId}`;
+    console.info(
+      "[booking.quote_confirm.incoming]",
+      JSON.stringify({
+        conversationId: conversation.id,
+        guestId: guest.id,
+        messageId: input.messageId,
+        payload: input.text,
+        currentState,
+        awaitingGuestName: Boolean(persisted.awaitingGuestName),
+        bookingStep: persisted.bookingStep ?? null
+      })
+    );
+    const stateAllowsConfirm = currentState === "quoted" || currentState === "awaiting_confirmation";
+    const alreadyHandled =
+      persisted.quoteConfirmedActionKey === confirmActionKey ||
+      Boolean(persisted.awaitingGuestName) ||
+      currentState === "confirmed" ||
+      conversation.state === DbConversationState.CONFIRMED;
+    if (!stateAllowsConfirm || alreadyHandled) {
+      const duplicateBody = persisted.awaitingGuestName
+        ? "We already received your confirmation. Please share the full guest name for the reservation."
+        : "Your booking confirmation is already in progress.";
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: duplicateBody,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: duplicateBody,
+          aiIntent: "BOOKING_QUOTE_CONFIRM_DUPLICATE_IGNORED",
+          aiConfidence: 0.96
+        }
+      });
+      console.info(
+        "[booking.quote_confirm.ignored]",
+        JSON.stringify({
+          conversationId: conversation.id,
+          messageId: input.messageId,
+          duplicateIgnored: true,
+          reason: !stateAllowsConfirm ? "state_not_confirmable" : "already_handled",
+          currentState
+        })
+      );
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId: conversation.id,
+      phoneE164: normalizedPhone,
+      state: {
+        language: persisted.language || "en",
+        stage: "awaiting_confirmation",
+        lastActivityAt: new Date().toISOString(),
+        conversationMode: "BOOKING_MODE",
+        awaitingGuestName: true,
+        quoteConfirmedAt: new Date().toISOString(),
+        quoteConfirmedActionKey: confirmActionKey,
+        awaitingBookingLookup: false,
+        myBookingCandidateIds: persisted.myBookingCandidateIds,
+        phoneNumberId: hotel.phoneNumberId,
+        checkIn: persisted.checkIn,
+        checkOut: persisted.checkOut,
+        checkInOptions: persisted.checkInOptions,
+        checkOutOptions: persisted.checkOutOptions,
+        manualCheckInDate: persisted.manualCheckInDate,
+        manualCheckOutDate: persisted.manualCheckOutDate,
+        guestCount: persisted.guestCount,
+        roomCount: persisted.roomCount,
+        capacityPickRoomTypes: persisted.capacityPickRoomTypes,
+        adultCount: persisted.adultCount,
+        childCount: persisted.childCount,
+        bookingRoomOffers: persisted.bookingRoomOffers,
+        suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+        suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+        suggestedPropertyId: persisted.suggestedPropertyId,
+        nightlyRate: persisted.nightlyRate,
+        nights: persisted.nights,
+        totalAmount: persisted.totalAmount,
+        bookingMealPlanCode: persisted.bookingMealPlanCode,
+        fbCartDraft: persisted.fbCartDraft,
+        pendingPrebookOrder: persisted.pendingPrebookOrder,
+        bookingFlowReturn: persisted.bookingFlowReturn,
+        bookingStep: undefined
+      }
+    });
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { state: DbConversationState.QUOTED, lastMessageAt: new Date() }
+    });
+    const nextStepBody = "Great! Please share the full guest name for the reservation.";
+    await sendWhatsAppText({
+      to: normalizedPhone,
+      body: nextStepBody,
+      phoneNumberId: hotel.phoneNumberId,
+      conversationId: conversation.id
+    });
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: nextStepBody,
+        aiIntent: "BOOKING_QUOTE_CONFIRMED_NEXT_GUEST_NAME",
+        aiConfidence: 0.98
+      }
+    });
+    console.info(
+      "[booking.quote_confirm.processed]",
+      JSON.stringify({
+        conversationId: conversation.id,
+        messageId: input.messageId,
+        stateBefore: currentState,
+        stateAfter: "awaiting_confirmation",
+        nextStep: "await_guest_name",
+        duplicateIgnored: false
+      })
+    );
     return;
   }
 

@@ -22,6 +22,8 @@ export type PersistentSessionState = {
   lastActivityAt?: string;
   conversationMode?: ConversationMode;
   awaitingGuestName?: boolean;
+  quoteConfirmedAt?: string;
+  quoteConfirmedActionKey?: string;
   awaitingBookingLookup?: boolean;
   myBookingCandidateIds?: string[];
   /** Current step in structured booking flow; when set, bot collects adults → children → room-type pick → checkin → checkout then shows room choices. */
@@ -130,6 +132,9 @@ export async function loadConversationSession(params: {
     lastActivityAt: persistedLastActivityRaw ?? persisted.updatedAt.toISOString(),
     conversationMode: (metadata.conversationMode as ConversationMode) || "IDLE",
     awaitingGuestName: Boolean(metadata.awaitingGuestName),
+    quoteConfirmedAt: typeof metadata.quoteConfirmedAt === "string" ? metadata.quoteConfirmedAt : undefined,
+    quoteConfirmedActionKey:
+      typeof metadata.quoteConfirmedActionKey === "string" ? metadata.quoteConfirmedActionKey : undefined,
     awaitingBookingLookup: Boolean(metadata.awaitingBookingLookup),
     myBookingCandidateIds: Array.isArray(metadata.myBookingCandidateIds)
       ? (metadata.myBookingCandidateIds as string[]).filter((x): x is string => typeof x === "string")
