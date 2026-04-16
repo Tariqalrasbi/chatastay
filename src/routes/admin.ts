@@ -172,6 +172,7 @@ type AdminSession = {
   email: string;
   role: string;
   permissions: PermissionMatrix;
+  activePropertyId?: string | null;
 };
 
 const activeSessions = new Map<string, AdminSession>();
@@ -188,6 +189,7 @@ const staffLoginRateLimitWindowMs = 10 * 60 * 1000;
 const staffLoginRateLimitMaxFailures = 8;
 const staffLoginFailures = new Map<string, number[]>();
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+const platformHotelSlug = "al-ashkhara-beach-resort";
 
 function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -231,6 +233,32 @@ async function uniquePropertyCode(hotelId: string, baseName: string): Promise<st
     if (!existing) return code;
   }
   return `PROP${Date.now().toString(36).toUpperCase().slice(-6)}`;
+}
+
+async function getPlatformHotelBase(): Promise<{ id: string; displayName?: string | null } | null> {
+  return prisma.hotel.findUnique({ where: { slug: platformHotelSlug }, select: { id: true, displayName: true } });
+}
+
+async function resolveActivePropertyIdForHotel(req: Request, hotelId: string): Promise<string | null> {
+  const session = getSession(req);
+  const properties = await prisma.property.findMany({
+    where: { hotelId },
+    select: { id: true },
+    orderBy: { createdAt: "asc" }
+  });
+  if (!properties.length) return null;
+  const validIds = new Set(properties.map((p) => p.id));
+  const queryPropertyId = typeof req.query.propertyId === "string" ? req.query.propertyId.trim() : "";
+  if (queryPropertyId && validIds.has(queryPropertyId)) {
+    if (session) session.activePropertyId = queryPropertyId;
+    return queryPropertyId;
+  }
+  if (session?.activePropertyId && validIds.has(session.activePropertyId)) {
+    return session.activePropertyId;
+  }
+  const fallback = properties[0].id;
+  if (session) session.activePropertyId = fallback;
+  return fallback;
 }
 
 function toMinorUnits(amount: number, currency: string): number {
@@ -892,7 +920,7 @@ function renderLayout(content: string, authenticated: boolean): string {
         ].join("")
     : '<a href="/admin/login">Login</a>';
   const logoutHtml = authenticated
-    ? '<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>'
+    ? '<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>'
     : "";
   const sectionTabsHtml = authenticated
     ? isFrontdesk
@@ -988,7 +1016,85 @@ function renderLayout(content: string, authenticated: boolean): string {
     .replace("{{sectionTabs}}", sectionTabsHtml)
     .replace("{{logoutAction}}", logoutHtml)
     .replace("{{content}}", content)
-    .replace("{{extraScripts}}", authenticated ? getAdminLiveScript() + getAdminNotificationScript() : "");
+    .replace(
+      "{{extraScripts}}",
+      authenticated ? getAdminLiveScript() + getAdminNotificationScript() + getAdminPropertySwitcherScript() : ""
+    );
+}
+
+function getAdminPropertySwitcherScript(): string {
+  return `<script>
+(function () {
+  var host = document.getElementById("adminPropertySwitchHost");
+  var select = document.getElementById("adminPropertySwitch");
+  if (!host || !select) return;
+  var currentPropertyId = "";
+
+  function withPropertyId(url) {
+    try {
+      var u = new URL(url, window.location.origin);
+      if (currentPropertyId) u.searchParams.set("propertyId", currentPropertyId);
+      return u.pathname + u.search + u.hash;
+    } catch {
+      return url;
+    }
+  }
+
+  function decorateLinksAndForms() {
+    if (!currentPropertyId) return;
+    document.querySelectorAll('a[href^="/admin/"]').forEach(function (a) {
+      var href = a.getAttribute("href");
+      if (!href || href.includes("propertyId=")) return;
+      a.setAttribute("href", withPropertyId(href));
+    });
+    document.querySelectorAll('form[method="get"]').forEach(function (f) {
+      var input = f.querySelector('input[name="propertyId"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.setAttribute("type", "hidden");
+        input.setAttribute("name", "propertyId");
+        f.appendChild(input);
+      }
+      input.value = currentPropertyId;
+    });
+  }
+
+  fetch("/auth/property-context", { credentials: "same-origin", headers: { Accept: "application/json" } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (data) {
+      if (!data || !data.ok || !Array.isArray(data.properties) || data.properties.length <= 1) {
+        return;
+      }
+      currentPropertyId = typeof data.activePropertyId === "string" ? data.activePropertyId : "";
+      data.properties.forEach(function (p) {
+        if (!p || typeof p.id !== "string") return;
+        var opt = document.createElement("option");
+        opt.value = p.id;
+        var subtitle = p.city ? " (" + p.city + ")" : "";
+        opt.textContent = (p.name || "Property") + subtitle;
+        if (p.id === currentPropertyId) opt.selected = true;
+        select.appendChild(opt);
+      });
+      host.style.display = "inline-flex";
+      decorateLinksAndForms();
+      select.addEventListener("change", function () {
+        var nextId = String(select.value || "").trim();
+        if (!nextId) return;
+        fetch("/auth/property-context", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ propertyId: nextId })
+        }).finally(function () {
+          var u = new URL(window.location.href);
+          u.searchParams.set("propertyId", nextId);
+          window.location.assign(u.toString());
+        });
+      });
+    })
+    .catch(function () {});
+})();
+</script>`;
 }
 
 function renderHkLayout(params: { title: string; content: string; active: "tasks" | "board" }): string {
@@ -2904,6 +3010,59 @@ authRouter.post("/notifications/read-all", async (req, res) => {
   res.json({ ok: true, updatedCount });
 });
 
+authRouter.get("/property-context", async (req, res) => {
+  const session = getSession(req);
+  if (!session) {
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  const hotel = await getPlatformHotelBase();
+  if (!hotel) {
+    res.status(404).json({ ok: false, error: "hotel_not_found" });
+    return;
+  }
+  const properties = await prisma.property.findMany({
+    where: { hotelId: hotel.id },
+    select: { id: true, name: true, city: true },
+    orderBy: { createdAt: "asc" }
+  });
+  const validIds = new Set(properties.map((p) => p.id));
+  let activePropertyId = session.activePropertyId ?? null;
+  if (!activePropertyId || !validIds.has(activePropertyId)) {
+    activePropertyId = properties[0]?.id ?? null;
+    session.activePropertyId = activePropertyId;
+  }
+  res.json({ ok: true, activePropertyId, properties });
+});
+
+authRouter.post("/property-context", async (req, res) => {
+  const session = getSession(req);
+  if (!session) {
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  const propertyId = String(req.body?.propertyId ?? "").trim();
+  if (!propertyId) {
+    res.status(400).json({ ok: false, error: "missing_property_id" });
+    return;
+  }
+  const hotel = await getPlatformHotelBase();
+  if (!hotel) {
+    res.status(404).json({ ok: false, error: "hotel_not_found" });
+    return;
+  }
+  const property = await prisma.property.findFirst({
+    where: { id: propertyId, hotelId: hotel.id },
+    select: { id: true }
+  });
+  if (!property) {
+    res.status(400).json({ ok: false, error: "invalid_property" });
+    return;
+  }
+  session.activePropertyId = property.id;
+  res.json({ ok: true, activePropertyId: property.id });
+});
+
 adminRouter.post("/logout", (req, res) => {
   const token = getSessionToken(req);
   if (token) activeSessions.delete(token);
@@ -3120,7 +3279,7 @@ adminRouter.get("/dashboard", requireAuth, (_req, res) => {
 
 adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: "al-ashkhara-beach-resort" },
+    where: { slug: platformHotelSlug },
     select: { id: true, displayName: true }
   });
   if (!hotel) {
@@ -3129,7 +3288,8 @@ adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   }
   const qDays = parseInt(String(req.query.days ?? "30"), 10);
   const days = Number.isFinite(qDays) ? Math.max(7, Math.min(120, qDays)) : 30;
-  const summary = await loadDecisionAnalyticsSummary({ hotelId: hotel.id, days });
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const summary = await loadDecisionAnalyticsSummary({ hotelId: hotel.id, propertyId: activePropertyId ?? undefined, days });
   const pretty = escapeHtml(JSON.stringify(summary, null, 2));
   const content = `
 <h2>Decision analytics</h2>
@@ -9967,12 +10127,13 @@ adminRouter.post("/guests/:guestId", requirePermission("BOOKINGS", "EDIT"), asyn
 });
 
 adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: platformHotelSlug } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Bookings</h2><p>No hotel data found.</p>", true));
     return;
   }
 
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
   const now = startOfDay(new Date());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const defaultEndInclusive = defaultBookingReportInclusiveEnd(now);
@@ -10008,6 +10169,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   const bookings = await prisma.booking.findMany({
     where: {
       hotelId: hotel.id,
+      ...(activePropertyId ? { propertyId: activePropertyId } : {}),
       checkIn: { gte: start, lt: endExclusive },
       ...(selectedStatus ? { status: selectedStatus } : {}),
       ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
@@ -10017,7 +10179,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   });
 
   const conversationsCount = await prisma.conversation.count({
-    where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } }
+    where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } }
   });
 
   const revenue = bookings.reduce((sum, booking) => sum + booking.totalAmount, 0);
@@ -10109,11 +10271,12 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
 });
 
 adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, currency: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: platformHotelSlug }, select: { id: true, currency: true } });
   if (!hotel) {
     res.status(404).send("Hotel not found");
     return;
   }
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
   const now = startOfDay(new Date());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const defaultEndInclusive = defaultBookingReportInclusiveEnd(now);
@@ -10146,6 +10309,7 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
   const bookings = await prisma.booking.findMany({
     where: {
       hotelId: hotel.id,
+      ...(activePropertyId ? { propertyId: activePropertyId } : {}),
       checkIn: { gte: start, lt: endExclusive },
       ...(selectedStatus ? { status: selectedStatus } : {}),
       ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
@@ -10503,7 +10667,7 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
 
 adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: "al-ashkhara-beach-resort" },
+    where: { slug: platformHotelSlug },
     include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
   });
   if (!hotel) {
@@ -10511,6 +10675,7 @@ adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (
     return;
   }
 
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
   const now = startOfDay(new Date());
   const defaultStart = addDays(now, -29);
   const defaultEnd = now;
@@ -10521,16 +10686,16 @@ adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (
 
   const [bookings, conversations, messages] = await Promise.all([
     prisma.booking.findMany({
-      where: { hotelId: hotel.id, checkIn: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), checkIn: { gte: start, lt: endExclusive } },
       include: { roomType: true },
       orderBy: { checkIn: "asc" }
     }),
     prisma.conversation.findMany({
-      where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     }),
     prisma.message.findMany({
-      where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     })
   ]);
@@ -14393,12 +14558,13 @@ adminRouter.get(
 );
 
 adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: platformHotelSlug } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Conversations</h2><p>No hotel data found.</p>", true));
     return;
   }
 
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
   const now = startOfDay(new Date());
   const defaultStart = addDays(now, -30);
   const defaultEnd = now;
@@ -14422,6 +14588,7 @@ adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), as
   const conversations = await prisma.conversation.findMany({
     where: {
       hotelId: hotel.id,
+      ...(activePropertyId ? { propertyId: activePropertyId } : {}),
       createdAt: { gte: start, lt: endExclusive },
       ...(selectedState ? { state: selectedState } : {})
     },
@@ -15544,15 +15711,16 @@ adminRouter.post("/integrations/booking-com/prepare-sync", requireAuth, async (r
 
 adminRouter.get("/setup", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
-    include: { properties: { orderBy: { createdAt: "asc" }, take: 1 } }
+    where: { slug: platformHotelSlug },
+    include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Setup</h2><p>No hotel data found.</p>", true));
     return;
   }
 
-  const property = hotel.properties[0] ?? null;
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const property = hotel.properties.find((p) => p.id === activePropertyId) ?? hotel.properties[0] ?? null;
   const config = loadPartnerSetupConfig(hotel.id);
   const updatedNotice = req.query.updated ? '<p class="badge ok">Setup updated.</p>' : "";
   const sentNotice = req.query.sent ? '<p class="badge ok">Test template sent to WhatsApp successfully.</p>' : "";
@@ -15794,8 +15962,8 @@ ${errorNotice}
 
 adminRouter.post("/setup", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
-    include: { properties: { orderBy: { createdAt: "asc" }, take: 1 } }
+    where: { slug: platformHotelSlug },
+    include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
     res.redirect("/admin/dashboard");
@@ -15892,8 +16060,8 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
 
 adminRouter.post("/setup/send-test", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
-    include: { properties: { orderBy: { createdAt: "asc" }, take: 1 } }
+    where: { slug: platformHotelSlug },
+    include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
     res.redirect("/admin/dashboard");
@@ -15909,7 +16077,8 @@ adminRouter.post("/setup/send-test", requireAuth, async (req, res) => {
   }
 
   const config = loadPartnerSetupConfig(hotel.id);
-  const property = hotel.properties[0];
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const property = hotel.properties.find((p) => p.id === activePropertyId) ?? hotel.properties[0];
   const guestName = String(req.body.guestName ?? "").trim() || "Test Guest";
   const roomType = String(req.body.roomType ?? "").trim() || "Suite";
   const checkIn = formatDate(parseDateInput(req.body.checkIn, addDays(startOfDay(new Date()), 3)));
