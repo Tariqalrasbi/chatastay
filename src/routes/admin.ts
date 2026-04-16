@@ -44,7 +44,11 @@ import {
   markAllNotificationsRead,
   markNotificationRead
 } from "../core/notifications";
-import { loadDecisionAnalyticsSummary, trackDecisionEventSafe } from "../core/decisionAnalytics";
+import {
+  loadDecisionAnalyticsCrossPropertySummary,
+  loadDecisionAnalyticsSummary,
+  trackDecisionEventSafe
+} from "../core/decisionAnalytics";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -190,6 +194,7 @@ const staffLoginRateLimitMaxFailures = 8;
 const staffLoginFailures = new Map<string, number[]>();
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
 const platformHotelSlug = "al-ashkhara-beach-resort";
+const allPropertiesKey = "ALL";
 
 function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -239,6 +244,10 @@ async function getPlatformHotelBase(): Promise<{ id: string; displayName?: strin
   return prisma.hotel.findUnique({ where: { slug: platformHotelSlug }, select: { id: true, displayName: true } });
 }
 
+function isScopedPropertyId(propertyId: string | null | undefined): propertyId is string {
+  return Boolean(propertyId && propertyId !== allPropertiesKey);
+}
+
 async function resolveActivePropertyIdForHotel(req: Request, hotelId: string): Promise<string | null> {
   const session = getSession(req);
   const properties = await prisma.property.findMany({
@@ -249,12 +258,19 @@ async function resolveActivePropertyIdForHotel(req: Request, hotelId: string): P
   if (!properties.length) return null;
   const validIds = new Set(properties.map((p) => p.id));
   const queryPropertyId = typeof req.query.propertyId === "string" ? req.query.propertyId.trim() : "";
+  if (queryPropertyId === allPropertiesKey && properties.length > 1) {
+    if (session) session.activePropertyId = allPropertiesKey;
+    return allPropertiesKey;
+  }
   if (queryPropertyId && validIds.has(queryPropertyId)) {
     if (session) session.activePropertyId = queryPropertyId;
     return queryPropertyId;
   }
   if (session?.activePropertyId && validIds.has(session.activePropertyId)) {
     return session.activePropertyId;
+  }
+  if (session?.activePropertyId === allPropertiesKey && properties.length > 1) {
+    return allPropertiesKey;
   }
   const fallback = properties[0].id;
   if (session) session.activePropertyId = fallback;
@@ -1066,6 +1082,11 @@ function getAdminPropertySwitcherScript(): string {
         return;
       }
       currentPropertyId = typeof data.activePropertyId === "string" ? data.activePropertyId : "";
+      var allOpt = document.createElement("option");
+      allOpt.value = "ALL";
+      allOpt.textContent = "All Properties";
+      if (currentPropertyId === "ALL") allOpt.selected = true;
+      select.appendChild(allOpt);
       data.properties.forEach(function (p) {
         if (!p || typeof p.id !== "string") return;
         var opt = document.createElement("option");
@@ -3028,6 +3049,10 @@ authRouter.get("/property-context", async (req, res) => {
   });
   const validIds = new Set(properties.map((p) => p.id));
   let activePropertyId = session.activePropertyId ?? null;
+  if (activePropertyId === allPropertiesKey && properties.length > 1) {
+    res.json({ ok: true, activePropertyId, properties });
+    return;
+  }
   if (!activePropertyId || !validIds.has(activePropertyId)) {
     activePropertyId = properties[0]?.id ?? null;
     session.activePropertyId = activePropertyId;
@@ -3050,6 +3075,14 @@ authRouter.post("/property-context", async (req, res) => {
   if (!hotel) {
     res.status(404).json({ ok: false, error: "hotel_not_found" });
     return;
+  }
+  if (propertyId === allPropertiesKey) {
+    const propertyCount = await prisma.property.count({ where: { hotelId: hotel.id } });
+    if (propertyCount > 1) {
+      session.activePropertyId = allPropertiesKey;
+      res.json({ ok: true, activePropertyId: allPropertiesKey });
+      return;
+    }
   }
   const property = await prisma.property.findFirst({
     where: { id: propertyId, hotelId: hotel.id },
@@ -3280,7 +3313,7 @@ adminRouter.get("/dashboard", requireAuth, (_req, res) => {
 adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
     where: { slug: platformHotelSlug },
-    select: { id: true, displayName: true }
+    select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Decision analytics</h2><p>No hotel data found.</p>", true));
@@ -3289,16 +3322,96 @@ adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   const qDays = parseInt(String(req.query.days ?? "30"), 10);
   const days = Number.isFinite(qDays) ? Math.max(7, Math.min(120, qDays)) : 30;
   const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
-  const summary = await loadDecisionAnalyticsSummary({ hotelId: hotel.id, propertyId: activePropertyId ?? undefined, days });
+  const isAllPropertiesMode = activePropertyId === allPropertiesKey;
+  if (isAllPropertiesMode) {
+    const cross = await loadDecisionAnalyticsCrossPropertySummary({ hotelId: hotel.id, days });
+    const breakdownRows = cross.perProperty
+      .map(
+        (p) => `<tr>
+<td><a class="inline-link" href="/admin/analytics/decision?days=${days}&propertyId=${encodeURIComponent(p.propertyId)}">${escapeHtml(p.propertyName)}</a><div class="muted" style="font-size:11px">${escapeHtml(p.propertyCity ?? "—")}</div></td>
+<td>${p.bookingsTotal}</td>
+<td>${formatMoney(p.revenue, hotel.currency)}</td>
+<td>${formatMoney(p.commission, hotel.currency)}</td>
+<td>${formatMoney(p.avgBookingValue, hotel.currency)}</td>
+<td>${p.summary.metrics.bookingConversionRatePct.toFixed(2)}%</td>
+<td>${p.summary.metrics.upsellAcceptanceRatePct.toFixed(2)}%</td>
+</tr>`
+      )
+      .join("");
+    const content = `
+<h2>Decision analytics</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — aggregated owner view across all properties.</p>
+<div class="actions">
+  <a class="btn-link" href="/admin/profile">Back to profile</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=30&propertyId=ALL">30 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=60&propertyId=ALL">60 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=90&propertyId=ALL">90 days</a>
+</div>
+<div class="grid-4">
+  <article class="stat"><h3>Total bookings</h3><p>${cross.totals.bookingsTotal}</p></article>
+  <article class="stat"><h3>Total revenue</h3><p>${formatMoney(cross.totals.revenue, hotel.currency)}</p></article>
+  <article class="stat"><h3>Total commission</h3><p>${formatMoney(cross.totals.commission, hotel.currency)}</p></article>
+  <article class="stat"><h3>Avg booking value</h3><p>${formatMoney(cross.totals.avgBookingValue, hotel.currency)}</p></article>
+  <article class="stat"><h3>Conversion rate</h3><p>${cross.aggregate.metrics.bookingConversionRatePct.toFixed(2)}%</p></article>
+  <article class="stat"><h3>Abandonment rate</h3><p>${cross.aggregate.metrics.abandonmentRatePct.toFixed(2)}%</p></article>
+  <article class="stat"><h3>Upsell acceptance</h3><p>${cross.aggregate.metrics.upsellAcceptanceRatePct.toFixed(2)}%</p></article>
+  <article class="stat"><h3>Follow-up conversion</h3><p>${cross.aggregate.metrics.followupConversionRatePct.toFixed(2)}%</p></article>
+</div>
+<section style="margin:16px 0; max-width:1100px">
+  <h3>Property drill-down</h3>
+  <table>
+    <thead><tr><th>Property</th><th>Bookings</th><th>Revenue</th><th>Commission</th><th>Avg booking</th><th>Conversion</th><th>Upsell acceptance</th></tr></thead>
+    <tbody>${breakdownRows || '<tr><td colspan="7">No property data.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:980px">
+  <h3 style="margin-top:0">Aggregated decision summary (${days} days)</h3>
+  <pre style="white-space:pre-wrap; font-size:12px; line-height:1.5; background:#f6f8fa; padding:12px; border-radius:10px; border:1px solid var(--border)">${escapeHtml(JSON.stringify(cross.aggregate, null, 2))}</pre>
+</section>`;
+    res.type("html").send(renderLayout(content, true));
+    return;
+  }
+  const summary = await loadDecisionAnalyticsSummary({
+    hotelId: hotel.id,
+    propertyId: isScopedPropertyId(activePropertyId) ? activePropertyId : undefined,
+    days
+  });
+  const bookingRevenueAgg = await prisma.booking.aggregate({
+    where: {
+      hotelId: hotel.id,
+      ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
+      createdAt: { gte: startOfDay(new Date(Date.now() - days * 24 * 60 * 60 * 1000)) }
+    },
+    _sum: { totalAmount: true },
+    _avg: { totalAmount: true }
+  });
+  const bookingCount = await prisma.booking.count({
+    where: {
+      hotelId: hotel.id,
+      ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
+      createdAt: { gte: startOfDay(new Date(Date.now() - days * 24 * 60 * 60 * 1000)) }
+    }
+  });
+  const estimatedCommission = (bookingRevenueAgg._sum?.totalAmount ?? 0) * 0;
   const pretty = escapeHtml(JSON.stringify(summary, null, 2));
   const content = `
 <h2>Decision analytics</h2>
 <p class="muted">${escapeHtml(hotel.displayName)} — lightweight event tracking and derived insights for WhatsApp conversion, upsell, support, and follow-ups.</p>
 <div class="actions">
   <a class="btn-link" href="/admin/profile">Back to profile</a>
-  <a class="btn-link" href="/admin/analytics/decision?days=30">30 days</a>
-  <a class="btn-link" href="/admin/analytics/decision?days=60">60 days</a>
-  <a class="btn-link" href="/admin/analytics/decision?days=90">90 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=30${isScopedPropertyId(activePropertyId) ? `&propertyId=${encodeURIComponent(activePropertyId)}` : ""}">30 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=60${isScopedPropertyId(activePropertyId) ? `&propertyId=${encodeURIComponent(activePropertyId)}` : ""}">60 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=90${isScopedPropertyId(activePropertyId) ? `&propertyId=${encodeURIComponent(activePropertyId)}` : ""}">90 days</a>
+</div>
+<div class="grid-4">
+  <article class="stat"><h3>Total bookings</h3><p>${bookingCount}</p></article>
+  <article class="stat"><h3>Total revenue</h3><p>${formatMoney(bookingRevenueAgg._sum?.totalAmount ?? 0, hotel.currency)}</p></article>
+  <article class="stat"><h3>Total commission</h3><p>${formatMoney(estimatedCommission, hotel.currency)}</p></article>
+  <article class="stat"><h3>Avg booking value</h3><p>${formatMoney(bookingRevenueAgg._avg?.totalAmount ?? 0, hotel.currency)}</p></article>
+  <article class="stat"><h3>Conversion rate</h3><p>${summary.metrics.bookingConversionRatePct.toFixed(2)}%</p></article>
+  <article class="stat"><h3>Abandonment rate</h3><p>${summary.metrics.abandonmentRatePct.toFixed(2)}%</p></article>
+  <article class="stat"><h3>Upsell acceptance</h3><p>${summary.metrics.upsellAcceptanceRatePct.toFixed(2)}%</p></article>
+  <article class="stat"><h3>Repeat guest rate</h3><p>${summary.metrics.repeatGuestRatePct.toFixed(2)}%</p></article>
 </div>
 <section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:980px">
   <h3 style="margin-top:0">Summary (${days} days)</h3>
@@ -10169,7 +10282,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   const bookings = await prisma.booking.findMany({
     where: {
       hotelId: hotel.id,
-      ...(activePropertyId ? { propertyId: activePropertyId } : {}),
+      ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
       checkIn: { gte: start, lt: endExclusive },
       ...(selectedStatus ? { status: selectedStatus } : {}),
       ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
@@ -10179,7 +10292,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   });
 
   const conversationsCount = await prisma.conversation.count({
-    where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } }
+    where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } }
   });
 
   const revenue = bookings.reduce((sum, booking) => sum + booking.totalAmount, 0);
@@ -10309,7 +10422,7 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
   const bookings = await prisma.booking.findMany({
     where: {
       hotelId: hotel.id,
-      ...(activePropertyId ? { propertyId: activePropertyId } : {}),
+      ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
       checkIn: { gte: start, lt: endExclusive },
       ...(selectedStatus ? { status: selectedStatus } : {}),
       ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
@@ -10686,16 +10799,16 @@ adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (
 
   const [bookings, conversations, messages] = await Promise.all([
     prisma.booking.findMany({
-      where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), checkIn: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), checkIn: { gte: start, lt: endExclusive } },
       include: { roomType: true },
       orderBy: { checkIn: "asc" }
     }),
     prisma.conversation.findMany({
-      where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     }),
     prisma.message.findMany({
-      where: { hotelId: hotel.id, ...(activePropertyId ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     })
   ]);
@@ -14588,7 +14701,7 @@ adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), as
   const conversations = await prisma.conversation.findMany({
     where: {
       hotelId: hotel.id,
-      ...(activePropertyId ? { propertyId: activePropertyId } : {}),
+      ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
       createdAt: { gte: start, lt: endExclusive },
       ...(selectedState ? { state: selectedState } : {})
     },

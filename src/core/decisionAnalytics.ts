@@ -196,3 +196,94 @@ export async function loadDecisionAnalyticsSummary(params: {
     insights
   };
 }
+
+export async function loadDecisionAnalyticsCrossPropertySummary(params: {
+  hotelId: string;
+  days?: number;
+}): Promise<{
+  aggregate: Awaited<ReturnType<typeof loadDecisionAnalyticsSummary>>;
+  perProperty: Array<{
+    propertyId: string;
+    propertyName: string;
+    propertyCity: string | null;
+    summary: Awaited<ReturnType<typeof loadDecisionAnalyticsSummary>>;
+    revenue: number;
+    commission: number;
+    bookingsTotal: number;
+    confirmedBookings: number;
+    avgBookingValue: number;
+  }>;
+  totals: {
+    revenue: number;
+    commission: number;
+    bookingsTotal: number;
+    confirmedBookings: number;
+    avgBookingValue: number;
+  };
+}> {
+  const days = Math.max(1, Math.min(params.days ?? 30, 180));
+  const start = toDateFloor(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
+  const aggregate = await loadDecisionAnalyticsSummary({ hotelId: params.hotelId, days });
+  const properties = await prisma.property.findMany({
+    where: { hotelId: params.hotelId },
+    select: { id: true, name: true, city: true },
+    orderBy: { createdAt: "asc" }
+  });
+  const perProperty = await Promise.all(
+    properties.map(async (property) => {
+      const summary = await loadDecisionAnalyticsSummary({
+        hotelId: params.hotelId,
+        propertyId: property.id,
+        days
+      });
+      const bookingAgg = await prisma.booking.aggregate({
+        where: {
+          hotelId: params.hotelId,
+          propertyId: property.id,
+          createdAt: { gte: start }
+        },
+        _sum: { totalAmount: true },
+        _avg: { totalAmount: true }
+      });
+      const bookingsTotal = await prisma.booking.count({
+        where: {
+          hotelId: params.hotelId,
+          propertyId: property.id,
+          createdAt: { gte: start }
+        }
+      });
+      const confirmedBookings = await prisma.booking.count({
+        where: {
+          hotelId: params.hotelId,
+          propertyId: property.id,
+          status: BookingStatus.CONFIRMED,
+          createdAt: { gte: start }
+        }
+      });
+      return {
+        propertyId: property.id,
+        propertyName: property.name,
+        propertyCity: property.city ?? null,
+        summary,
+        revenue: bookingAgg._sum?.totalAmount ?? 0,
+        // Dedicated commission field is not persisted yet; keep placeholder for owner dashboard consistency.
+        commission: 0,
+        bookingsTotal,
+        confirmedBookings,
+        avgBookingValue: Math.round(((bookingAgg._avg?.totalAmount ?? 0) as number) * 100) / 100
+      };
+    })
+  );
+  const totals = perProperty.reduce(
+    (acc, p) => {
+      acc.revenue += p.revenue;
+      acc.commission += p.commission;
+      acc.bookingsTotal += p.bookingsTotal;
+      acc.confirmedBookings += p.confirmedBookings;
+      return acc;
+    },
+    { revenue: 0, commission: 0, bookingsTotal: 0, confirmedBookings: 0, avgBookingValue: 0 }
+  );
+  totals.avgBookingValue = totals.bookingsTotal > 0 ? Math.round((totals.revenue / totals.bookingsTotal) * 100) / 100 : 0;
+  return { aggregate, perProperty, totals };
+}
