@@ -3117,8 +3117,8 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
 <p class="muted">Operational snapshot for ${escapeHtml(hotel.displayName)}.</p>
 <div class="actions">
   <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
-  <a class="btn-link" href="/admin/rooms">Rooms</a>
-  <a class="btn-link" href="/admin/room-board">Room board</a>
+  <a class="btn-link" href="/admin/room-board">Rooms</a>
+  <a class="btn-link" href="/admin/rooms">Room rates &amp; configuration</a>
 </div>
 
 <div class="grid-2">

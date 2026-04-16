@@ -1899,12 +1899,153 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
   if (
     conversationMode === "BOOKING_MODE" &&
-    !persisted.bookingStep &&
     isBookingSummaryReturnText(input.text) &&
-    (currentState === "quoted" || currentState === "awaiting_confirmation") &&
-    persisted.checkIn &&
-    persisted.checkOut
+    (currentState === "quoted" || currentState === "awaiting_confirmation")
   ) {
+    const hasSummaryPayload =
+      Boolean(persisted.checkIn && persisted.checkOut) &&
+      Boolean((persisted.suggestedRoomTypeName && persisted.suggestedRoomTypeName.trim()) || persisted.suggestedRoomTypeId) &&
+      typeof persisted.guestCount === "number" &&
+      persisted.guestCount > 0 &&
+      typeof persisted.totalAmount === "number" &&
+      Number.isFinite(persisted.totalAmount);
+    if (!hasSummaryPayload && persisted.bookingStep) {
+      const nearestStepByCurrent: Record<BookingStep, BookingStep> = {
+        adults: "adults",
+        children: "children",
+        capacity_room_pick: "capacity_room_pick",
+        rooms: "rooms",
+        checkin: "checkin",
+        checkout: "checkout",
+        room_choice: "room_choice",
+        meal_plan: "room_choice",
+        meal_prebook_prompt: "meal_plan"
+      };
+      const nearest = nearestStepByCurrent[persisted.bookingStep as BookingStep] ?? "adults";
+      const fallbackByStep: Record<BookingStep, string> = {
+        adults: "How many adults will be staying? (Reply with a number, e.g. 2)",
+        children: "How many children will be staying? (Reply with a number, e.g. 0 or 2)",
+        capacity_room_pick: "Please choose a room type from the list above (open the list and tap a row).",
+        rooms: "How many rooms do you need? (Reply with a number, e.g. 1 or 2)",
+        checkin: "Please choose your check-in date from the list above, or type it as YYYY-MM-DD.",
+        checkout: "Please choose your check-out date from the list above, or type it as YYYY-MM-DD.",
+        room_choice: "Please select one of the room options from the list above, or reply with the room name.",
+        meal_plan: "Please choose your meal package from the list above.",
+        meal_prebook_prompt: "Please tap *Yes, browse menu* or *No, continue* from the list above."
+      };
+      const friendlyBody =
+        "I can take you back to final confirmation once the booking details are complete. Let's continue from the nearest step.\n\n" +
+        fallbackByStep[nearest];
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: friendlyBody,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: friendlyBody,
+          aiIntent: "BOOKING_RETURN_TO_SUMMARY_INCOMPLETE",
+          aiConfidence: 0.93
+        }
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: {
+          language: persisted.language || "en",
+          stage: persisted.stage || "new",
+          lastActivityAt: new Date().toISOString(),
+          conversationMode: "BOOKING_MODE",
+          bookingStep: nearest,
+          awaitingGuestName: false,
+          awaitingBookingLookup: false,
+          myBookingCandidateIds: persisted.myBookingCandidateIds,
+          phoneNumberId: hotel.phoneNumberId,
+          checkIn: persisted.checkIn,
+          checkOut: persisted.checkOut,
+          checkInOptions: persisted.checkInOptions,
+          checkOutOptions: persisted.checkOutOptions,
+          manualCheckInDate: persisted.manualCheckInDate,
+          manualCheckOutDate: persisted.manualCheckOutDate,
+          guestCount: persisted.guestCount,
+          roomCount: persisted.roomCount,
+          capacityPickRoomTypes: persisted.capacityPickRoomTypes,
+          adultCount: persisted.adultCount,
+          childCount: persisted.childCount,
+          bookingRoomOffers: persisted.bookingRoomOffers,
+          suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+          suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+          suggestedPropertyId: persisted.suggestedPropertyId,
+          nightlyRate: persisted.nightlyRate,
+          nights: persisted.nights,
+          totalAmount: persisted.totalAmount,
+          bookingMealPlanCode: persisted.bookingMealPlanCode,
+          fbCartDraft: persisted.fbCartDraft,
+          pendingPrebookOrder: persisted.pendingPrebookOrder,
+          bookingFlowReturn: persisted.bookingFlowReturn
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (!hasSummaryPayload) {
+      // Keep existing behavior for non-step contexts when quote payload is not ready.
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: "I don't have a complete booking summary yet. Please continue with the booking details first.",
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (persisted.bookingStep) {
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: {
+          language: persisted.language || "en",
+          stage: persisted.stage || "new",
+          lastActivityAt: new Date().toISOString(),
+          conversationMode: "BOOKING_MODE",
+          bookingStep: undefined,
+          awaitingGuestName: false,
+          awaitingBookingLookup: false,
+          myBookingCandidateIds: persisted.myBookingCandidateIds,
+          phoneNumberId: hotel.phoneNumberId,
+          checkIn: persisted.checkIn,
+          checkOut: persisted.checkOut,
+          checkInOptions: persisted.checkInOptions,
+          checkOutOptions: persisted.checkOutOptions,
+          manualCheckInDate: persisted.manualCheckInDate,
+          manualCheckOutDate: persisted.manualCheckOutDate,
+          guestCount: persisted.guestCount,
+          roomCount: persisted.roomCount,
+          capacityPickRoomTypes: persisted.capacityPickRoomTypes,
+          adultCount: persisted.adultCount,
+          childCount: persisted.childCount,
+          bookingRoomOffers: persisted.bookingRoomOffers,
+          suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+          suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+          suggestedPropertyId: persisted.suggestedPropertyId,
+          nightlyRate: persisted.nightlyRate,
+          nights: persisted.nights,
+          totalAmount: persisted.totalAmount,
+          bookingMealPlanCode: persisted.bookingMealPlanCode,
+          fbCartDraft: persisted.fbCartDraft,
+          pendingPrebookOrder: persisted.pendingPrebookOrder,
+          bookingFlowReturn: persisted.bookingFlowReturn
+        }
+      });
+    }
     const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
     const children = persisted.childCount ?? 0;
     const nights = persisted.nights ?? 1;
