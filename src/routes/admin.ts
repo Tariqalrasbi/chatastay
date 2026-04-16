@@ -44,6 +44,7 @@ import {
   markAllNotificationsRead,
   markNotificationRead
 } from "../core/notifications";
+import { loadDecisionAnalyticsSummary } from "../core/decisionAnalytics";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -2893,6 +2894,35 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
 
 adminRouter.get("/dashboard", requireAuth, (_req, res) => {
   res.redirect("/admin/profile");
+});
+
+adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Decision analytics</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const qDays = parseInt(String(req.query.days ?? "30"), 10);
+  const days = Number.isFinite(qDays) ? Math.max(7, Math.min(120, qDays)) : 30;
+  const summary = await loadDecisionAnalyticsSummary({ hotelId: hotel.id, days });
+  const pretty = escapeHtml(JSON.stringify(summary, null, 2));
+  const content = `
+<h2>Decision analytics</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — lightweight event tracking and derived insights for WhatsApp conversion, upsell, support, and follow-ups.</p>
+<div class="actions">
+  <a class="btn-link" href="/admin/profile">Back to profile</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=30">30 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=60">60 days</a>
+  <a class="btn-link" href="/admin/analytics/decision?days=90">90 days</a>
+</div>
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:980px">
+  <h3 style="margin-top:0">Summary (${days} days)</h3>
+  <pre style="white-space:pre-wrap; font-size:12px; line-height:1.5; background:#f6f8fa; padding:12px; border-radius:10px; border:1px solid var(--border)">${pretty}</pre>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
 });
 
 adminRouter.get("/profile", requireAuth, async (req, res) => {

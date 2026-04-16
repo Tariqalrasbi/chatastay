@@ -9,6 +9,7 @@ import { mergeLightGuestMemoryFromConfirmedBooking } from "./lightGuestMemory";
 import { ensureActiveFolio } from "./folioService";
 import { addDays, findAvailableRoomType, startOfDay } from "./availability";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
+import { trackDecisionEventSafe } from "./decisionAnalytics";
 
 type OpsRoomStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
 
@@ -317,6 +318,59 @@ export async function createConfirmedBookingAtomic(params: {
     sourceId: bookingId,
     requiresAttention: true
   }).catch(() => undefined);
+
+  await trackDecisionEventSafe({
+    hotelId: params.hotelId,
+    eventType: "booking_completed",
+    guestId: params.guestId,
+    bookingId,
+    conversationId: params.conversationId,
+    source: "booking_service_confirm"
+  });
+  const confirmedCount = await prisma.booking.count({
+    where: { hotelId: params.hotelId, guestId: params.guestId, status: BookingStatus.CONFIRMED }
+  });
+  if (confirmedCount >= 2) {
+    await trackDecisionEventSafe({
+      hotelId: params.hotelId,
+      eventType: "repeat_booking",
+      guestId: params.guestId,
+      bookingId,
+      conversationId: params.conversationId,
+      source: "booking_service_confirm",
+      dedupeKey: `repeat_booking:${params.guestId}:${bookingId}`
+    });
+    await trackDecisionEventSafe({
+      hotelId: params.hotelId,
+      eventType: "returning_guest",
+      guestId: params.guestId,
+      bookingId,
+      conversationId: params.conversationId,
+      source: "booking_service_confirm",
+      dedupeKey: `returning_guest:${params.guestId}:${bookingId}`
+    });
+  }
+  const followupSent = await prisma.guestFollowUp.findFirst({
+    where: {
+      hotelId: params.hotelId,
+      guestId: params.guestId,
+      status: "SENT",
+      sentAt: { gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) }
+    },
+    orderBy: { sentAt: "desc" },
+    select: { id: true }
+  });
+  if (followupSent) {
+    await trackDecisionEventSafe({
+      hotelId: params.hotelId,
+      eventType: "followup_converted",
+      guestId: params.guestId,
+      bookingId,
+      conversationId: params.conversationId,
+      source: "booking_after_followup",
+      dedupeKey: `followup_converted:${followupSent.id}:${bookingId}`
+    });
+  }
 
   return {
     bookingId,

@@ -3,6 +3,7 @@ import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { trySendWhatsAppText } from "../whatsapp/send";
 import { parseLightGuestMemory } from "../core/lightGuestMemory";
+import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 
 type FollowUpType =
   | "BOOKING_RECOVERY"
@@ -119,6 +120,14 @@ async function seedBookingRecovery(now: Date, recoveryDelayMs: number): Promise<
       dedupeKey,
       scheduledFor,
       payload: { sessionId: s.id }
+    });
+    await trackDecisionEventSafe({
+      hotelId: s.hotelId,
+      eventType: "booking_abandoned",
+      guestId: s.guestId,
+      conversationId: s.conversationId ?? undefined,
+      source: "followup_seed_booking_recovery",
+      dedupeKey: `booking_abandoned:${dedupeKey}`
     });
   }
 }
@@ -420,6 +429,16 @@ export async function runGuestAutoFollowupSweep(): Promise<{ scheduled: number; 
         }
       })
     ]);
+    await trackDecisionEventSafe({
+      hotelId: fu.hotelId,
+      eventType: "followup_sent",
+      guestId: fu.guestId,
+      bookingId: fu.bookingId ?? undefined,
+      conversationId: conversation.id,
+      source: "auto_followup_job",
+      dedupeKey: `followup_sent:${fu.id}`,
+      metadata: { followupType: fu.type }
+    });
     sent++;
   }
   return { scheduled: due.length, sent, skipped };

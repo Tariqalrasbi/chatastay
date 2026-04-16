@@ -15,6 +15,7 @@ import {
 } from "../core/lightGuestMemory";
 import { nextState, type ConversationEvent, type ConversationState } from "../core/stateMachine";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
+import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import {
   type BookingStep,
   type ConversationMode,
@@ -898,6 +899,13 @@ async function buildTurnResult(params: {
   const sessionRooms = typeof params.sessionData.roomCount === "number" ? params.sessionData.roomCount : 1;
 
   if (params.state === "new" && next === "collecting_dates") {
+    await trackDecisionEventSafe({
+      hotelId: params.hotelId,
+      eventType: "booking_started",
+      guestId: params.guestId,
+      conversationId: params.conversationId,
+      source: "whatsapp_conversation"
+    });
     return {
       nextState: next,
       conversationState: DbConversationState.NEW,

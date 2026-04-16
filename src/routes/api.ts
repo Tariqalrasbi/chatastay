@@ -8,6 +8,7 @@ import { handleIncomingWhatsAppMessage } from "../whatsapp/conversationControlle
 import { buildBookingInvoicePdf } from "../core/invoicePdf";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { sendWhatsAppDocument } from "../whatsapp/send";
+import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 
 export const apiRouter = Router();
 const defaultHotelSlug = "al-ashkhara-beach-resort";
@@ -150,6 +151,15 @@ async function applyPaymentStatus(
 
   if (!wasSucceeded && status === "SUCCEEDED" && paymentIntent.bookingId && paymentIntent.booking) {
     const booking = paymentIntent.booking;
+    await trackDecisionEventSafe({
+      hotelId: paymentIntent.hotelId,
+      eventType: "payment_completed",
+      guestId: booking.guestId,
+      bookingId: booking.id,
+      conversationId: booking.conversationId ?? undefined,
+      source: "stripe_webhook",
+      dedupeKey: `payment_completed:${paymentIntent.id}`
+    });
 
     try {
       await ensureActiveFolio(prisma, {

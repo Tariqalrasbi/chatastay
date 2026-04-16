@@ -5,6 +5,7 @@ import {
   mergeSpecialRequestSnippet,
   noteGuestComplaintInMemory
 } from "../core/lightGuestMemory";
+import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import { deriveCommerceTone, mapOperationalIntentToRole, rolePriority } from "./guestMessageOrchestration";
 
 const NOTIFY_TYPE = "GUEST_JOURNEY_REPLY";
@@ -214,6 +215,16 @@ function categoryToIntent(category: GuestOperationalIntentCategory): string {
   return "GUEST_ESCALATION";
 }
 
+function categoryToDecisionEvent(category: GuestOperationalIntentCategory): string | null {
+  if (category === "early_checkin_request") return "early_checkin_requested";
+  if (category === "late_checkout_request") return "late_checkout_requested";
+  if (category === "special_request") return "special_request";
+  if (category === "payment_issue") return "payment_issue";
+  if (category === "complaint" || category === "dissatisfaction") return "complaint";
+  if (category === "escalation") return "escalation";
+  return null;
+}
+
 function isArrivalFamilyCategory(category: GuestOperationalIntentCategory): boolean {
   return (
     category === "arrival_time_update" ||
@@ -359,6 +370,50 @@ export async function handleGuestJourneyInboundReply(params: {
   await Promise.all(memHooks).catch((err) =>
     console.error("[light-guest-memory] journey hook failed:", err instanceof Error ? err.message : String(err))
   );
+
+  if (category) {
+    const eventType = categoryToDecisionEvent(category);
+    if (eventType) {
+      await trackDecisionEventSafe({
+        hotelId: params.hotelId,
+        eventType: eventType as
+          | "early_checkin_requested"
+          | "late_checkout_requested"
+          | "special_request"
+          | "payment_issue"
+          | "complaint"
+          | "escalation",
+        guestId: params.guestId,
+        bookingId: booking.id,
+        conversationId: params.conversationId,
+        source: "journey_intent"
+      });
+    }
+  }
+  if (upsellMeta.upsellType) {
+    await trackDecisionEventSafe({
+      hotelId: params.hotelId,
+      eventType: "upsell_shown",
+      guestId: params.guestId,
+      bookingId: booking.id,
+      conversationId: params.conversationId,
+      source: "journey_upsell",
+      dedupeKey: `upsell_shown:${params.prismaMessageId}:${upsellMeta.upsellType}`,
+      metadata: { upsellType: upsellMeta.upsellType }
+    });
+    if (upsellMeta.guestResponse === "accepted" || upsellMeta.guestResponse === "ignored") {
+      await trackDecisionEventSafe({
+        hotelId: params.hotelId,
+        eventType: upsellMeta.guestResponse === "accepted" ? "upsell_accepted" : "upsell_ignored",
+        guestId: params.guestId,
+        bookingId: booking.id,
+        conversationId: params.conversationId,
+        source: "journey_upsell",
+        dedupeKey: `upsell_${upsellMeta.guestResponse}:${params.prismaMessageId}:${upsellMeta.upsellType}`,
+        metadata: { upsellType: upsellMeta.upsellType }
+      });
+    }
+  }
 
   return {
     matched: Boolean(category),
