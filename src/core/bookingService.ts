@@ -5,6 +5,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma } from "../db";
 import { createRoleRoutedNotification } from "./notifications";
 import { refreshGuestSegmentTagsForGuest } from "./guestSegmentation";
+import { mergeLightGuestMemoryFromConfirmedBooking } from "./lightGuestMemory";
 import { ensureActiveFolio } from "./folioService";
 import { addDays, findAvailableRoomType, startOfDay } from "./availability";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
@@ -293,6 +294,16 @@ export async function createConfirmedBookingAtomic(params: {
 
   await refreshGuestSegmentTagsForGuest(params.guestId).catch((err) =>
     console.error("[guest-segmentation] refresh after confirm failed:", err instanceof Error ? err.message : String(err))
+  );
+  await mergeLightGuestMemoryFromConfirmedBooking({
+    guestId: params.guestId,
+    roomTypeId: offer.roomTypeId,
+    roomTypeName: offer.roomTypeName,
+    nights: offer.nights,
+    totalAmount: offer.total,
+    checkOut: params.checkOut
+  }).catch((err) =>
+    console.error("[light-guest-memory] merge after confirm failed:", err instanceof Error ? err.message : String(err))
   );
   await createRoleRoutedNotification({
     hotelId: params.hotelId,

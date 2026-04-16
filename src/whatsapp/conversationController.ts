@@ -6,6 +6,13 @@ import { createConfirmedBookingAtomic } from "../core/bookingService";
 import { computeMealPlanSurchargeForStay, type MealPlanCode } from "../core/frontDeskPricing";
 import { createFbOrdersFromMenuLines } from "../core/fbFolio";
 import { mergeGuestProfileFromBooking } from "../core/guestProfile";
+import type { LightGuestMemory } from "../core/lightGuestMemory";
+import {
+  loadGuestMemoryContext,
+  mergeLightGuestMemorySpendingTouch,
+  recordWelcomeBackMenuShown,
+  shouldShowWelcomeBackLine
+} from "../core/lightGuestMemory";
 import { nextState, type ConversationEvent, type ConversationState } from "../core/stateMachine";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import {
@@ -63,14 +70,27 @@ type TurnResult = {
   responseList?: { buttonText: string; sections: Array<{ title: string; rows: Array<{ id: string; title: string }> }> };
 };
 
-function bookingStartPrompt(): string {
-  return [
+function bookingStartPrompt(opts?: { memory: LightGuestMemory; confirmedStayCount: number }): string {
+  const base = [
     "Great, I can help with your booking.",
     "Please share check-in, check-out, and guest count.",
     "Examples:",
     "- 2026-04-10 to 2026-04-12 for 2 guests",
     "- 2 guests from 10 April to 12 April"
-  ].join("\n");
+  ];
+  if (opts && opts.confirmedStayCount >= 1) {
+    const room = opts.memory.preferredRoomTypeName?.trim();
+    if (room && room.length > 2) {
+      base.splice(
+        1,
+        0,
+        `Welcome back — when you have dates, we can look for availability similar to ${room} if you would like that again.`
+      );
+    } else {
+      base.splice(1, 0, "Welcome back — we are happy to help with another stay.");
+    }
+  }
+  return base.join("\n");
 }
 
 function missingBookingDetailsPrompt(parsed: ReturnType<typeof parseGuestMessage>): string {
@@ -176,6 +196,24 @@ function buildMainMenuMessage(hotelName: string, lang: "ar" | "en"): string {
     "• Ask a question",
     "• Chat with a receptionist"
   ].join("\n");
+}
+
+/** Optional welcome-back line for returning guests (throttled in stored memory). */
+function personalizeMainMenuBodies(
+  hotelName: string,
+  lang: "ar" | "en",
+  ctx?: { memory: LightGuestMemory; confirmedStayCount: number }
+): { menuBody: string; fallbackBody: string; stampedWelcomeBack: boolean } {
+  const menuBody = getMainMenuBody(hotelName, lang);
+  const fallbackBody = buildMainMenuMessage(hotelName, lang);
+  if (!ctx || ctx.confirmedStayCount < 1 || !shouldShowWelcomeBackLine(ctx.memory)) {
+    return { menuBody, fallbackBody, stampedWelcomeBack: false };
+  }
+  const prefix =
+    lang === "ar"
+      ? "أهلاً بك من جديد — يسعدنا تواصلك معنا مجدداً.\n\n"
+      : "Welcome back — we're glad you're in touch with us again.\n\n";
+  return { menuBody: prefix + menuBody, fallbackBody: prefix + fallbackBody, stampedWelcomeBack: true };
 }
 
 const MENU_BUTTONS: Array<{ id: string; title: string }> = [
@@ -286,21 +324,49 @@ const BOOKING_SUBMENU_LIST = {
 };
 
 const BOOKING_NAV_HINT = "\n\nTip: reply *back* for the previous step, or *menu* for the main menu.";
-function getSmartUpsellTimingLine(params: { totalAmount?: number | null; nights?: number | null; checkIn?: string | null }): string {
+
+type UpsellMemoryCtx = {
+  memory: LightGuestMemory | null;
+  /** Softer upsell copy for true repeat guests */
+  repeatForSoftTone: boolean;
+};
+
+function getSmartUpsellTimingLine(
+  params: { totalAmount?: number | null; nights?: number | null; checkIn?: string | null },
+  upsellCtx?: UpsellMemoryCtx
+): string {
   const total = typeof params.totalAmount === "number" ? params.totalAmount : 0;
   const nights = typeof params.nights === "number" ? params.nights : 0;
+  const memory = upsellCtx?.memory ?? null;
+  const repeatSoft = Boolean(upsellCtx?.repeatForSoftTone);
   const checkInDays =
     params.checkIn && /^\d{4}-\d{2}-\d{2}$/.test(params.checkIn)
       ? Math.floor((new Date(`${params.checkIn}T12:00:00Z`).getTime() - Date.now()) / (24 * 60 * 60 * 1000))
       : null;
   if (total >= 220) {
+    if (memory?.hadComplaint) {
+      return "We have premium room options available that may suit you. Reply if you would like to explore upgrades — there is no rush.";
+    }
+    if (repeatSoft) {
+      return "We have premium upgrades available that may suit your past preferences. Let us know if you would like to explore options when convenient.";
+    }
     return "We currently have limited upgraded rooms available for your dates. Let us know if you would like to explore this option.";
   }
   if (checkInDays !== null && checkInDays >= -1 && checkInDays <= 4) {
+    const prefs = memory?.preferredActivities ?? [];
+    if (prefs.includes("dune_buggy") || prefs.includes("bbq")) {
+      return "We can arrange experiences you have enjoyed before — including dune buggy and BBQ options when you are ready. Let us know if you would like more details.";
+    }
     return "Many guests visiting during this period enjoy our dune buggy and BBQ experiences. Let us know if you would like more details.";
   }
   if (nights >= 3) {
+    if (repeatSoft) {
+      return "For longer stays like this, we can quietly arrange add-ons such as meals, extra beds, or transfers — reply if any would help.";
+    }
     return "Optional: For longer stays, we can arrange useful add-ons such as meals, extra beds, and transfers.";
+  }
+  if (repeatSoft) {
+    return "If helpful, we can share options for early check-in, late check-out, upgrades, or activities — reply whenever you like.";
   }
   return "Optional: We can also arrange paid early check-in, late check-out, room upgrades, add-ons, and activities. Reply here if you want details.";
 }
@@ -813,7 +879,15 @@ async function buildTurnResult(params: {
   guestId: string;
   conversationId: string;
   sessionData: Record<string, unknown>;
+  guestMemoryCtx?: { memory: LightGuestMemory; confirmedStayCount: number };
 }): Promise<TurnResult> {
+  const upsellMem: UpsellMemoryCtx | undefined = params.guestMemoryCtx
+    ? {
+        memory: params.guestMemoryCtx.memory,
+        repeatForSoftTone:
+          params.guestMemoryCtx.confirmedStayCount >= 2 || Boolean(params.guestMemoryCtx.memory.repeatGuest)
+      }
+    : undefined;
   const next = nextState(params.state, params.event);
   const parsed = parseGuestMessage(params.text);
   const sessionCheckIn = typeof params.sessionData.checkIn === "string" ? new Date(params.sessionData.checkIn) : undefined;
@@ -825,7 +899,11 @@ async function buildTurnResult(params: {
     return {
       nextState: next,
       conversationState: DbConversationState.NEW,
-      responseBody: bookingStartPrompt(),
+      responseBody: bookingStartPrompt(
+        params.guestMemoryCtx
+          ? { memory: params.guestMemoryCtx.memory, confirmedStayCount: params.guestMemoryCtx.confirmedStayCount }
+          : undefined
+      ),
       updateSession: { awaitingGuestName: false }
     };
   }
@@ -876,11 +954,14 @@ async function buildTurnResult(params: {
         `Nights: ${offer.nights}`,
         `Total price: ${offer.total.toFixed(2)} ${params.currency}`,
         "",
-        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
-          totalAmount: offer.total,
-          nights: offer.nights,
-          checkIn: checkIn.toISOString().slice(0, 10)
-        })}`
+        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+          {
+            totalAmount: offer.total,
+            nights: offer.nights,
+            checkIn: checkIn.toISOString().slice(0, 10)
+          },
+          upsellMem
+        )}`
       ].join("\n"),
       responseButtons: QUOTE_BUTTONS,
       updateSession: {
@@ -948,7 +1029,13 @@ async function buildTurnResult(params: {
     return {
       nextState: next,
       conversationState: DbConversationState.QUALIFYING,
-      responseBody: validation.ok ? bookingStartPrompt() : missingBookingDetailsPrompt(parsed),
+      responseBody: validation.ok
+        ? bookingStartPrompt(
+            params.guestMemoryCtx
+              ? { memory: params.guestMemoryCtx.memory, confirmedStayCount: params.guestMemoryCtx.confirmedStayCount }
+              : undefined
+          )
+        : missingBookingDetailsPrompt(parsed),
       responseList: onlyGuestsMissing ? GUEST_COUNT_LIST : undefined,
       updateSession: { awaitingGuestName: false }
     };
@@ -979,6 +1066,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     update: {},
     create: { hotelId: hotel.id, phoneE164: normalizedPhone }
   });
+  const guestMemoryBundle = await loadGuestMemoryContext(guest.id);
 
   const conversation =
     (await prisma.conversation.findFirst({
@@ -1078,16 +1166,29 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (guestJourneyOperationalReply?.matched && guestJourneyOperationalReply.category) {
+    const repeatUpsellSoft =
+      guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest);
+    const activitiesFromMemory =
+      guestMemoryBundle.memory.preferredActivities?.some((a) => a === "dune_buggy" || a === "bbq") ?? false;
     let replyBody = "Thank you, we have noted your update and our team will coordinate with you if needed.";
     if (guestJourneyOperationalReply.upsellType === "upgrade_interest") {
-      replyBody =
-        "We also have upgraded room options available for a more enhanced experience. Let us know if you would like to explore upgrade options.";
+      if (guestMemoryBundle.memory.hadComplaint) {
+        replyBody =
+          "Thank you for your message. If you would like to explore a different room category, our team can share options with care.";
+      } else if (repeatUpsellSoft) {
+        replyBody =
+          "Whenever you are ready, we have premium room types that may suit you from previous stays. There is no pressure — reply if you would like options.";
+      } else {
+        replyBody =
+          "We also have upgraded room options available for a more enhanced experience. Let us know if you would like to explore upgrade options.";
+      }
     } else if (guestJourneyOperationalReply.upsellType === "add_on_interest") {
       replyBody =
         "We can also arrange additional services such as extra beds, decorations, or meals. Let us know if you would like to add any.";
     } else if (guestJourneyOperationalReply.upsellType === "activities_interest") {
-      replyBody =
-        "We offer activities such as sand biking, dune buggies, and BBQ experiences. Let us know if you would like more details.";
+      replyBody = activitiesFromMemory
+        ? "We can arrange favourite experiences again — including dune buggy and BBQ options when it suits you. Reply if you would like more details."
+        : "We offer activities such as sand biking, dune buggies, and BBQ experiences. Let us know if you would like more details.";
     } else if (guestJourneyOperationalReply.category === "arrival_time_update") {
       const etaPart = guestJourneyOperationalReply.parsedEta
         ? ` around ${guestJourneyOperationalReply.parsedEta}`
@@ -1398,11 +1499,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           : null,
         `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
         "",
-        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
-          totalAmount: stayTotal,
-          nights: nights,
-          checkIn: persisted.checkIn
-        })}`
+        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+          {
+            totalAmount: stayTotal,
+            nights: nights,
+            checkIn: persisted.checkIn
+          },
+          {
+            memory: guestMemoryBundle.memory,
+            repeatForSoftTone:
+              guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest)
+          }
+        )}`
       ]
         .filter((x): x is string => typeof x === "string")
         .join("\n");
@@ -1576,16 +1684,21 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           totalAmount: persisted.totalAmount
         }
       });
-      const menuBody = getMainMenuBody(hotel.displayName, lang);
-      const fallbackBody = buildMainMenuMessage(hotel.displayName, lang);
+      const menuPersonalized = personalizeMainMenuBodies(hotel.displayName, lang, {
+        memory: guestMemoryBundle.memory,
+        confirmedStayCount: guestMemoryBundle.confirmedStayCount
+      });
       const { recordedBody: outboundRecordedBody } = await sendMainMenuForGuest({
         hotel,
         guestId: guest.id,
         to: normalizedPhone,
         conversationId: conversation.id,
-        menuBody,
-        fallbackBody
+        menuBody: menuPersonalized.menuBody,
+        fallbackBody: menuPersonalized.fallbackBody
       });
+      if (menuPersonalized.stampedWelcomeBack) {
+        await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
+      }
       await prisma.message.create({
         data: {
           hotelId: hotel.id,
@@ -1726,16 +1839,21 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       return;
     }
     const lang = effectiveLang(persisted.language);
-    const menuBody = getMainMenuBody(hotel.displayName, lang);
-    const fallbackBody = buildMainMenuMessage(hotel.displayName, lang);
+    const menuPersonalizedReset = personalizeMainMenuBodies(hotel.displayName, lang, {
+      memory: guestMemoryBundle.memory,
+      confirmedStayCount: guestMemoryBundle.confirmedStayCount
+    });
     const { recordedBody: resetMenuRecorded } = await sendMainMenuForGuest({
       hotel,
       guestId: guest.id,
       to: normalizedPhone,
       conversationId: conversation.id,
-      menuBody,
-      fallbackBody
+      menuBody: menuPersonalizedReset.menuBody,
+      fallbackBody: menuPersonalizedReset.fallbackBody
     });
+    if (menuPersonalizedReset.stampedWelcomeBack) {
+      await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
+    }
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
@@ -2274,11 +2392,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
       `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
       "",
-      `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
-        totalAmount: stayTotal,
-        nights: nights,
-        checkIn: persisted.checkIn
-      })}`
+      `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+        {
+          totalAmount: stayTotal,
+          nights: nights,
+          checkIn: persisted.checkIn
+        },
+        {
+          memory: guestMemoryBundle.memory,
+          repeatForSoftTone:
+            guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest)
+        }
+      )}`
     ].join("\n");
     try {
       await sendWhatsAppButtons({
@@ -3594,11 +3719,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
           `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
           "",
-          `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
-            totalAmount: stayTotal,
-            nights: nights,
-            checkIn: persisted.checkIn
-          })}`
+          `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+            {
+              totalAmount: stayTotal,
+              nights: nights,
+              checkIn: persisted.checkIn
+            },
+            {
+              memory: guestMemoryBundle.memory,
+              repeatForSoftTone:
+                guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest)
+            }
+          )}`
         ]
           .filter((x): x is string => typeof x === "string")
           .join("\n");
@@ -4009,6 +4141,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         totalAmount: combinedStayTotal
       }
     });
+    await mergeLightGuestMemorySpendingTouch({
+      guestId: guest.id,
+      totalAmount: combinedStayTotal,
+      nights: booking.nights
+    }).catch((err) =>
+      console.error("[light-guest-memory] spending touch failed:", err instanceof Error ? err.message : String(err))
+    );
 
     let prebookSummaryLine: string | null = null;
     if (persisted.pendingPrebookOrder && persisted.pendingPrebookOrder.lines.length > 0) {
@@ -4200,16 +4339,22 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
         return;
       }
-      const menuBody = getMainMenuBody(hotel.displayName, effectiveLang(persisted.language));
-      const fallbackBody = buildMainMenuMessage(hotel.displayName, effectiveLang(persisted.language));
+      const menuPersonalizedMyBooking = personalizeMainMenuBodies(
+        hotel.displayName,
+        effectiveLang(persisted.language),
+        { memory: guestMemoryBundle.memory, confirmedStayCount: guestMemoryBundle.confirmedStayCount }
+      );
       const { recordedBody: myBookingMenuRecorded } = await sendMainMenuForGuest({
         hotel,
         guestId: guest.id,
         to: normalizedPhone,
         conversationId: conversation.id,
-        menuBody,
-        fallbackBody
+        menuBody: menuPersonalizedMyBooking.menuBody,
+        fallbackBody: menuPersonalizedMyBooking.fallbackBody
       });
+      if (menuPersonalizedMyBooking.stampedWelcomeBack) {
+        await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
+      }
       await prisma.message.create({
         data: {
           hotelId: hotel.id,
@@ -4563,16 +4708,22 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
       return;
     }
-    const menuBody = getMainMenuBody(hotel.displayName, effectiveLang(persisted.language));
-    const fallbackBody = buildMainMenuMessage(hotel.displayName, effectiveLang(persisted.language));
+    const menuPersonalizedGreeting = personalizeMainMenuBodies(
+      hotel.displayName,
+      effectiveLang(persisted.language),
+      { memory: guestMemoryBundle.memory, confirmedStayCount: guestMemoryBundle.confirmedStayCount }
+    );
     const { recordedBody: greetingMenuRecorded } = await sendMainMenuForGuest({
       hotel,
       guestId: guest.id,
       to: normalizedPhone,
       conversationId: conversation.id,
-      menuBody,
-      fallbackBody
+      menuBody: menuPersonalizedGreeting.menuBody,
+      fallbackBody: menuPersonalizedGreeting.fallbackBody
     });
+    if (menuPersonalizedGreeting.stampedWelcomeBack) {
+      await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
+    }
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
@@ -4729,16 +4880,22 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
       return;
     }
-    const menuBody = getMainMenuBody(hotel.displayName, effectiveLang(persisted.language));
-    const fallbackBody = buildMainMenuMessage(hotel.displayName, effectiveLang(persisted.language));
+    const menuPersonalizedFallback = personalizeMainMenuBodies(
+      hotel.displayName,
+      effectiveLang(persisted.language),
+      { memory: guestMemoryBundle.memory, confirmedStayCount: guestMemoryBundle.confirmedStayCount }
+    );
     const { recordedBody: fallbackMenuRecorded } = await sendMainMenuForGuest({
       hotel,
       guestId: guest.id,
       to: normalizedPhone,
       conversationId: conversation.id,
-      menuBody,
-      fallbackBody
+      menuBody: menuPersonalizedFallback.menuBody,
+      fallbackBody: menuPersonalizedFallback.fallbackBody
     });
+    if (menuPersonalizedFallback.stampedWelcomeBack) {
+      await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
+    }
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
@@ -4815,7 +4972,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       roomCount: persisted.roomCount,
       adultCount: persisted.adultCount,
       childCount: persisted.childCount
-    }
+    },
+    guestMemoryCtx: guestMemoryBundle
   });
 
   if (turn.responseButtons?.length) {

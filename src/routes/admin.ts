@@ -9238,6 +9238,9 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
     return;
   }
 
+  const lightGuestMemoryJson =
+    (g as { lightGuestMemoryJson?: string | null }).lightGuestMemoryJson ?? null;
+
   const savedNotice = req.query.saved ? '<p class="badge ok">Profile saved.</p>' : "";
   const manualSet = new Set(
     g.segmentTags.filter((t) => t.source === SegmentTagSource.MANUAL).map((t) => t.tag)
@@ -9298,6 +9301,25 @@ ${savedNotice}
       <tr><th>Email</th><td>${escapeHtml(g.email ?? "—")}</td></tr>
     </tbody>
   </table>
+</section>
+
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
+  <h3 style="margin-top:0">WhatsApp light memory</h3>
+  <p class="muted" style="margin-top:0;font-size:13px">Read-only summary used for subtle personalization in chat (preferences, repeat stay signals, spending band). Updated from confirmed bookings and journey replies — not a medical or payment record.</p>
+  ${
+    lightGuestMemoryJson
+      ? (() => {
+          try {
+            const formatted = JSON.stringify(JSON.parse(lightGuestMemoryJson), null, 2);
+            return `<pre style="white-space:pre-wrap;font-size:12px;max-height:360px;overflow:auto;background:#f6f8fa;padding:12px;border-radius:8px;border:1px solid var(--border)">${escapeHtml(formatted)}</pre>`;
+          } catch {
+            return `<p class="badge">Could not parse stored JSON.</p><pre style="white-space:pre-wrap;font-size:12px">${escapeHtml(
+              lightGuestMemoryJson.slice(0, 2000)
+            )}</pre>`;
+          }
+        })()
+      : '<p class="muted">No automated memory stored yet.</p>'
+  }
 </section>
 
 <section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">

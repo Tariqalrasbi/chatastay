@@ -499,6 +499,8 @@ model Guest {
   isVip          Boolean        @default(false)
   /// Short internal note shown with VIP (preferences, recognition cues).
   vipNote        String?
+  /// Rule-based WhatsApp personalization: preferences, repeat signals, spending band (JSON). No PII beyond what Guest already stores.
+  lightGuestMemoryJson String?
   segmentTags    GuestSegmentTag[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt

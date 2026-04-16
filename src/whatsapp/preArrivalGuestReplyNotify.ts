@@ -1,5 +1,10 @@
 import { BookingStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
+import {
+  mergePreferredActivitiesFromText,
+  mergeSpecialRequestSnippet,
+  noteGuestComplaintInMemory
+} from "../core/lightGuestMemory";
 
 const NOTIFY_TYPE = "GUEST_JOURNEY_REPLY";
 type GuestOperationalIntentCategory =
@@ -322,6 +327,21 @@ export async function handleGuestJourneyInboundReply(params: {
       }
     })
   ]);
+
+  const memHooks: Promise<unknown>[] = [];
+  if (category === "complaint" || category === "dissatisfaction") {
+    memHooks.push(noteGuestComplaintInMemory(params.guestId));
+  }
+  if (category === "special_request") {
+    memHooks.push(mergeSpecialRequestSnippet(params.guestId, params.messageBody));
+  }
+  if (upsellMeta.upsellType === "activities_interest" || /\b(dune|buggy|bbq|sand bike|tour|activity)\b/i.test(params.messageBody)) {
+    memHooks.push(mergePreferredActivitiesFromText(params.guestId, params.messageBody));
+  }
+  await Promise.all(memHooks).catch((err) =>
+    console.error("[light-guest-memory] journey hook failed:", err instanceof Error ? err.message : String(err))
+  );
+
   return {
     matched: Boolean(category),
     bookingId: booking.id,
