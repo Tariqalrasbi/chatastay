@@ -332,6 +332,8 @@ type UpsellMemoryCtx = {
   memory: LightGuestMemory | null;
   /** Softer upsell copy for true repeat guests */
   repeatForSoftTone: boolean;
+  frequencyFactor?: number;
+  messageVariant?: "standard" | "soft" | "premium";
 };
 
 function getSmartUpsellTimingLine(
@@ -342,13 +344,24 @@ function getSmartUpsellTimingLine(
   const nights = typeof params.nights === "number" ? params.nights : 0;
   const memory = upsellCtx?.memory ?? null;
   const repeatSoft = Boolean(upsellCtx?.repeatForSoftTone);
+  const frequencyFactor = typeof upsellCtx?.frequencyFactor === "number" ? upsellCtx.frequencyFactor : 1;
+  const variant = upsellCtx?.messageVariant ?? "standard";
   const checkInDays =
     params.checkIn && /^\d{4}-\d{2}-\d{2}$/.test(params.checkIn)
       ? Math.floor((new Date(`${params.checkIn}T12:00:00Z`).getTime() - Date.now()) / (24 * 60 * 60 * 1000))
       : null;
+  if (frequencyFactor <= 0.8 && total < 220 && nights < 3 && !(checkInDays !== null && checkInDays >= -1 && checkInDays <= 4)) {
+    return "";
+  }
   if (total >= 220) {
     if (memory?.hadComplaint) {
       return "We have premium room options available that may suit you. Reply if you would like to explore upgrades — there is no rush.";
+    }
+    if (variant === "soft") {
+      return "If helpful, we can share premium room options for your dates. Let us know anytime if you would like details.";
+    }
+    if (variant === "premium") {
+      return "Selected premium room options are available for your dates. Let us know if you would like us to reserve the best available category.";
     }
     if (repeatSoft) {
       return "We have premium upgrades available that may suit your past preferences. Let us know if you would like to explore options when convenient.";
@@ -359,6 +372,9 @@ function getSmartUpsellTimingLine(
     const prefs = memory?.preferredActivities ?? [];
     if (prefs.includes("dune_buggy") || prefs.includes("bbq")) {
       return "We can arrange experiences you have enjoyed before — including dune buggy and BBQ options when you are ready. Let us know if you would like more details.";
+    }
+    if (variant === "soft") {
+      return "If you wish, we can arrange optional experiences such as dune buggy and BBQ for your stay.";
     }
     return "Many guests visiting during this period enjoy our dune buggy and BBQ experiences. Let us know if you would like more details.";
   }
@@ -883,12 +899,15 @@ async function buildTurnResult(params: {
   conversationId: string;
   sessionData: Record<string, unknown>;
   guestMemoryCtx?: { memory: LightGuestMemory; confirmedStayCount: number };
+  optimizationCtx?: { upsellFrequencyFactor: number; upsellMessageVariant: "standard" | "soft" | "premium" };
 }): Promise<TurnResult> {
   const upsellMem: UpsellMemoryCtx | undefined = params.guestMemoryCtx
     ? {
         memory: params.guestMemoryCtx.memory,
         repeatForSoftTone:
-          params.guestMemoryCtx.confirmedStayCount >= 2 || Boolean(params.guestMemoryCtx.memory.repeatGuest)
+          params.guestMemoryCtx.confirmedStayCount >= 2 || Boolean(params.guestMemoryCtx.memory.repeatGuest),
+        frequencyFactor: params.optimizationCtx?.upsellFrequencyFactor ?? 1,
+        messageVariant: params.optimizationCtx?.upsellMessageVariant ?? "standard"
       }
     : undefined;
   const next = nextState(params.state, params.event);
@@ -1070,6 +1089,8 @@ async function buildTurnResult(params: {
 
 export async function handleIncomingWhatsAppMessage(input: InboundMessageInput): Promise<void> {
   const hotel = await resolveHotel(input.inboundPhoneNumberId);
+  const hotelConfig = loadPartnerSetupConfig(hotel.id);
+  const optimization = hotelConfig.optimizationSettings;
   const normalizedPhone = normalizePhone(input.from);
   const guest = await prisma.guest.upsert({
     where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedPhone } },
@@ -1479,7 +1500,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           {
             memory: guestMemoryBundle.memory,
             repeatForSoftTone:
-              guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest)
+              guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+            frequencyFactor: optimization.upsellFrequencyFactor,
+            messageVariant: optimization.upsellMessageVariant
           }
         )}`
       ]
@@ -2372,7 +2395,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         {
           memory: guestMemoryBundle.memory,
           repeatForSoftTone:
-            guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest)
+            guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+          frequencyFactor: optimization.upsellFrequencyFactor,
+          messageVariant: optimization.upsellMessageVariant
         }
       )}`
     ].join("\n");
@@ -3699,7 +3724,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             {
               memory: guestMemoryBundle.memory,
               repeatForSoftTone:
-                guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest)
+                guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+              frequencyFactor: optimization.upsellFrequencyFactor,
+              messageVariant: optimization.upsellMessageVariant
             }
           )}`
         ]
@@ -4944,7 +4971,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       adultCount: persisted.adultCount,
       childCount: persisted.childCount
     },
-    guestMemoryCtx: guestMemoryBundle
+      guestMemoryCtx: guestMemoryBundle,
+      optimizationCtx: {
+        upsellFrequencyFactor: optimization.upsellFrequencyFactor,
+        upsellMessageVariant: optimization.upsellMessageVariant
+      }
   });
 
   if (turn.responseButtons?.length) {

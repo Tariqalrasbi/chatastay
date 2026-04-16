@@ -22,6 +22,13 @@ export type PartnerSetupConfig = {
   aiKnowledgeBaseAr: string;
   aiKnowledgeBaseEs: string;
   aiKnowledgeBaseFr: string;
+  optimizationSettings: {
+    manualOverride: boolean;
+    upsellFrequencyFactor: number;
+    followupDelayFactor: number;
+    upsellMessageVariant: "standard" | "soft" | "premium";
+    lastOptimizedAt?: string;
+  };
 };
 
 const partnerSetupConfigPath = path.join(process.cwd(), "hotel-partner-config.json");
@@ -47,7 +54,14 @@ const defaultPartnerSetupConfig: PartnerSetupConfig = {
   aiKnowledgeBaseEn: "",
   aiKnowledgeBaseAr: "",
   aiKnowledgeBaseEs: "",
-  aiKnowledgeBaseFr: ""
+  aiKnowledgeBaseFr: "",
+  optimizationSettings: {
+    manualOverride: false,
+    upsellFrequencyFactor: 1,
+    followupDelayFactor: 1,
+    upsellMessageVariant: "standard",
+    lastOptimizedAt: ""
+  }
 };
 
 type StoredPartnerConfigShape = {
@@ -57,6 +71,15 @@ type StoredPartnerConfigShape = {
 
 function sanitizePartnerConfig(parsed: Partial<PartnerSetupConfig> | undefined): PartnerSetupConfig {
   const source = parsed ?? {};
+  const opt: Partial<PartnerSetupConfig["optimizationSettings"]> = source.optimizationSettings ?? {};
+  const upsellFrequencyFactorRaw =
+    typeof opt.upsellFrequencyFactor === "number"
+      ? opt.upsellFrequencyFactor
+      : defaultPartnerSetupConfig.optimizationSettings.upsellFrequencyFactor;
+  const followupDelayFactorRaw =
+    typeof opt.followupDelayFactor === "number"
+      ? opt.followupDelayFactor
+      : defaultPartnerSetupConfig.optimizationSettings.followupDelayFactor;
   return {
     hotelDescription: source.hotelDescription ?? defaultPartnerSetupConfig.hotelDescription,
     amenitiesSummary: source.amenitiesSummary ?? defaultPartnerSetupConfig.amenitiesSummary,
@@ -81,7 +104,20 @@ function sanitizePartnerConfig(parsed: Partial<PartnerSetupConfig> | undefined):
     aiKnowledgeBaseEn: source.aiKnowledgeBaseEn ?? defaultPartnerSetupConfig.aiKnowledgeBaseEn,
     aiKnowledgeBaseAr: source.aiKnowledgeBaseAr ?? defaultPartnerSetupConfig.aiKnowledgeBaseAr,
     aiKnowledgeBaseEs: source.aiKnowledgeBaseEs ?? defaultPartnerSetupConfig.aiKnowledgeBaseEs,
-    aiKnowledgeBaseFr: source.aiKnowledgeBaseFr ?? defaultPartnerSetupConfig.aiKnowledgeBaseFr
+    aiKnowledgeBaseFr: source.aiKnowledgeBaseFr ?? defaultPartnerSetupConfig.aiKnowledgeBaseFr,
+    optimizationSettings: {
+      manualOverride:
+        typeof opt.manualOverride === "boolean"
+          ? opt.manualOverride
+          : defaultPartnerSetupConfig.optimizationSettings.manualOverride,
+      upsellFrequencyFactor: Math.max(0.6, Math.min(1.2, upsellFrequencyFactorRaw)),
+      followupDelayFactor: Math.max(0.7, Math.min(1.3, followupDelayFactorRaw)),
+      upsellMessageVariant:
+        opt.upsellMessageVariant === "soft" || opt.upsellMessageVariant === "premium" || opt.upsellMessageVariant === "standard"
+          ? opt.upsellMessageVariant
+          : defaultPartnerSetupConfig.optimizationSettings.upsellMessageVariant,
+      lastOptimizedAt: typeof opt.lastOptimizedAt === "string" ? opt.lastOptimizedAt : ""
+    }
   };
 }
 

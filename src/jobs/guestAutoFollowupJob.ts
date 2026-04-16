@@ -40,6 +40,10 @@ function firstName(fullName: string | null | undefined): string {
   return t.split(/\s+/)[0] ?? "Guest";
 }
 
+function withFollowupFactor(baseMs: number, factor: number): number {
+  return Math.max(30 * 60 * 1000, Math.round(baseMs * factor));
+}
+
 async function getOrCreateConversation(hotelId: string, guestId: string): Promise<{ id: string }> {
   const existing = await prisma.conversation.findFirst({
     where: { hotelId, guestId },
@@ -99,7 +103,9 @@ async function seedBookingRecovery(now: Date, recoveryDelayMs: number): Promise<
     take: 200
   });
   for (const s of rows) {
-    const scheduledFor = new Date(s.updatedAt.getTime() + recoveryDelayMs);
+    const factor = loadPartnerSetupConfig(s.hotelId).optimizationSettings.followupDelayFactor;
+    const effectiveDelayMs = withFollowupFactor(recoveryDelayMs, factor);
+    const scheduledFor = new Date(s.updatedAt.getTime() + effectiveDelayMs);
     const dedupeKey = `booking_recovery:${s.id}:${scheduledFor.toISOString().slice(0, 13)}`;
     // Skip if already confirmed booking exists recently for this guest.
     const confirmed = await prisma.booking.findFirst({
@@ -149,7 +155,9 @@ async function seedPendingRequest(now: Date, pendingDelayMs: number): Promise<vo
     const bookingId = typeof a.bookingId === "string" ? a.bookingId : null;
     const actionKey = typeof meta.actionKey === "string" ? meta.actionKey : "pending_request";
     if (!guestId) continue;
-    const scheduledFor = new Date(a.createdAt.getTime() + pendingDelayMs);
+    const factor = loadPartnerSetupConfig(a.hotelId).optimizationSettings.followupDelayFactor;
+    const effectiveDelayMs = withFollowupFactor(pendingDelayMs, factor);
+    const scheduledFor = new Date(a.createdAt.getTime() + effectiveDelayMs);
     await enqueueFollowUp({
       hotelId: a.hotelId,
       guestId,
@@ -175,11 +183,13 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
     take: 400
   });
   for (const b of bookings) {
+    const factor = loadPartnerSetupConfig(b.hotelId).optimizationSettings.followupDelayFactor;
     const checkInMs = b.checkIn.getTime();
     const checkOutMs = b.checkOut.getTime();
     if (checkInMs > now.getTime()) {
       const hoursBefore = envHoursToMs("AUTO_FOLLOWUP_PRE_ARRIVAL_HOURS", 36);
-      const scheduledFor = new Date(checkInMs - hoursBefore);
+      const adjustedHoursBefore = withFollowupFactor(hoursBefore, factor);
+      const scheduledFor = new Date(checkInMs - adjustedHoursBefore);
       await enqueueFollowUp({
         hotelId: b.hotelId,
         guestId: b.guestId,
@@ -193,7 +203,8 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
     }
     if (checkOutMs < now.getTime()) {
       const postStayDelay = envHoursToMs("AUTO_FOLLOWUP_POST_STAY_HOURS", 24);
-      const scheduledFor = new Date(checkOutMs + postStayDelay);
+      const adjustedPostStayDelay = withFollowupFactor(postStayDelay, factor);
+      const scheduledFor = new Date(checkOutMs + adjustedPostStayDelay);
       await enqueueFollowUp({
         hotelId: b.hotelId,
         guestId: b.guestId,
@@ -237,13 +248,15 @@ async function seedReEngagement(now: Date): Promise<void> {
       select: { id: true }
     });
     if (upcoming) continue;
+    const factor = loadPartnerSetupConfig(g.hotelId).optimizationSettings.followupDelayFactor;
+    const adjustedReengageMs = withFollowupFactor(reengageAfterMs, factor);
     await enqueueFollowUp({
       hotelId: g.hotelId,
       guestId: g.id,
       bookingId: null,
       type: "RE_ENGAGEMENT",
       dedupeKey: `reengage:${g.id}:${last.checkOut.toISOString().slice(0, 10)}`,
-      scheduledFor: new Date(last.checkOut.getTime() + reengageAfterMs),
+      scheduledFor: new Date(last.checkOut.getTime() + adjustedReengageMs),
       payload: {}
     });
   }

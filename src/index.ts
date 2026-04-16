@@ -12,6 +12,7 @@ import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
 import { startOwnerDailyDigestScheduler } from "./jobs/ownerDailyDigestJob";
 import { startHotelDailyDigestScheduler } from "./jobs/hotelDailyDigestJob";
 import { startGuestAutoFollowupScheduler } from "./jobs/guestAutoFollowupJob";
+import { startAutoOptimizationScheduler } from "./jobs/autoOptimizationLoopJob";
 
 const app = express();
 const rawPort = process.env.PORT ?? "3000";
@@ -53,6 +54,7 @@ const server = app.listen(port, host, () => {
   startOwnerDailyDigestScheduler();
   startHotelDailyDigestScheduler();
   startGuestAutoFollowupScheduler();
+  startAutoOptimizationScheduler();
 });
 
 server.on("error", (err: NodeJS.ErrnoException) => {

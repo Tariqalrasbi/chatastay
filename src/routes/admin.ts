@@ -2925,6 +2925,53 @@ adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   res.type("html").send(renderLayout(content, true));
 });
 
+adminRouter.get("/analytics/optimization", requireAuth, async (_req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: "al-ashkhara-beach-resort" },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Optimization settings</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const cfg = loadPartnerSetupConfig(hotel.id);
+  const recent = await prisma.auditLog.findMany({
+    where: {
+      hotelId: hotel.id,
+      action: "AUTO_OPTIMIZATION_ADJUSTED"
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20
+  });
+  const rows = recent
+    .map((r) => {
+      const meta = r.metadataJson ? escapeHtml(r.metadataJson.slice(0, 800)) : "";
+      return `<tr><td>${formatDateTime(r.createdAt)}</td><td><pre style="white-space:pre-wrap;font-size:11px;margin:0">${meta}</pre></td></tr>`;
+    })
+    .join("");
+  const content = `
+<h2>Auto optimization</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — safe, incremental optimization settings driven by analytics feedback.</p>
+<div class="actions">
+  <a class="btn-link" href="/admin/profile">Back to profile</a>
+  <a class="btn-link" href="/admin/analytics/decision">Decision analytics</a>
+</div>
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:980px">
+  <h3 style="margin-top:0">Current parameters</h3>
+  <pre style="white-space:pre-wrap;font-size:12px;background:#f6f8fa;padding:12px;border-radius:10px;border:1px solid var(--border)">${escapeHtml(
+    JSON.stringify(cfg.optimizationSettings, null, 2)
+  )}</pre>
+</section>
+<section style="margin:16px 0; max-width:980px">
+  <h3>Recent optimization changes</h3>
+  <table>
+    <thead><tr><th>Timestamp</th><th>Change details</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="2">No optimization changes yet.</td></tr>'}</tbody>
+  </table>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
 adminRouter.get("/profile", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: "al-ashkhara-beach-resort" },
@@ -15302,6 +15349,7 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
     }
   });
 
+  const existingConfig = loadPartnerSetupConfig(hotel.id);
   const nextConfig: PartnerSetupConfig = {
     hotelDescription: String(req.body.hotelDescription ?? "").trim(),
     amenitiesSummary: String(req.body.amenitiesSummary ?? "").trim(),
@@ -15323,7 +15371,8 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
     aiKnowledgeBaseEn: String(req.body.aiKnowledgeBaseEn ?? "").trim(),
     aiKnowledgeBaseAr: String(req.body.aiKnowledgeBaseAr ?? "").trim(),
     aiKnowledgeBaseEs: String(req.body.aiKnowledgeBaseEs ?? "").trim(),
-    aiKnowledgeBaseFr: String(req.body.aiKnowledgeBaseFr ?? "").trim()
+    aiKnowledgeBaseFr: String(req.body.aiKnowledgeBaseFr ?? "").trim(),
+    optimizationSettings: existingConfig.optimizationSettings
   };
   savePartnerSetupConfig(nextConfig, hotel.id);
 
