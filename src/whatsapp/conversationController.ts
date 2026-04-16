@@ -44,6 +44,7 @@ import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send"
 import { guestReceptionistHandoffMessage } from "./guestNotifications";
 import { handleGuestJourneyInboundReply, type GuestJourneyOperationalReply } from "./preArrivalGuestReplyNotify";
 import { buildGuestJourneyOrchestratedReply } from "./guestMessageOrchestration";
+import { dispatchGuestJourneyIntentActions } from "./guestActionDispatcher";
 import {
   buildCheckInListSections,
   buildCheckOutListSections,
@@ -1193,6 +1194,24 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         aiConfidence: 0.97
       }
     });
+    if (inboundMessageId) {
+      void dispatchGuestJourneyIntentActions({
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        guestId: guest.id,
+        guestName: guest.fullName,
+        guestPhone: guest.phoneE164,
+        bookingId: guestJourneyOperationalReply.bookingId,
+        referenceCode: guestJourneyOperationalReply.referenceCode,
+        prismaMessageId: inboundMessageId,
+        rawMessage: input.text,
+        journeyReply: guestJourneyOperationalReply,
+        orchestrated,
+        memory: guestMemoryBundle.memory
+      }).catch((err) =>
+        console.error("[guest-action-dispatcher] failed:", err instanceof Error ? err.message : String(err))
+      );
+    }
     if (guestJourneyOperationalReply.requiresStaffFollowUp) {
       const cat = guestJourneyOperationalReply.category;
       const followBody =
