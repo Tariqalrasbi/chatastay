@@ -181,6 +181,7 @@ function actionPlansFromIntent(params: {
 
 export async function dispatchGuestJourneyIntentActions(params: {
   hotelId: string;
+  propertyId?: string;
   conversationId: string;
   guestId: string;
   guestName?: string | null;
@@ -223,6 +224,7 @@ export async function dispatchGuestJourneyIntentActions(params: {
 
     await createRoleRoutedNotification({
       hotelId: params.hotelId,
+      propertyId: params.propertyId,
       roles: plan.roles,
       title: plan.title,
       body: plan.body,
@@ -237,6 +239,7 @@ export async function dispatchGuestJourneyIntentActions(params: {
     await prisma.auditLog.create({
       data: {
         hotelId: params.hotelId,
+        propertyId: params.propertyId ?? null,
         action: "GUEST_INTENT_ACTION_TASK",
         entityType: "INBOUND_MESSAGE",
         entityId: actionEntityId,
@@ -250,6 +253,7 @@ export async function dispatchGuestJourneyIntentActions(params: {
           actionTitle: plan.title,
           conversationId: params.conversationId,
           guestId: params.guestId,
+          propertyId: params.propertyId ?? null,
           referenceCode: params.referenceCode ?? null,
           prismaMessageId: params.prismaMessageId,
           rawMessage: params.rawMessage,

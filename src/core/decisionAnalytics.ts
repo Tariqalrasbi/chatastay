@@ -22,6 +22,7 @@ export type DecisionEventType =
 
 type TrackParams = {
   hotelId: string;
+  propertyId?: string | null;
   eventType: DecisionEventType;
   guestId?: string | null;
   bookingId?: string | null;
@@ -48,6 +49,7 @@ export async function trackDecisionEvent(params: TrackParams): Promise<void> {
   await prisma.auditLog.create({
     data: {
       hotelId: params.hotelId,
+      propertyId: params.propertyId ?? null,
       action: "DECISION_EVENT",
       entityType: "ANALYTICS_EVENT",
       entityId,
@@ -81,6 +83,7 @@ function toDateFloor(d: Date): Date {
 
 export async function loadDecisionAnalyticsSummary(params: {
   hotelId: string;
+  propertyId?: string;
   days?: number;
 }): Promise<{
   rangeDays: number;
@@ -102,6 +105,7 @@ export async function loadDecisionAnalyticsSummary(params: {
   const rows = await prisma.auditLog.findMany({
     where: {
       hotelId: params.hotelId,
+      ...(params.propertyId ? { propertyId: params.propertyId } : {}),
       action: "DECISION_EVENT",
       createdAt: { gte: start }
     },

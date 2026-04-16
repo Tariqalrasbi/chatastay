@@ -65,6 +65,7 @@ async function getOrCreateConversation(hotelId: string, guestId: string): Promis
 
 async function enqueueFollowUp(params: {
   hotelId: string;
+  propertyId?: string | null;
   guestId: string;
   bookingId?: string | null;
   conversationId?: string | null;
@@ -77,6 +78,7 @@ async function enqueueFollowUp(params: {
     .create({
       data: {
         hotelId: params.hotelId,
+        propertyId: params.propertyId ?? null,
         guestId: params.guestId,
         bookingId: params.bookingId ?? null,
         conversationId: params.conversationId ?? null,
@@ -103,6 +105,12 @@ async function seedBookingRecovery(now: Date, recoveryDelayMs: number): Promise<
     take: 200
   });
   for (const s of rows) {
+    const sessionConversation = s.conversationId
+      ? await prisma.conversation.findUnique({
+          where: { id: s.conversationId },
+          select: { propertyId: true }
+        })
+      : null;
     const factor = loadPartnerSetupConfig(s.hotelId).optimizationSettings.followupDelayFactor;
     const effectiveDelayMs = withFollowupFactor(recoveryDelayMs, factor);
     const scheduledFor = new Date(s.updatedAt.getTime() + effectiveDelayMs);
@@ -120,6 +128,7 @@ async function seedBookingRecovery(now: Date, recoveryDelayMs: number): Promise<
     if (confirmed) continue;
     await enqueueFollowUp({
       hotelId: s.hotelId,
+      propertyId: sessionConversation?.propertyId ?? null,
       guestId: s.guestId,
       conversationId: s.conversationId,
       type: "BOOKING_RECOVERY",
@@ -129,6 +138,7 @@ async function seedBookingRecovery(now: Date, recoveryDelayMs: number): Promise<
     });
     await trackDecisionEventSafe({
       hotelId: s.hotelId,
+      propertyId: sessionConversation?.propertyId ?? null,
       eventType: "booking_abandoned",
       guestId: s.guestId,
       conversationId: s.conversationId ?? undefined,
@@ -160,6 +170,7 @@ async function seedPendingRequest(now: Date, pendingDelayMs: number): Promise<vo
     const scheduledFor = new Date(a.createdAt.getTime() + effectiveDelayMs);
     await enqueueFollowUp({
       hotelId: a.hotelId,
+      propertyId: typeof meta.propertyId === "string" ? meta.propertyId : null,
       guestId,
       bookingId,
       conversationId,
@@ -192,6 +203,7 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
       const scheduledFor = new Date(checkInMs - adjustedHoursBefore);
       await enqueueFollowUp({
         hotelId: b.hotelId,
+        propertyId: b.propertyId,
         guestId: b.guestId,
         bookingId: b.id,
         conversationId: b.conversationId,
@@ -207,6 +219,7 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
       const scheduledFor = new Date(checkOutMs + adjustedPostStayDelay);
       await enqueueFollowUp({
         hotelId: b.hotelId,
+        propertyId: b.propertyId,
         guestId: b.guestId,
         bookingId: b.id,
         conversationId: b.conversationId,
@@ -235,7 +248,7 @@ async function seedReEngagement(now: Date): Promise<void> {
         where: { status: BookingStatus.CONFIRMED },
         orderBy: { checkOut: "desc" },
         take: 1,
-        select: { id: true, checkOut: true, hotelId: true }
+        select: { id: true, checkOut: true, hotelId: true, propertyId: true }
       }
     },
     take: 200
@@ -252,6 +265,7 @@ async function seedReEngagement(now: Date): Promise<void> {
     const adjustedReengageMs = withFollowupFactor(reengageAfterMs, factor);
     await enqueueFollowUp({
       hotelId: g.hotelId,
+      propertyId: last.propertyId ?? null,
       guestId: g.id,
       bookingId: null,
       type: "RE_ENGAGEMENT",
@@ -428,6 +442,7 @@ export async function runGuestAutoFollowupSweep(): Promise<{ scheduled: number; 
       prisma.auditLog.create({
         data: {
           hotelId: fu.hotelId,
+          propertyId: fu.propertyId ?? null,
           action: "AUTO_FOLLOWUP_SENT",
           entityType: "GuestFollowUp",
           entityId: fu.id,
@@ -450,7 +465,8 @@ export async function runGuestAutoFollowupSweep(): Promise<{ scheduled: number; 
       conversationId: conversation.id,
       source: "auto_followup_job",
       dedupeKey: `followup_sent:${fu.id}`,
-      metadata: { followupType: fu.type }
+      metadata: { followupType: fu.type, propertyId: fu.propertyId ?? null },
+      propertyId: fu.propertyId ?? null
     });
     sent++;
   }

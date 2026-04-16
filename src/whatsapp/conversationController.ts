@@ -1180,6 +1180,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     conversationId: conversation.id,
     defaultLanguage: "en"
   });
+  const propertyContextId = conversation.propertyId ?? persisted.suggestedPropertyId;
 
   const currentState = normalizeSessionState(persisted.stage);
   const conversationMode = getConversationMode(persisted.conversationMode);
@@ -1226,6 +1227,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     if (inboundMessageId) {
       void dispatchGuestJourneyIntentActions({
         hotelId: hotel.id,
+        propertyId: propertyContextId,
         conversationId: conversation.id,
         guestId: guest.id,
         guestName: guest.fullName,

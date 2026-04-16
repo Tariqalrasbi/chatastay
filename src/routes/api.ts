@@ -153,6 +153,7 @@ async function applyPaymentStatus(
     const booking = paymentIntent.booking;
     await trackDecisionEventSafe({
       hotelId: paymentIntent.hotelId,
+      propertyId: booking.propertyId,
       eventType: "payment_completed",
       guestId: booking.guestId,
       bookingId: booking.id,

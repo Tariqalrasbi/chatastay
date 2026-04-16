@@ -376,6 +376,7 @@ export async function handleGuestJourneyInboundReply(params: {
     if (eventType) {
       await trackDecisionEventSafe({
         hotelId: params.hotelId,
+        propertyId: booking.propertyId,
         eventType: eventType as
           | "early_checkin_requested"
           | "late_checkout_requested"
@@ -393,6 +394,7 @@ export async function handleGuestJourneyInboundReply(params: {
   if (upsellMeta.upsellType) {
     await trackDecisionEventSafe({
       hotelId: params.hotelId,
+      propertyId: booking.propertyId,
       eventType: "upsell_shown",
       guestId: params.guestId,
       bookingId: booking.id,
@@ -404,6 +406,7 @@ export async function handleGuestJourneyInboundReply(params: {
     if (upsellMeta.guestResponse === "accepted" || upsellMeta.guestResponse === "ignored") {
       await trackDecisionEventSafe({
         hotelId: params.hotelId,
+        propertyId: booking.propertyId,
         eventType: upsellMeta.guestResponse === "accepted" ? "upsell_accepted" : "upsell_ignored",
         guestId: params.guestId,
         bookingId: booking.id,

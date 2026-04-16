@@ -6,6 +6,7 @@ export type NotificationSeverity = "critical" | "high" | "normal" | "info";
 
 type CreateNotificationInput = {
   hotelId: string;
+  propertyId?: string;
   userId?: string;
   role?: UserRole;
   title: string;
@@ -31,6 +32,7 @@ type RoleRoutingInput = Omit<CreateNotificationInput, "userId" | "role"> & {
 type NotificationPayload = {
   category: NotificationCategory;
   severity: NotificationSeverity;
+  propertyId?: string;
   link?: string;
   sourceType?: string;
   sourceId?: string;
@@ -60,6 +62,7 @@ function buildPayload(input: CreateNotificationInput): NotificationPayload {
   return {
     category: input.category,
     severity: input.severity,
+    propertyId: input.propertyId,
     link: input.link,
     sourceType: input.sourceType,
     sourceId: input.sourceId,
@@ -75,6 +78,7 @@ export async function createNotification(input: CreateNotificationInput): Promis
     await prisma.notification.create({
       data: {
         hotelId: input.hotelId,
+        propertyId: input.propertyId,
         hotelUserId: input.userId,
         type: `OPS_${input.category.toUpperCase()}`,
         title: input.title,
@@ -94,6 +98,7 @@ export async function createNotification(input: CreateNotificationInput): Promis
   await prisma.notification.createMany({
     data: users.map((user) => ({
       hotelId: input.hotelId,
+      propertyId: input.propertyId,
       hotelUserId: user.id,
       type: `OPS_${input.category.toUpperCase()}`,
       title: input.title,
@@ -119,6 +124,7 @@ export async function createRoleRoutedNotification(input: RoleRoutingInput): Pro
   await prisma.notification.createMany({
     data: Array.from(userIds).map((userId) => ({
       hotelId: input.hotelId,
+      propertyId: input.propertyId,
       hotelUserId: userId,
       type: `OPS_${input.category.toUpperCase()}`,
       title: input.title,

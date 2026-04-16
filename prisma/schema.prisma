@@ -439,6 +439,9 @@ model Property {
   inventories    Inventory[]
   bookings       Booking[]
   conversations  Conversation[]
+  notifications  Notification[]
+  auditLogs      AuditLog[]
+  guestFollowUps GuestFollowUp[]
 
   @@unique([hotelId, name])
 }
@@ -1177,6 +1180,8 @@ model AuditLog {
   id          String   @id @default(cuid())
   hotelId     String
   hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  propertyId  String?
+  property    Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
   actorUserId String?
   actorEmail  String?
   action      String
@@ -1190,6 +1195,7 @@ model AuditLog {
 
   @@index([hotelId, createdAt])
   @@index([hotelId, bookingId])
+  @@index([hotelId, propertyId, createdAt])
 }
 
 /// Durable notification record (in-app / future email & push). Phase 1: store only; no sender worker yet.
@@ -1199,6 +1205,8 @@ model Notification {
   hotel       Hotel              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
   guestId     String?
   guest       Guest?             @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  propertyId  String?
+  property    Property?          @relation(fields: [propertyId], references: [id], onDelete: SetNull)
   hotelUserId String?
   hotelUser   HotelUser?         @relation(fields: [hotelUserId], references: [id], onDelete: SetNull)
   channel     String             @default("IN_APP")
@@ -1213,6 +1221,7 @@ model Notification {
 
   @@index([hotelId, status])
   @@index([hotelId, guestId])
+  @@index([hotelId, propertyId])
   @@index([hotelId, hotelUserId])
   @@index([hotelId, createdAt])
 }
@@ -1224,6 +1233,8 @@ model GuestFollowUp {
   hotel          Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
   guestId        String
   guest          Guest    @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  propertyId     String?
+  property       Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
   bookingId      String?
   booking        Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
   conversationId String?
@@ -1240,6 +1251,7 @@ model GuestFollowUp {
 
   @@index([hotelId, status, scheduledFor])
   @@index([hotelId, guestId, type])
+  @@index([hotelId, propertyId, status, scheduledFor])
 }
 
 model ConversationSession {

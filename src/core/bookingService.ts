@@ -284,7 +284,7 @@ export async function createConfirmedBookingAtomic(params: {
 
     await tx.conversation.update({
       where: { id: params.conversationId },
-      data: { state: ConversationState.CONFIRMED, lastMessageAt: new Date() }
+      data: { state: ConversationState.CONFIRMED, lastMessageAt: new Date(), propertyId: offer.propertyId }
     });
 
     await tx.bookingDraft.updateMany({
@@ -308,6 +308,7 @@ export async function createConfirmedBookingAtomic(params: {
   );
   await createRoleRoutedNotification({
     hotelId: params.hotelId,
+    propertyId: offer.propertyId,
     roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
     title: "New booking confirmed",
     body: `Booking ${bookingId} is confirmed and requires operational follow-up.`,
@@ -321,6 +322,7 @@ export async function createConfirmedBookingAtomic(params: {
 
   await trackDecisionEventSafe({
     hotelId: params.hotelId,
+    propertyId: offer.propertyId,
     eventType: "booking_completed",
     guestId: params.guestId,
     bookingId,
@@ -333,6 +335,7 @@ export async function createConfirmedBookingAtomic(params: {
   if (confirmedCount >= 2) {
     await trackDecisionEventSafe({
       hotelId: params.hotelId,
+      propertyId: offer.propertyId,
       eventType: "repeat_booking",
       guestId: params.guestId,
       bookingId,
@@ -342,6 +345,7 @@ export async function createConfirmedBookingAtomic(params: {
     });
     await trackDecisionEventSafe({
       hotelId: params.hotelId,
+      propertyId: offer.propertyId,
       eventType: "returning_guest",
       guestId: params.guestId,
       bookingId,
@@ -363,6 +367,7 @@ export async function createConfirmedBookingAtomic(params: {
   if (followupSent) {
     await trackDecisionEventSafe({
       hotelId: params.hotelId,
+      propertyId: offer.propertyId,
       eventType: "followup_converted",
       guestId: params.guestId,
       bookingId,
