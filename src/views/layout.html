@@ -784,11 +784,11 @@
             path.startsWith("/admin/calendar") ||
             path.startsWith("/admin/inventory") ||
             path.startsWith("/admin/offers") ||
-            path.startsWith("/admin/guests") ||
-            path.startsWith("/admin/rooms")
+            path.startsWith("/admin/guests")
           )
             return "reservations";
           if (
+            path.startsWith("/admin/rooms") ||
             path.startsWith("/admin/room-board") ||
             path.startsWith("/admin/housekeeping") ||
             path.startsWith("/admin/handover-sheet") ||

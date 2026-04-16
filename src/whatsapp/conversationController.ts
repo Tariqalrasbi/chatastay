@@ -332,6 +332,18 @@ function getBookingSubMenuChoice(text: string): BookingSubMenuChoice | undefined
   return undefined;
 }
 
+function isBookingSummaryReturnText(text: string): boolean {
+  const t = normalizeText(text);
+  return (
+    t === "summary" ||
+    t === "booking summary" ||
+    t === "final confirmation" ||
+    t === "return to summary" ||
+    t === "resume booking" ||
+    t === "confirm"
+  );
+}
+
 /** Parse a non-negative integer from message (e.g. "2", "0", "3 adults") for structured booking steps. */
 function parseStepNumber(text: string, max: number, allowZero = false): number | null {
   const trimmed = text.trim();
@@ -1847,6 +1859,96 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         suggestedPropertyId: persisted.suggestedPropertyId,
         nights: persisted.nights,
         totalAmount: persisted.totalAmount
+      }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  if (conversationMode === "BOOKING_MODE" && !persisted.bookingStep && isBackOneStepText(input.text)) {
+    try {
+      await sendWhatsAppList({
+        to: normalizedPhone,
+        body: BOOKING_SUBMENU_BODY,
+        buttonText: BOOKING_SUBMENU_LIST.buttonText,
+        sections: BOOKING_SUBMENU_LIST.sections,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+    } catch {
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: "What would you like to do?\n1) Check availability\n2) View room types\n3) View offers\n4) View location and hotel information",
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+    }
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: BOOKING_SUBMENU_BODY,
+        aiIntent: "BOOKING_BACK_TO_SUBMENU_NO_STEP",
+        aiConfidence: 0.95
+      }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  if (
+    conversationMode === "BOOKING_MODE" &&
+    !persisted.bookingStep &&
+    isBookingSummaryReturnText(input.text) &&
+    (currentState === "quoted" || currentState === "awaiting_confirmation") &&
+    persisted.checkIn &&
+    persisted.checkOut
+  ) {
+    const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
+    const children = persisted.childCount ?? 0;
+    const nights = persisted.nights ?? 1;
+    const roomTotal = persisted.totalAmount ?? 0;
+    const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
+    const mealPart = computeMealPlanSurchargeForStay({ mealPlan: mp, adults, children, nights });
+    const stayTotal = Number((roomTotal + mealPart).toFixed(2));
+    const quoteBody = [
+      "Here is your quote:",
+      `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
+      `Check-in: ${persisted.checkIn}`,
+      `Check-out: ${persisted.checkOut}`,
+      `Guests: ${persisted.guestCount ?? adults + children} (${adults} adults, ${children} children)`,
+      `Nights: ${nights}`,
+      `Room total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
+      mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
+      `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
+      "",
+      "Tap a button below or reply YES to confirm, EDIT to change, NO to cancel."
+    ].join("\n");
+    try {
+      await sendWhatsAppButtons({
+        to: normalizedPhone,
+        body: quoteBody,
+        buttons: QUOTE_BUTTONS,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+    } catch {
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: quoteBody,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+    }
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: quoteBody,
+        aiIntent: "BOOKING_RETURN_TO_SUMMARY",
+        aiConfidence: 0.95
       }
     });
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
