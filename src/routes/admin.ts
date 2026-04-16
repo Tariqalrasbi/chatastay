@@ -211,6 +211,28 @@ function getStripeClient(): Stripe | null {
   return new Stripe(apiKey);
 }
 
+function slugifyName(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+async function uniquePropertyCode(hotelId: string, baseName: string): Promise<string> {
+  const base = (slugifyName(baseName).replace(/-/g, "_") || "property").toUpperCase().slice(0, 10);
+  for (let i = 0; i < 100; i++) {
+    const code = i === 0 ? base : `${base}${i}`;
+    const existing = await prisma.property.findFirst({
+      where: { hotelId, name: code },
+      select: { id: true }
+    });
+    if (!existing) return code;
+  }
+  return `PROP${Date.now().toString(36).toUpperCase().slice(-6)}`;
+}
+
 function toMinorUnits(amount: number, currency: string): number {
   const zeroDecimal = new Set(["JPY", "KRW"]);
   const threeDecimal = new Set(["BHD", "KWD", "OMR"]);
@@ -2161,8 +2183,176 @@ adminRouter.get("/login", (req, res) => {
   const staffNotice = req.query.staff === "failed" ? '<p class="badge alert">Staff sign in failed. Check your username and PIN.</p>' : "";
   const staffErrorNotice =
     req.query.staff === "error" ? '<p class="badge alert">Staff sign in is temporarily unavailable. Please try again.</p>' : "";
-  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + readView("login.html");
+  const onboardNotice =
+    req.query.onboard === "1" ? '<p class="badge ok">Property onboarding complete. You can sign in now.</p>' : "";
+  const onboardLink =
+    '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
+  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + onboardNotice + readView("login.html") + onboardLink;
   res.type("html").send(renderLayout(content, false));
+});
+
+adminRouter.get("/onboard", (req, res) => {
+  if (isAuthenticated(req)) {
+    res.redirect("/admin/profile");
+    return;
+  }
+  const err = typeof req.query.error === "string" ? String(req.query.error) : "";
+  const errHtml = err ? `<p class="badge alert">${escapeHtml(err)}</p>` : "";
+  const content = `
+<h2>Partner Onboarding</h2>
+<p class="muted">Set up your property in minutes. This creates your property, default room setup, and owner account.</p>
+${errHtml}
+<form method="post" action="/admin/onboard" style="max-width:760px; display:grid; gap:12px">
+  <label>Property name
+    <input name="propertyName" required placeholder="Example Beach Resort" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <label>Location (city)
+    <input name="city" required placeholder="Muscat" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <label>Contact email
+    <input type="email" name="email" required placeholder="owner@property.com" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <label>Owner full name
+    <input name="ownerName" required placeholder="Property Owner" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <label>Password
+    <input type="password" name="password" required minlength="8" placeholder="At least 8 characters" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <label>Rooms / units
+    <input type="number" name="units" min="1" max="500" value="12" required style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <label>Default language
+    <select name="defaultLanguage" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px">
+      <option value="en">English</option>
+      <option value="ar">Arabic</option>
+    </select>
+  </label>
+  <label>WhatsApp number (optional)
+    <input name="whatsappPhone" placeholder="+968..." style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+  </label>
+  <button type="submit" style="padding:10px 16px; border:0; border-radius:10px; background:#25d366; color:#083d2d; font-weight:700; width:fit-content">Create property</button>
+</form>
+<p class="muted" style="margin-top:12px"><a href="/admin/login">Back to login</a></p>`;
+  res.type("html").send(renderLayout(content, false));
+});
+
+adminRouter.post("/onboard", async (req, res) => {
+  if (isAuthenticated(req)) {
+    res.redirect("/admin/profile");
+    return;
+  }
+  const propertyName = String(req.body.propertyName ?? "").trim();
+  const city = String(req.body.city ?? "").trim();
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const ownerName = String(req.body.ownerName ?? "").trim();
+  const password = String(req.body.password ?? "");
+  const unitsRaw = parseInt(String(req.body.units ?? "12"), 10);
+  const units = Number.isFinite(unitsRaw) ? Math.max(1, Math.min(500, unitsRaw)) : 12;
+  const defaultLanguage = String(req.body.defaultLanguage ?? "en") === "ar" ? "ar" : "en";
+  const whatsappPhone = String(req.body.whatsappPhone ?? "").trim();
+
+  if (!propertyName || !city || !email || !ownerName || password.length < 8) {
+    res.redirect("/admin/onboard?error=Please+complete+all+required+fields");
+    return;
+  }
+
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/onboard?error=Platform+hotel+is+not+configured");
+    return;
+  }
+  const existingUser = await prisma.hotelUser.findUnique({
+    where: { hotelId_email: { hotelId: hotel.id, email } },
+    select: { id: true }
+  });
+  if (existingUser) {
+    res.redirect("/admin/onboard?error=Email+already+exists+for+this+platform");
+    return;
+  }
+
+  const propertyCode = await uniquePropertyCode(hotel.id, propertyName);
+  const ownerPasswordHash = await hashSecret(password);
+
+  const created = await prisma.$transaction(async (tx) => {
+    const property = await tx.property.create({
+      data: {
+        hotelId: hotel.id,
+        name: propertyName,
+        city,
+        addressLine1: null,
+        checkInTime: "14:00",
+        checkOutTime: "11:00"
+      }
+    });
+    const roomType = await tx.roomType.create({
+      data: {
+        hotelId: hotel.id,
+        propertyId: property.id,
+        name: "Standard Room",
+        code: `${propertyCode}_STD`,
+        capacity: 2,
+        baseNightlyRate: 35,
+        totalInventory: units,
+        isActive: true
+      }
+    });
+    if (units > 0) {
+      await tx.roomUnit.createMany({
+        data: Array.from({ length: units }).map((_, idx) => ({
+          hotelId: hotel.id,
+          roomTypeId: roomType.id,
+          name: `${propertyCode}-${String(idx + 1).padStart(3, "0")}`,
+          sortOrder: idx
+        }))
+      });
+    }
+    const owner = await tx.hotelUser.create({
+      data: {
+        hotelId: hotel.id,
+        fullName: ownerName,
+        email,
+        username: slugifyName(`${ownerName}-${propertyCode}`).slice(0, 30) || `owner_${propertyCode.toLowerCase()}`,
+        passwordHash: ownerPasswordHash,
+        role: UserRole.OWNER,
+        isActive: true
+      }
+    });
+    await tx.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        actorUserId: owner.id,
+        actorEmail: email,
+        action: "PARTNER_ONBOARDING_COMPLETED",
+        entityType: "Property",
+        entityId: property.id,
+        metadataJson: JSON.stringify({
+          propertyName,
+          city,
+          units,
+          defaultLanguage,
+          whatsappPhone
+        })
+      }
+    });
+    return { propertyId: property.id };
+  });
+
+  const cfg = loadPartnerSetupConfig(hotel.id);
+  cfg.hotelDescription = `${propertyName} in ${city}.`;
+  cfg.whatsappPhoneNumberId = cfg.whatsappPhoneNumberId || "";
+  if (whatsappPhone) cfg.outletRestaurantWhatsAppE164 = cfg.outletRestaurantWhatsAppE164 || whatsappPhone;
+  cfg.aiEnabled = true;
+  savePartnerSetupConfig(cfg, hotel.id);
+
+  await prisma.hotel.update({
+    where: { id: hotel.id },
+    data: { whatsappPhone: whatsappPhone || hotel.whatsappPhone, isActive: true }
+  });
+  await prisma.property.update({
+    where: { id: created.propertyId },
+    data: { city }
+  });
+  res.redirect("/admin/login?onboard=1");
 });
 
 async function createPasswordResetForEmail(email: string, req: Request): Promise<void> {
@@ -3232,6 +3422,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
 <p class="muted">Operational snapshot for ${escapeHtml(hotel.displayName)}.</p>
 <div class="actions">
   <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
+  <a class="btn-link" href="/admin/onboard">Onboard new property</a>
   <a class="btn-link" href="/admin/room-board">Rooms</a>
   <a class="btn-link" href="/admin/rooms">Room rates &amp; configuration</a>
 </div>
