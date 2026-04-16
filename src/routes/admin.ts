@@ -44,7 +44,7 @@ import {
   markAllNotificationsRead,
   markNotificationRead
 } from "../core/notifications";
-import { loadDecisionAnalyticsSummary } from "../core/decisionAnalytics";
+import { loadDecisionAnalyticsSummary, trackDecisionEventSafe } from "../core/decisionAnalytics";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -2191,29 +2191,41 @@ adminRouter.get("/login", (req, res) => {
   res.type("html").send(renderLayout(content, false));
 });
 
-adminRouter.get("/onboard", (req, res) => {
+adminRouter.get("/onboard", async (req, res) => {
   if (isAuthenticated(req)) {
     res.redirect("/admin/profile");
     return;
   }
   const err = typeof req.query.error === "string" ? String(req.query.error) : "";
+  const leadId = typeof req.query.leadId === "string" ? String(req.query.leadId) : "";
   const errHtml = err ? `<p class="badge alert">${escapeHtml(err)}</p>` : "";
+  const lead = leadId
+    ? await prisma.lead.findFirst({
+        where: { id: leadId },
+        select: { id: true, hotelName: true, contactEmail: true, contactName: true, location: true }
+      })
+    : null;
+  const propertyNameVal = escapeHtml(String(req.query.propertyName ?? lead?.hotelName ?? ""));
+  const cityVal = escapeHtml(String(req.query.city ?? lead?.location ?? ""));
+  const emailVal = escapeHtml(String(req.query.email ?? lead?.contactEmail ?? ""));
+  const ownerNameVal = escapeHtml(String(req.query.ownerName ?? lead?.contactName ?? ""));
   const content = `
 <h2>Partner Onboarding</h2>
 <p class="muted">Set up your property in minutes. This creates your property, default room setup, and owner account.</p>
 ${errHtml}
 <form method="post" action="/admin/onboard" style="max-width:760px; display:grid; gap:12px">
+  <input type="hidden" name="leadId" value="${escapeHtml(lead?.id ?? leadId)}" />
   <label>Property name
-    <input name="propertyName" required placeholder="Example Beach Resort" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+    <input name="propertyName" required placeholder="Example Beach Resort" value="${propertyNameVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
   </label>
   <label>Location (city)
-    <input name="city" required placeholder="Muscat" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+    <input name="city" required placeholder="Muscat" value="${cityVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
   </label>
   <label>Contact email
-    <input type="email" name="email" required placeholder="owner@property.com" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+    <input type="email" name="email" required placeholder="owner@property.com" value="${emailVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
   </label>
   <label>Owner full name
-    <input name="ownerName" required placeholder="Property Owner" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
+    <input name="ownerName" required placeholder="Property Owner" value="${ownerNameVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
   </label>
   <label>Password
     <input type="password" name="password" required minlength="8" placeholder="At least 8 characters" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
@@ -2250,6 +2262,7 @@ adminRouter.post("/onboard", async (req, res) => {
   const units = Number.isFinite(unitsRaw) ? Math.max(1, Math.min(500, unitsRaw)) : 12;
   const defaultLanguage = String(req.body.defaultLanguage ?? "en") === "ar" ? "ar" : "en";
   const whatsappPhone = String(req.body.whatsappPhone ?? "").trim();
+  const leadId = String(req.body.leadId ?? "").trim();
 
   if (!propertyName || !city || !email || !ownerName || password.length < 8) {
     res.redirect("/admin/onboard?error=Please+complete+all+required+fields");
@@ -2352,6 +2365,25 @@ adminRouter.post("/onboard", async (req, res) => {
     where: { id: created.propertyId },
     data: { city }
   });
+  if (leadId) {
+    await prisma.lead
+      .updateMany({
+        where: { id: leadId, hotelId: hotel.id },
+        data: {
+          status: "converted",
+          convertedPropertyId: created.propertyId
+        }
+      })
+      .catch(() => undefined);
+    await trackDecisionEventSafe({
+      hotelId: hotel.id,
+      propertyId: created.propertyId,
+      eventType: "lead_converted",
+      source: "onboarding",
+      dedupeKey: `lead_converted:${leadId}:${created.propertyId}`,
+      metadata: { leadId, propertyId: created.propertyId, propertyName }
+    });
+  }
   res.redirect("/admin/login?onboard=1");
 });
 
@@ -3162,6 +3194,274 @@ adminRouter.get("/analytics/optimization", requireAuth, async (_req, res) => {
   res.type("html").send(renderLayout(content, true));
 });
 
+function leadOutreachTemplate(template: "initial_intro" | "followup_1" | "followup_2", leadHotelName: string): string {
+  if (template === "followup_1") {
+    return `Hello, just following up from WhatsStay regarding ${leadHotelName}. Would you be open to a short demo on how AI WhatsApp booking and operations can help your hotel team?`;
+  }
+  if (template === "followup_2") {
+    return `Quick follow-up from WhatsStay for ${leadHotelName}. If this is not a fit now, we are happy to reconnect later.`;
+  }
+  return `Hello from WhatsStay. We help hotels like ${leadHotelName} automate WhatsApp booking, guest operations, upsell, and follow-up in one platform. Would you like a quick walkthrough?`;
+}
+
+adminRouter.get("/leads", requirePermission("USERS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Leads</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const status = String(req.query.status ?? "all").toLowerCase();
+  const where = {
+    hotelId: hotel.id,
+    ...(status !== "all" ? { status } : {})
+  };
+  const leads = await prisma.lead.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 300,
+    include: { outreachLogs: { orderBy: { createdAt: "desc" }, take: 1 }, convertedProperty: true }
+  });
+  const rows = leads
+    .map((l) => {
+      const latest = l.outreachLogs[0];
+      const latestLine = latest ? `${latest.channel} · ${formatDateTime(latest.sentAt)} · ${latest.templateKey}` : "—";
+      const badgeClass =
+        l.status === "converted" ? "ok" : l.status === "not_interested" ? "pending" : l.status === "interested" ? "ok" : "badge";
+      return `<tr>
+<td>${escapeHtml(l.hotelName)}</td>
+<td>${escapeHtml(l.contactName ?? "—")}</td>
+<td>${escapeHtml(l.contactEmail ?? "—")}<br/><span class="muted">${escapeHtml(l.contactPhone ?? "—")}</span></td>
+<td>${escapeHtml(l.location ?? "—")}</td>
+<td><span class="badge ${badgeClass}">${escapeHtml(l.status)}</span></td>
+<td>${escapeHtml(latestLine)}</td>
+<td>
+  <form method="post" action="/admin/leads/${encodeURIComponent(l.id)}/status" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
+    <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
+      ${["new", "contacted", "responded", "interested", "converted", "not_interested"]
+        .map((s) => `<option value="${s}" ${l.status === s ? "selected" : ""}>${s}</option>`)
+        .join("")}
+    </select>
+    <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Update</button>
+  </form>
+  <form method="post" action="/admin/leads/${encodeURIComponent(l.id)}/outreach" style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center">
+    <select name="channel" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="email">email</option>
+      <option value="whatsapp">whatsapp</option>
+    </select>
+    <select name="templateKey" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="initial_intro">initial_intro</option>
+      <option value="followup_1">followup_1</option>
+      <option value="followup_2">followup_2</option>
+    </select>
+    <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Send</button>
+  </form>
+  ${
+    l.status === "interested" || l.status === "responded"
+      ? `<p style="margin-top:6px"><a class="inline-link" href="/admin/onboard?leadId=${encodeURIComponent(l.id)}">Convert & onboard</a></p>`
+      : l.status === "converted"
+        ? `<p class="muted" style="margin-top:6px">Converted${l.convertedProperty ? ` → ${escapeHtml(l.convertedProperty.name)}` : ""}</p>`
+        : ""
+  }
+</td>
+</tr>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Lead pipeline</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — lightweight outreach and acquisition tracking.</p>
+<div class="actions">
+  <a class="btn-link" href="/admin/profile">Back to profile</a>
+  <a class="btn-link" href="/admin/leads">All</a>
+  <a class="btn-link" href="/admin/leads?status=interested">Interested</a>
+  <a class="btn-link" href="/admin/leads?status=converted">Converted</a>
+</div>
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
+  <h3 style="margin-top:0">Add lead</h3>
+  <form method="post" action="/admin/leads" style="display:grid; gap:10px; max-width:760px">
+    <label>Hotel name<input name="hotelName" required style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Contact name (optional)<input name="contactName" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Email<input type="email" name="contactEmail" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Phone<input name="contactPhone" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Location<input name="location" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Source
+      <select name="source" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px">
+        <option value="manual">manual</option>
+        <option value="import">import</option>
+        <option value="campaign">campaign</option>
+      </select>
+    </label>
+    <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; width:fit-content">Add lead</button>
+  </form>
+</section>
+<section>
+  <h3>Leads</h3>
+  <table>
+    <thead><tr><th>Hotel</th><th>Contact</th><th>Email / Phone</th><th>Location</th><th>Status</th><th>Last outreach</th><th>Actions</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7">No leads yet.</td></tr>'}</tbody>
+  </table>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/leads", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const hotelName = String(req.body.hotelName ?? "").trim();
+  const contactName = String(req.body.contactName ?? "").trim() || null;
+  const contactEmail = String(req.body.contactEmail ?? "").trim().toLowerCase() || null;
+  const contactPhone = String(req.body.contactPhone ?? "").trim() || null;
+  const location = String(req.body.location ?? "").trim() || null;
+  const source = String(req.body.source ?? "manual").trim() || "manual";
+  if (!hotelName) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  await prisma.lead.create({
+    data: {
+      hotelId: hotel.id,
+      hotelName,
+      contactName,
+      contactEmail,
+      contactPhone,
+      location,
+      source,
+      status: "new"
+    }
+  });
+  res.redirect("/admin/leads");
+});
+
+adminRouter.post("/leads/:leadId/status", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const leadId = String(req.params.leadId ?? "");
+  const status = String(req.body.status ?? "").trim();
+  const allowed = new Set(["new", "contacted", "responded", "interested", "converted", "not_interested"]);
+  if (!allowed.has(status)) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const lead = await prisma.lead.findFirst({ where: { id: leadId, hotelId: hotel.id }, select: { id: true } });
+  if (!lead) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  await prisma.lead.update({ where: { id: lead.id }, data: { status } });
+  if (status === "responded" || status === "interested" || status === "not_interested") {
+    await prisma.leadOutreachLog.updateMany({
+      where: { hotelId: hotel.id, leadId: lead.id, responseStatus: "pending" },
+      data: { responseStatus: status === "not_interested" ? "not_interested" : "responded" }
+    });
+  }
+  if (status === "responded" || status === "interested") {
+    await trackDecisionEventSafe({
+      hotelId: hotel.id,
+      eventType: "lead_responded",
+      source: "lead_status_update",
+      dedupeKey: `lead_responded:${lead.id}:${Date.now()}`,
+      metadata: { leadId: lead.id }
+    });
+  }
+  res.redirect("/admin/leads");
+});
+
+adminRouter.post("/leads/:leadId/outreach", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true } });
+  if (!hotel) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const leadId = String(req.params.leadId ?? "");
+  const channel = String(req.body.channel ?? "email").trim().toLowerCase();
+  const templateKey = String(req.body.templateKey ?? "initial_intro").trim() as "initial_intro" | "followup_1" | "followup_2";
+  const lead = await prisma.lead.findFirst({ where: { id: leadId, hotelId: hotel.id } });
+  if (!lead) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const recentCount = await prisma.leadOutreachLog.count({
+    where: { hotelId: hotel.id, leadId: lead.id }
+  });
+  if (recentCount >= 3) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  if (templateKey !== "initial_intro") {
+    const lastOutreach = await prisma.leadOutreachLog.findFirst({
+      where: { hotelId: hotel.id, leadId: lead.id, status: "SENT" },
+      orderBy: { sentAt: "desc" },
+      select: { sentAt: true }
+    });
+    if (lastOutreach && Date.now() - lastOutreach.sentAt.getTime() < 48 * 60 * 60 * 1000) {
+      res.redirect("/admin/leads");
+      return;
+    }
+  }
+  const body = leadOutreachTemplate(templateKey, lead.hotelName);
+  let sent = false;
+  let sendStatus = "FAILED";
+  if (channel === "email" && lead.contactEmail) {
+    try {
+      await sendEmail({
+        to: lead.contactEmail,
+        subject: `WhatsStay for ${lead.hotelName}`,
+        html: `<p>${escapeHtml(body).replace(/\n/g, "<br/>")}</p>`,
+        text: body
+      });
+      sent = true;
+      sendStatus = "SENT";
+    } catch {
+      sent = false;
+    }
+  } else if (channel === "whatsapp" && lead.contactPhone) {
+    const cfg = loadPartnerSetupConfig(hotel.id);
+    const r = await trySendWhatsAppText({
+      to: lead.contactPhone,
+      body,
+      phoneNumberId: cfg.whatsappPhoneNumberId || undefined
+    });
+    sent = r.ok;
+    sendStatus = r.ok ? "SENT" : "FAILED";
+  }
+  await prisma.$transaction(async (tx) => {
+    await tx.leadOutreachLog.create({
+      data: {
+        hotelId: hotel.id,
+        leadId: lead.id,
+        channel,
+        templateKey,
+        messageBody: body,
+        status: sendStatus,
+        responseStatus: "pending"
+      }
+    });
+    await tx.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: sent ? "contacted" : lead.status,
+        lastContactedAt: sent ? new Date() : lead.lastContactedAt
+      }
+    });
+  });
+  if (sent) {
+    await trackDecisionEventSafe({
+      hotelId: hotel.id,
+      eventType: "lead_contacted",
+      source: `lead_outreach_${channel}`,
+      dedupeKey: `lead_contacted:${lead.id}:${templateKey}:${Date.now()}`,
+      metadata: { leadId: lead.id, channel, templateKey }
+    });
+  }
+  res.redirect("/admin/leads");
+});
+
 adminRouter.get("/profile", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: "al-ashkhara-beach-resort" },
@@ -3423,6 +3723,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
 <div class="actions">
   <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
   <a class="btn-link" href="/admin/onboard">Onboard new property</a>
+  <a class="btn-link" href="/admin/leads">Lead pipeline</a>
   <a class="btn-link" href="/admin/room-board">Rooms</a>
   <a class="btn-link" href="/admin/rooms">Room rates &amp; configuration</a>
 </div>

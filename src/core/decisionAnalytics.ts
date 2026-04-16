@@ -18,7 +18,10 @@ export type DecisionEventType =
   | "followup_sent"
   | "followup_converted"
   | "returning_guest"
-  | "repeat_booking";
+  | "repeat_booking"
+  | "lead_contacted"
+  | "lead_responded"
+  | "lead_converted";
 
 type TrackParams = {
   hotelId: string;

@@ -303,6 +303,8 @@ model Hotel {
   hotelDailyDigestLogs  HotelDailyDigestLog[]
   frontDeskShifts       FrontDeskShift[]
   housekeepingTasks     HousekeepingTask[]
+  leads                Lead[]
+  leadOutreachLogs     LeadOutreachLog[]
 }
 
 /// Per-hotel daily email digest audit (hotel admin); separate from platform OwnerDailyDigestLog.
@@ -442,8 +444,54 @@ model Property {
   notifications  Notification[]
   auditLogs      AuditLog[]
   guestFollowUps GuestFollowUp[]
+  convertedLeads Lead[]
+  leadOutreachLogs LeadOutreachLog[]
 
   @@unique([hotelId, name])
+}
+
+model Lead {
+  id                String   @id @default(cuid())
+  hotelId           String
+  hotel             Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  convertedPropertyId String?
+  convertedProperty Property? @relation(fields: [convertedPropertyId], references: [id], onDelete: SetNull)
+  hotelName         String
+  contactName       String?
+  contactEmail      String?
+  contactPhone      String?
+  location          String?
+  source            String   @default("manual")
+  status            String   @default("new")
+  lastContactedAt   DateTime?
+  notes             String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  outreachLogs      LeadOutreachLog[]
+
+  @@index([hotelId, status, createdAt])
+  @@index([hotelId, contactEmail])
+  @@index([hotelId, contactPhone])
+}
+
+model LeadOutreachLog {
+  id            String   @id @default(cuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  propertyId    String?
+  property      Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  leadId        String
+  lead          Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  channel       String
+  templateKey   String
+  messageBody   String
+  status        String   @default("SENT")
+  responseStatus String? @default("pending")
+  sentAt        DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([hotelId, leadId, createdAt])
+  @@index([hotelId, channel, sentAt])
 }
 
 model RoomType {
