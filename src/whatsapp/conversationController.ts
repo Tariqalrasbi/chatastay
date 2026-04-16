@@ -286,8 +286,24 @@ const BOOKING_SUBMENU_LIST = {
 };
 
 const BOOKING_NAV_HINT = "\n\nTip: reply *back* for the previous step, or *menu* for the main menu.";
-const BOOKING_UPSELL_SOFT_OFFER =
-  "Optional: We can also arrange paid early check-in, late check-out, room upgrades, add-ons, and activities. Reply here if you want details.";
+function getSmartUpsellTimingLine(params: { totalAmount?: number | null; nights?: number | null; checkIn?: string | null }): string {
+  const total = typeof params.totalAmount === "number" ? params.totalAmount : 0;
+  const nights = typeof params.nights === "number" ? params.nights : 0;
+  const checkInDays =
+    params.checkIn && /^\d{4}-\d{2}-\d{2}$/.test(params.checkIn)
+      ? Math.floor((new Date(`${params.checkIn}T12:00:00Z`).getTime() - Date.now()) / (24 * 60 * 60 * 1000))
+      : null;
+  if (total >= 220) {
+    return "We currently have limited upgraded rooms available for your dates. Let us know if you would like to explore this option.";
+  }
+  if (checkInDays !== null && checkInDays >= -1 && checkInDays <= 4) {
+    return "Many guests visiting during this period enjoy our dune buggy and BBQ experiences. Let us know if you would like more details.";
+  }
+  if (nights >= 3) {
+    return "Optional: For longer stays, we can arrange useful add-ons such as meals, extra beds, and transfers.";
+  }
+  return "Optional: We can also arrange paid early check-in, late check-out, room upgrades, add-ons, and activities. Reply here if you want details.";
+}
 const QUESTION_MODE_ENTRY =
   "You can ask me anything about the hotel: rooms, amenities, check-in times, policies, location, and more. What would you like to know?\n\nReply *menu* anytime to return to the main menu.";
 
@@ -860,7 +876,11 @@ async function buildTurnResult(params: {
         `Nights: ${offer.nights}`,
         `Total price: ${offer.total.toFixed(2)} ${params.currency}`,
         "",
-        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
+        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
+          totalAmount: offer.total,
+          nights: offer.nights,
+          checkIn: checkIn.toISOString().slice(0, 10)
+        })}`
       ].join("\n"),
       responseButtons: QUOTE_BUTTONS,
       updateSession: {
@@ -1378,7 +1398,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           : null,
         `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
         "",
-        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
+        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
+          totalAmount: stayTotal,
+          nights: nights,
+          checkIn: persisted.checkIn
+        })}`
       ]
         .filter((x): x is string => typeof x === "string")
         .join("\n");
@@ -2250,7 +2274,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
       `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
       "",
-      `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
+      `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
+        totalAmount: stayTotal,
+        nights: nights,
+        checkIn: persisted.checkIn
+      })}`
     ].join("\n");
     try {
       await sendWhatsAppButtons({
@@ -3566,7 +3594,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
           `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
           "",
-          `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${BOOKING_UPSELL_SOFT_OFFER}`
+          `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine({
+            totalAmount: stayTotal,
+            nights: nights,
+            checkIn: persisted.checkIn
+          })}`
         ]
           .filter((x): x is string => typeof x === "string")
           .join("\n");

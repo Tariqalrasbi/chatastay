@@ -31,6 +31,8 @@ export type GuestJourneyOperationalReply = {
   staffFollowUpRoles?: UserRole[];
   upsellType?: "early_checkin_paid" | "late_checkout_paid" | "upgrade_interest" | "add_on_interest" | "activities_interest";
   guestResponse?: UpsellResponse;
+  upsellTriggerReason?: string;
+  upsellShownAt?: string;
 };
 
 function staffFollowUpRolesForCategory(category: GuestOperationalIntentCategory): UserRole[] {
@@ -133,20 +135,48 @@ function parseEtaText(text: string): string | null {
   return null;
 }
 
-function detectUpsellMetadata(
-  category: GuestOperationalIntentCategory | null,
-  text: string
-): { upsellType?: GuestJourneyOperationalReply["upsellType"]; guestResponse?: UpsellResponse } {
+function detectUpsellMetadata(params: {
+  category: GuestOperationalIntentCategory | null;
+  text: string;
+  booking: { totalAmount: number; nights: number; checkIn: Date };
+}): {
+  upsellType?: GuestJourneyOperationalReply["upsellType"];
+  guestResponse?: UpsellResponse;
+  upsellTriggerReason?: string;
+} {
+  const { category, text, booking } = params;
   if (!category) return {};
   const t = text.toLowerCase();
   const ignored = /\b(no|no thanks|not now|maybe later|skip)\b/.test(t);
-  if (category === "early_checkin_request") return { upsellType: "early_checkin_paid", guestResponse: ignored ? "ignored" : "accepted" };
-  if (category === "late_checkout_request") return { upsellType: "late_checkout_paid", guestResponse: ignored ? "ignored" : "accepted" };
-  if (/\b(upgrade|better room|bigger room|suite)\b/.test(t)) return { upsellType: "upgrade_interest", guestResponse: ignored ? "ignored" : "accepted" };
+  const highValueBooking = booking.totalAmount >= 220;
+  const longStay = booking.nights >= 3;
+  const daysBeforeCheckIn = Math.floor((booking.checkIn.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  const preArrivalWindow = daysBeforeCheckIn >= -1 && daysBeforeCheckIn <= 4;
+
+  if (category === "early_checkin_request")
+    return { upsellType: "early_checkin_paid", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "early_checkin_request" };
+  if (category === "late_checkout_request")
+    return {
+      upsellType: "late_checkout_paid",
+      guestResponse: ignored ? "ignored" : "accepted",
+      upsellTriggerReason: "late_checkout_request"
+    };
+  if (/\b(upgrade|better room|bigger room|suite)\b/.test(t))
+    return { upsellType: "upgrade_interest", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "guest_upgrade_interest" };
   if (/\b(extra bed|decoration|decorations|meals|meal plan|transport|transfer)\b/.test(t))
-    return { upsellType: "add_on_interest", guestResponse: ignored ? "ignored" : "accepted" };
+    return { upsellType: "add_on_interest", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "guest_add_on_interest" };
   if (/\b(sand bike|sand biking|dune buggy|bbq|tour|tours|experience|experiences|activity|activities)\b/.test(t))
-    return { upsellType: "activities_interest", guestResponse: ignored ? "ignored" : "accepted" };
+    return { upsellType: "activities_interest", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "guest_activity_interest" };
+  // Smart timing layer: offer activities in pre-arrival and upgrades for high-value bookings.
+  if (category === "on_the_way" && preArrivalWindow) {
+    return { upsellType: "activities_interest", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "pre_arrival_timing" };
+  }
+  if (category === "booking_modification" && highValueBooking) {
+    return { upsellType: "upgrade_interest", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "high_value_booking" };
+  }
+  if (category === "special_request" && longStay) {
+    return { upsellType: "add_on_interest", guestResponse: ignored ? "ignored" : "accepted", upsellTriggerReason: "long_stay_add_on" };
+  }
   return {};
 }
 
@@ -215,7 +245,11 @@ export async function handleGuestJourneyInboundReply(params: {
 
   const category = detectGuestOperationalIntentCategory(params.messageBody);
   const parsedEta = parseEtaText(params.messageBody);
-  const upsellMeta = detectUpsellMetadata(category, params.messageBody);
+  const upsellMeta = detectUpsellMetadata({
+    category,
+    text: params.messageBody,
+    booking: { totalAmount: booking.totalAmount, nights: booking.nights, checkIn: booking.checkIn }
+  });
   const aiIntent = category ? categoryToIntent(category) : "GUEST_JOURNEY_REPLY";
   const requiresStaffFollowUp =
     category != null &&
@@ -251,7 +285,10 @@ export async function handleGuestJourneyInboundReply(params: {
     rawMessage: params.messageBody,
     detectedAt: new Date().toISOString(),
     upsellType: upsellMeta.upsellType ?? null,
-    guestResponse: upsellMeta.guestResponse ?? null
+    guestResponse: upsellMeta.guestResponse ?? null,
+    upsellTriggerReason: upsellMeta.upsellTriggerReason ?? null,
+    upsellShown: Boolean(upsellMeta.upsellType),
+    upsellShownAt: upsellMeta.upsellType ? new Date().toISOString() : null
   };
 
   await prisma.$transaction([
@@ -295,7 +332,9 @@ export async function handleGuestJourneyInboundReply(params: {
     requiresStaffFollowUp,
     staffFollowUpRoles,
     upsellType: upsellMeta.upsellType,
-    guestResponse: upsellMeta.guestResponse
+    guestResponse: upsellMeta.guestResponse,
+    upsellTriggerReason: upsellMeta.upsellTriggerReason,
+    upsellShownAt: upsellMeta.upsellType ? new Date().toISOString() : undefined
   };
 }
 
