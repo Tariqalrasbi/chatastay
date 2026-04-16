@@ -35,7 +35,7 @@ import {
 } from "./knowledgeBase";
 import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send";
 import { guestReceptionistHandoffMessage } from "./guestNotifications";
-import { handleGuestJourneyInboundReply } from "./preArrivalGuestReplyNotify";
+import { handleGuestJourneyInboundReply, type GuestJourneyOperationalReply } from "./preArrivalGuestReplyNotify";
 import {
   buildCheckInListSections,
   buildCheckOutListSections,
@@ -998,9 +998,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
     throw err;
   }
+  let guestJourneyOperationalReply: GuestJourneyOperationalReply | undefined;
   if (inboundMessageId) {
     try {
-      await handleGuestJourneyInboundReply({
+      guestJourneyOperationalReply = await handleGuestJourneyInboundReply({
         hotelId: hotel.id,
         guestId: guest.id,
         conversationId: conversation.id,
@@ -1051,6 +1052,77 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     Boolean(persisted.suggestedRoomTypeId || persisted.suggestedRoomTypeName || persisted.totalAmount);
 
   if (conversationMode === "AGENT_MODE") {
+    return;
+  }
+
+  if (guestJourneyOperationalReply?.matched && guestJourneyOperationalReply.category) {
+    let replyBody = "Thank you, we have noted your update and our team will coordinate with you if needed.";
+    if (guestJourneyOperationalReply.category === "arrival_time_update") {
+      const etaPart = guestJourneyOperationalReply.parsedEta
+        ? ` around ${guestJourneyOperationalReply.parsedEta}`
+        : " with your expected arrival time";
+      replyBody = `Thank you, we have noted your arrival${etaPart}. We look forward to welcoming you. If you need parking, luggage assistance, or anything else before arrival, just reply here.`;
+    } else if (guestJourneyOperationalReply.category === "late_arrival") {
+      replyBody =
+        "Thank you for letting us know. We have noted your late arrival. If your arrival time changes further or you need any assistance before reaching the resort, please reply here and our team will assist.";
+    } else if (guestJourneyOperationalReply.category === "on_the_way") {
+      replyBody =
+        "Thank you, we have noted that you are on the way. We look forward to welcoming you. If you need parking or luggage assistance on arrival, please reply here.";
+    } else if (guestJourneyOperationalReply.category === "arrival_support_request") {
+      replyBody =
+        "Thank you. We have noted your request and our team will coordinate with you. If you would like, you can also share your expected arrival time here.";
+    } else if (guestJourneyOperationalReply.category === "early_checkin_request") {
+      replyBody =
+        "Thank you for your request. Early check-in is subject to availability. Our team will do their best to accommodate and will confirm closer to your arrival.";
+    } else if (guestJourneyOperationalReply.category === "late_checkout_request") {
+      replyBody =
+        "Thank you for your request. Late check-out is subject to availability. We will do our best to accommodate and confirm it closer to your departure.";
+    } else if (guestJourneyOperationalReply.category === "special_request") {
+      replyBody = "Thank you for your request. We have noted it and our team will coordinate accordingly.";
+    }
+    await sendWhatsAppText({
+      to: normalizedPhone,
+      body: replyBody,
+      phoneNumberId: hotel.phoneNumberId,
+      conversationId: conversation.id
+    });
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: replyBody,
+        aiIntent: `GUEST_${guestJourneyOperationalReply.category.toUpperCase()}`,
+        aiConfidence: 0.97
+      }
+    });
+    if (guestJourneyOperationalReply.requiresStaffFollowUp) {
+      await createRoleRoutedNotification({
+        hotelId: hotel.id,
+        roles:
+          guestJourneyOperationalReply.category === "late_checkout_request"
+            ? [UserRole.FRONTDESK, UserRole.HOUSEKEEPING, UserRole.MANAGER, UserRole.STAFF]
+            : [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF],
+        title: "Guest operational request needs follow-up",
+        body:
+          guestJourneyOperationalReply.category === "late_arrival"
+            ? `${guest.fullName ?? guest.phoneE164} reported a late arrival.`
+            : guestJourneyOperationalReply.category === "arrival_support_request"
+              ? `${guest.fullName ?? guest.phoneE164} requested arrival assistance.`
+              : guestJourneyOperationalReply.category === "early_checkin_request"
+                ? `${guest.fullName ?? guest.phoneE164} requested early check-in.`
+                : guestJourneyOperationalReply.category === "late_checkout_request"
+                  ? `${guest.fullName ?? guest.phoneE164} requested late check-out.`
+                  : `${guest.fullName ?? guest.phoneE164} sent a special request.`,
+        category: "messages",
+        severity: "high",
+        link: `/admin/conversations/${encodeURIComponent(conversation.id)}`,
+        sourceType: "CONVERSATION_MESSAGE_INBOUND",
+        sourceId: conversation.id,
+        requiresAttention: true
+      }).catch(() => undefined);
+    }
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
     return;
   }
 
