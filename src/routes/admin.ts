@@ -11575,7 +11575,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
       </label>
       <label style="flex:1;min-width:220px">Note / receipt ref<br/><input type="text" name="notes" maxlength="500" placeholder="Optional" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
     </div>
-    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:12px;background:#f0fdfa;border:1px solid #5eead4;">
+    <div class="fb-cashier-footer">
       <p id="fb-cashier-total" style="margin:0;font-size:1.15rem;font-weight:800;color:#134e4a">Total: <span id="fb-cashier-total-num">0.00 ${escapeHtml(hotel.currency)}</span></p>
       <button type="submit" style="padding:14px 28px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:800;font-size:17px;cursor:pointer;box-shadow:0 2px 10px rgba(15,118,110,.25)">Confirm sale</button>
     </div>
@@ -11685,7 +11685,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
 .fb-pos-table tfoot td { border-bottom:none;padding-top:12px;font-weight:700; }
 .fb-pos-tfoot-note td { font-weight:400 !important;font-size:12px;color:#64748b;font-style:italic;padding-top:6px !important; }
 .fb-pos-total-row td { font-size:17px;padding-top:14px !important;border-top:2px solid #e2e8f0;color:#0f172a; }
-#fb-charge-root .fb-pos-post-bar { display:flex;flex-wrap:wrap;align-items:stretch;justify-content:space-between;gap:16px;padding:18px 20px;background:linear-gradient(135deg,#0f766e 0%,#0d9488 100%);border-radius:12px;color:#fff;box-shadow:0 4px 14px rgba(15,118,110,.25); }
+#fb-charge-root .fb-pos-post-bar { position:sticky;bottom:0;z-index:30;display:flex;flex-wrap:wrap;align-items:stretch;justify-content:space-between;gap:16px;padding:18px 20px;padding-bottom:max(18px,calc(12px + env(safe-area-inset-bottom,0)));margin-top:16px;background:linear-gradient(135deg,#0f766e 0%,#0d9488 100%);border-radius:12px;color:#fff;box-shadow:0 4px 14px rgba(15,118,110,.25); }
 .fb-pos-post-copy { flex:1;min-width:220px; }
 .fb-pos-recap { margin:0 0 4px;font-size:16px;font-weight:700;line-height:1.4; }
 .fb-pos-recap-sub { margin:0;font-size:13px;opacity:.92;line-height:1.4; }
@@ -11697,6 +11697,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
 .fb-cashier-shell { border:2px solid #14b8a6 !important;background:linear-gradient(180deg,#ecfdf5 0,#fff 56px) !important; }
 .fb-cashier-outlet { display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px; }
 .fb-cashier-outlet label:has(input:checked) { border-color:#0f766e !important;background:#ecfdf5 !important; }
+#fb-cashier-sale .fb-cashier-footer { position:sticky;bottom:0;z-index:20;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;padding-bottom:max(16px,calc(10px + env(safe-area-inset-bottom,0)));margin-top:8px;border-radius:12px;background:#f0fdfa;border:1px solid #5eead4;box-shadow:0 -6px 20px rgba(15,23,42,.06); }
 </style>
 <div class="fb-master-page">
 <h1 style="margin:0 0 6px;font-size:1.55rem;letter-spacing:-0.02em">F&amp;B master — restaurant &amp; café</h1>

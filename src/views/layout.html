@@ -200,13 +200,21 @@
         top: 44px;
         right: 0;
         width: min(360px, calc(100vw - 40px));
-        max-height: 420px;
-        overflow: auto;
+        max-height: min(420px, calc(100dvh - 56px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
         border: 1px solid var(--border);
         border-radius: 12px;
         background: #fff;
         box-shadow: 0 16px 36px rgba(15, 23, 42, 0.15);
         z-index: 10020;
+      }
+      .admin-notif-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
       }
       /* Ensure the notification dropdown never intercepts clicks when closed (hidden attr alone can miss edge cases). */
       #adminNotifPanel[hidden],
@@ -216,6 +224,7 @@
         pointer-events: none !important;
       }
       .admin-notif-panel-head {
+        flex-shrink: 0;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -713,8 +722,10 @@
                   <button id="adminNotifReadAll" type="button">Read all</button>
                 </div>
               </div>
-              <ul id="adminNotifList" class="admin-notif-list"></ul>
-              <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
+              <div class="admin-notif-scroll">
+                <ul id="adminNotifList" class="admin-notif-list"></ul>
+                <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
+              </div>
             </div>
           </div>
         </div>
