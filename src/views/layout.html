@@ -966,7 +966,11 @@
       (function () {
         function resetAdminOverlayState() {
           document.body.classList.remove("rud-drawer-open");
+          document.body.classList.remove("modal-open");
           document.body.style.removeProperty("pointer-events");
+          document.querySelectorAll(".modal-backdrop").forEach(function (el) {
+            el.remove();
+          });
           var panel = document.getElementById("adminNotifPanel");
           if (panel) {
             panel.hidden = true;
@@ -991,6 +995,7 @@
         });
         document.querySelectorAll('form[action="/admin/login"], form[action="/auth/staff-login"]').forEach(function (form) {
           form.addEventListener("submit", function () {
+            resetAdminOverlayState();
             var btn = form.querySelector('button[type="submit"]');
             if (!btn) return;
             btn.disabled = true;
