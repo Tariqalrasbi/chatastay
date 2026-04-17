@@ -56,6 +56,7 @@ import {
   pickCleanerForAutoAssign,
   rankHousekeepingCleanersForAutoAssign
 } from "../core/hkAssignment";
+import { getHousekeepingStaffPerformance } from "../core/hkPerformance";
 import { defaultHotelSlug } from "../config/tenancy";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -1935,6 +1936,8 @@ function housekeepingDashboardHref(
     priority: string;
     exception: "none" | "stalled" | "duesoon";
     statsDate: string;
+    perfFrom: string;
+    perfTo: string;
   },
   overrides: Partial<{
     claimView: string;
@@ -1942,6 +1945,8 @@ function housekeepingDashboardHref(
     priority: string;
     exception: "none" | "stalled" | "duesoon";
     statsDate: string;
+    perfFrom: string;
+    perfTo: string;
   }>
 ): string {
   const p = new URLSearchParams();
@@ -1951,6 +1956,8 @@ function housekeepingDashboardHref(
   const ex = overrides.exception !== undefined ? overrides.exception : current.exception;
   if (ex !== "none") p.set("exception", ex === "stalled" ? "stalled" : "duesoon");
   p.set("statsDate", overrides.statsDate ?? current.statsDate);
+  p.set("perfFrom", overrides.perfFrom ?? current.perfFrom);
+  p.set("perfTo", overrides.perfTo ?? current.perfTo);
   return `/admin/housekeeping?${p.toString()}`;
 }
 
@@ -12477,6 +12484,23 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   const statsDate = parseDateInput(req.query.statsDate, startOfDay(new Date()));
   const statsDayStart = startOfDay(statsDate);
   const statsDayEnd = endOfDay(statsDate);
+  const defaultPerfTo = endOfDay(new Date());
+  const defaultPerfFrom = startOfDay(addDays(new Date(), -30));
+  let perfTo = endOfDay(parseDateInput(req.query.perfTo, defaultPerfTo));
+  let perfFrom = startOfDay(parseDateInput(req.query.perfFrom, defaultPerfFrom));
+  if (perfFrom.getTime() > perfTo.getTime()) {
+    perfFrom = startOfDay(addDays(perfTo, -30));
+  }
+
+  const activePropertyIdForPerf = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const perfPropertyId =
+    activePropertyIdForPerf && activePropertyIdForPerf !== allPropertiesKey ? activePropertyIdForPerf : null;
+  const staffPerformance = await getHousekeepingStaffPerformance(prisma, {
+    hotelId: hotel.id,
+    propertyId: perfPropertyId,
+    from: perfFrom,
+    to: perfTo
+  });
 
   const openTasks = await prisma.housekeepingTask.findMany({
     where: { hotelId: hotel.id, status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] } },
@@ -12774,7 +12798,9 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     shift: shiftFilter,
     priority: priorityFilter,
     exception: exceptionFilter,
-    statsDate: formatDateForInput(statsDate)
+    statsDate: formatDateForInput(statsDate),
+    perfFrom: formatDateForInput(perfFrom),
+    perfTo: formatDateForInput(perfTo)
   };
   const nowSupervisor = new Date();
   const stalledCleaningCount = openTaskDecorated.filter(
@@ -12797,6 +12823,32 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     .map((w) => `<tr><td>${escapeHtml(w.name)}</td><td>${w.active}</td></tr>`)
     .join("");
 
+  const staffPerformanceRows = staffPerformance
+    .map((r) => {
+      const sec = r.secondaryLabel
+        ? ` <span class="muted" style="font-size:11px">(${escapeHtml(r.secondaryLabel)})</span>`
+        : "";
+      const avg =
+        r.averageCompletionMinutes != null ? escapeHtml(formatDurationMinutes(r.averageCompletionMinutes)) : "—";
+      const rate =
+        r.completionRate != null && r.assignedCount > 0
+          ? `${Math.round(Math.min(1, r.completionRate) * 100)}%`
+          : "—";
+      return `<tr>
+      <td>${escapeHtml(r.displayName)}${sec}</td>
+      <td>${r.activeWorkload}</td>
+      <td>${r.assignedCount}</td>
+      <td>${r.claimedCount}</td>
+      <td>${r.selfClaimedCount}</td>
+      <td>${r.manualAssignedCount}</td>
+      <td>${r.inProgressCount}</td>
+      <td>${r.completedCount}</td>
+      <td>${rate}</td>
+      <td>${avg}</td>
+    </tr>`;
+    })
+    .join("");
+
   const content = `
 <h2>Housekeeping</h2>
 <p class="muted">${escapeHtml(hotel.displayName)} — Tasks are created when a room is set to <strong>CLEANING</strong> (checkout or room board). Assign cleaners, then mark <strong>clean</strong> to set the room to <strong>AVAILABLE</strong>. Actions are logged with staff identity.</p>
@@ -12805,6 +12857,8 @@ ${alertsHtml}
 <section style="margin-bottom:14px">
   <form method="get" action="/admin/housekeeping" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     <input type="hidden" name="statsDate" value="${formatDateForInput(statsDate)}" />
+    <input type="hidden" name="perfFrom" value="${formatDateForInput(perfFrom)}" />
+    <input type="hidden" name="perfTo" value="${formatDateForInput(perfTo)}" />
     <span class="muted" style="font-size:12px">Task view</span>
     <select name="claimView" onchange="this.form.submit()" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
       <option value="all" ${claimView === "all" ? "selected" : ""}>All open rooms</option>
@@ -12873,6 +12927,39 @@ ${alertsHtml}
     </div>
   </div>
 </section>
+<section style="margin-bottom:18px">
+  <h3 style="margin:0 0 8px;font-size:15px">Staff performance</h3>
+  <p class="muted" style="font-size:12px;margin:0 0 10px">${escapeHtml(formatDateForInput(perfFrom))} – ${escapeHtml(formatDateForInput(perfTo))} · Period metrics from tasks; <strong>Active</strong> / <strong>In progress</strong> are current queue. Respects active property scope when set.</p>
+  <form method="get" action="/admin/housekeeping" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+    <input type="hidden" name="claimView" value="${claimView}" />
+    <input type="hidden" name="shift" value="${shiftFilter}" />
+    <input type="hidden" name="priority" value="${priorityFilter}" />
+    <input type="hidden" name="statsDate" value="${formatDateForInput(statsDate)}" />
+    ${exceptionFilter !== "none" ? `<input type="hidden" name="exception" value="${exceptionFilter === "stalled" ? "stalled" : "duesoon"}" />` : ""}
+    <label class="muted" style="font-size:12px">From</label>
+    <input type="date" name="perfFrom" value="${formatDateForInput(perfFrom)}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <label class="muted" style="font-size:12px">To</label>
+    <input type="date" name="perfTo" value="${formatDateForInput(perfTo)}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <button type="submit" style="padding:8px 12px;border:1px solid #d8dee6;border-radius:8px;background:#fff;cursor:pointer;font-weight:600">Apply range</button>
+  </form>
+  <div style="overflow:auto">
+  <table class="data-table" style="min-width:920px;font-size:13px">
+    <thead><tr>
+      <th>Staff</th>
+      <th>Active</th>
+      <th>Assigned</th>
+      <th>Claimed</th>
+      <th>Self-claimed</th>
+      <th>Manual</th>
+      <th>In progress</th>
+      <th>Completed</th>
+      <th>Completion rate</th>
+      <th>Avg clean</th>
+    </tr></thead>
+    <tbody>${staffPerformanceRows || '<tr><td colspan="10" class="muted">No housekeeping staff or no rows in range.</td></tr>'}</tbody>
+  </table>
+  </div>
+</section>
 <section>
   <h3>Open tasks</h3>
   <div style="overflow:auto">
@@ -12897,6 +12984,8 @@ ${alertsHtml}
     <input type="hidden" name="claimView" value="${claimView}" />
     <input type="hidden" name="shift" value="${shiftFilter}" />
     <input type="hidden" name="priority" value="${priorityFilter}" />
+    <input type="hidden" name="perfFrom" value="${formatDateForInput(perfFrom)}" />
+    <input type="hidden" name="perfTo" value="${formatDateForInput(perfTo)}" />
     ${exceptionFilter !== "none" ? `<input type="hidden" name="exception" value="${exceptionFilter === "stalled" ? "stalled" : "duesoon"}" />` : ""}
     <label class="muted" style="font-size:12px">Stats date</label>
     <input type="date" name="statsDate" value="${formatDateForInput(statsDate)}" onchange="this.form.submit()" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
