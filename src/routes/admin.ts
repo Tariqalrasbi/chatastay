@@ -3392,7 +3392,16 @@ ${created}
         body: params.toString(),
         credentials: "same-origin"
       })
-        .then(function (r) { return r.json().then(function (data) { return { r: r, data: data }; }); })
+        .then(function (r) {
+          return r
+            .json()
+            .catch(function () {
+              return {};
+            })
+            .then(function (data) {
+              return { r: r, data: data };
+            });
+        })
         .then(function (o) {
           if (o.r.ok && o.data && o.data.success === true) {
             window.location.href = "/admin/users?created=1";
