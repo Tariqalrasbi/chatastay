@@ -15,6 +15,7 @@ import {
   FolioOutletCategory,
   FolioTransactionType,
   FolioTxnPaymentStatus,
+  FolioTxnSourceType,
   HousekeepingAssignmentMode,
   HousekeepingTaskSource,
   HousekeepingTaskStatus,
@@ -7308,7 +7309,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
           orderBy: { chargeDate: "desc" },
           include: {
             createdBy: { select: { fullName: true, email: true } },
-            voidedBy: { select: { fullName: true, email: true } }
+            voidedBy: { select: { fullName: true, email: true } },
+            parentTransaction: { select: { id: true, transactionType: true, itemName: true } }
           }
         })
       : Promise.resolve([]),
@@ -7394,6 +7396,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <td style="text-align:right">—</td>
         <td style="text-align:right;font-weight:700">${formatMoney(booking.totalAmount, cur)}</td>
         <td><span class="rud-badge rud-badge-neutral">On folio</span></td>
+        <td class="muted">—</td>
+        <td class="muted">—</td>
         <td>${escapeHtml(displayBookingReference(booking))}</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
@@ -7417,11 +7421,26 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
           r.outletCategory,
           rudTypeLabel(r.transactionType),
           staff,
-          r.referenceNumber
+          r.referenceNumber,
+          r.folioPaymentMethod,
+          r.notes
         ]
           .filter(Boolean)
           .join(" ")
           .toLowerCase();
+        const payMethodCell =
+          r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
+            ? escapeHtml(r.folioPaymentMethod ?? "—")
+            : "—";
+        const refNoteParts: string[] = [];
+        if (r.referenceNumber) refNoteParts.push(`Ref: ${escapeHtml(r.referenceNumber)}`);
+        if (r.notes) refNoteParts.push(`<span class="muted">${escapeHtml(r.notes.length > 100 ? `${r.notes.slice(0, 100)}…` : r.notes)}</span>`);
+        if (r.parentTransactionId && r.parentTransaction) {
+          refNoteParts.push(
+            `<span class="muted" title="Linked parent line">↩ ${escapeHtml(rudTypeLabel(r.parentTransaction.transactionType))} · ${escapeHtml(r.parentTransaction.itemName.slice(0, 40))}</span>`
+          );
+        }
+        const refNoteCell = refNoteParts.length ? refNoteParts.join("<br/>") : "—";
         const voidBtn =
           !voided && booking
             ? `<button type="button" class="btn-link rud-void-btn" data-txn-id="${escapeHtml(r.id)}">Void transaction</button>`
@@ -7443,6 +7462,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <td style="text-align:right">${formatMoney(r.unitPrice, cur)}</td>
         <td style="text-align:right;font-weight:700">${formatMoney(lineTotal, cur)}</td>
         <td>${rudPayBadge(voided, r.folioPaymentStatus)}</td>
+        <td>${payMethodCell}</td>
+        <td style="font-size:12px;max-width:200px">${refNoteCell}</td>
         <td>${escapeHtml(postHuman)}</td>
         <td>${escapeHtml(staff)}</td>
         <td>${voidBtn}</td>
@@ -7693,6 +7714,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
                 <th class="num">Unit price</th>
                 <th class="num">Amount</th>
                 <th>Status</th>
+                <th>Pay method</th>
+                <th>Reference / note</th>
                 <th>Posted to</th>
                 <th>Posted by</th>
                 <th>Actions</th>
@@ -7700,7 +7723,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
             </thead>
             <tbody>${
               ledgerTbodyEmpty
-                ? `<tr><td colspan="11" class="rud-table-empty">No ledger lines yet. Use <strong>Post charge</strong> or <strong>Add payment</strong> when a booking is linked.</td></tr>`
+                ? `<tr><td colspan="13" class="rud-table-empty">No ledger lines yet. Use <strong>Post charge</strong> or <strong>Add payment</strong> when a booking is linked.</td></tr>`
                 : folioActivityRows
             }</tbody>
           </table>
@@ -8467,6 +8490,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
       roomTypeId: unit.roomTypeId,
       currency: booking.currency,
       staffId,
+      sourceType: FolioTxnSourceType.MANUAL_FRONTDESK,
       outletCategory,
       transactionType,
       menuItemId,
@@ -8582,6 +8606,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson
       chargeDate,
       referenceNumber: String(body.referenceNumber ?? "").trim().slice(0, 120) || null,
       notes: String(body.notes ?? "").trim().slice(0, 2000) || null,
+      sourceType: FolioTxnSourceType.MANUAL_FRONTDESK,
       allocateFifo: body.allocateFifo === true || body.allocateFifo === "1"
     });
     await logAudit({

@@ -27,6 +27,62 @@ function optionalHotelUserId(staffId?: string | null): string | undefined {
   return t.length > 0 ? t : undefined;
 }
 
+const KNOWN_FOLIO_PAY_METHODS = new Set([
+  "CASH",
+  "CARD",
+  "MBANKING",
+  "TRANSFER",
+  "CREDIT",
+  "LPO",
+  "CHEQUE",
+  "CHECK",
+  "STRIPE",
+  "STRIPE_CHECKOUT",
+  "OTHER"
+]);
+
+/** Normalizes payment amount for a folio PAYMENT line: finite, > 0, 2 dp. */
+export function normalizePaymentAmountForPost(raw: number): number {
+  const n = round2(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error("Payment amount must be a finite number greater than zero.");
+  }
+  return n;
+}
+
+/**
+ * Safer payment method label: trim, max length, prefer known hotel desk codes (uppercase).
+ * Unknown labels are kept for legacy/custom POS strings (still capped).
+ */
+export function sanitizeFolioPaymentMethod(raw: string): string {
+  const t = String(raw ?? "").trim().slice(0, 48);
+  if (!t) return "CASH";
+  const upper = t.toUpperCase();
+  if (KNOWN_FOLIO_PAY_METHODS.has(upper)) return upper;
+  return t;
+}
+
+function truncateOptional(s: string | null | undefined, max: number): string | undefined {
+  if (s == null) return undefined;
+  const t = String(s).trim();
+  if (!t) return undefined;
+  return t.length > max ? t.slice(0, max) : t;
+}
+
+async function assertBookingGuestMatchesFolio(
+  db: DbClient,
+  hotelId: string,
+  bookingId: string,
+  guestId: string
+): Promise<void> {
+  const b = await db.booking.findFirst({
+    where: { id: bookingId, hotelId },
+    select: { guestId: true }
+  });
+  if (!b) throw new Error("Booking not found for this folio operation.");
+  if (b.guestId !== guestId) throw new Error("Guest does not match this booking.");
+}
+
 export type DbClient = Prisma.TransactionClient | typeof prisma;
 
 export type FolioSummaryDto = {
@@ -163,6 +219,7 @@ export type PostChargeInput = {
 };
 
 export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
+  await assertBookingGuestMatchesFolio(db, input.hotelId, input.bookingId, input.guestId);
   const { folioId } = await ensureActiveFolio(db, {
     hotelId: input.hotelId,
     bookingId: input.bookingId,
@@ -239,12 +296,15 @@ export type PostPaymentInput = {
   chargeDate: Date;
   referenceNumber?: string | null;
   notes?: string | null;
+  /** Staff-only audit line (optional). */
+  internalNote?: string | null;
   sourceType?: FolioTxnSourceType;
   /** When true, creates PaymentAllocation rows against oldest unpaid charge lines (FIFO). */
   allocateFifo?: boolean;
 };
 
 export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) {
+  await assertBookingGuestMatchesFolio(db, input.hotelId, input.bookingId, input.guestId);
   const { folioId } = await ensureActiveFolio(db, {
     hotelId: input.hotelId,
     bookingId: input.bookingId,
@@ -254,10 +314,11 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
     staffId: input.staffId
   });
 
-  const gross = round2(input.amount);
-  if (!Number.isFinite(gross) || gross < 0) {
-    throw new Error("Payment amount must be a finite non-negative number.");
-  }
+  const gross = normalizePaymentAmountForPost(round2(input.amount));
+  const method = sanitizeFolioPaymentMethod(input.folioPaymentMethod);
+  const ref = truncateOptional(input.referenceNumber, 120);
+  const notes = truncateOptional(input.notes, 2000);
+  const internalNote = truncateOptional(input.internalNote, 500);
 
   const paymentCreatedBy = optionalHotelUserId(input.staffId);
   const payment = await db.folioTransaction.create({
@@ -283,11 +344,12 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
       currency: input.currency,
       postingTarget: input.postingTarget,
       folioPaymentStatus: FolioTxnPaymentStatus.PAID,
-      folioPaymentMethod: input.folioPaymentMethod.slice(0, 48),
-      referenceNumber: input.referenceNumber ?? undefined,
+      folioPaymentMethod: method,
+      ...(ref ? { referenceNumber: ref } : {}),
       chargeDate: input.chargeDate,
       postedAt: new Date(),
-      notes: input.notes ?? undefined,
+      ...(notes ? { notes } : {}),
+      ...(internalNote ? { internalNote } : {}),
       ...(paymentCreatedBy ? { createdByUserId: paymentCreatedBy } : {}),
       isVoided: false
     }
@@ -347,11 +409,14 @@ export type PostRefundInput = {
 
 /** Reverses value via a new line (never edits the original payment/charge). */
 export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
+  await assertBookingGuestMatchesFolio(db, input.hotelId, input.bookingId, input.guestId);
   const parent = await db.folioTransaction.findFirst({
     where: { id: input.parentTransactionId, hotelId: input.hotelId, bookingId: input.bookingId }
   });
   if (!parent) throw new Error("Parent transaction not found for this booking.");
   if (parent.voidedAt || parent.isVoided) throw new Error("Cannot refund a voided line.");
+
+  const refundAmt = normalizePaymentAmountForPost(round2(input.amount));
 
   const { folioId } = await ensureActiveFolio(db, {
     hotelId: input.hotelId,
@@ -362,8 +427,9 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
     staffId: input.staffId
   });
 
-  const gross = round2(input.amount);
   const refundCreatedBy = optionalHotelUserId(input.staffId);
+  const ref = truncateOptional(input.referenceNumber, 120);
+  const noteLine = truncateOptional(input.notes, 2000);
   return db.folioTransaction.create({
     data: {
       hotelId: input.hotelId,
@@ -378,18 +444,18 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
       sourceType: FolioTxnSourceType.ADMIN_PANEL,
       outletCategory: FolioOutletCategory.OTHER,
       itemName: "Refund (linked)",
-      description: input.notes ?? `Refund against ${parent.id}`,
+      description: noteLine ?? `Refund against ${parent.id}`,
       quantity: 1,
-      unitPrice: gross,
-      grossAmount: gross,
+      unitPrice: refundAmt,
+      grossAmount: refundAmt,
       taxAmount: 0,
-      netAmount: gross,
+      netAmount: refundAmt,
       discountAmount: 0,
       currency: input.currency,
       postingTarget: parent.postingTarget,
       folioPaymentStatus: FolioTxnPaymentStatus.REFUNDED,
-      folioPaymentMethod: (input.folioPaymentMethod ?? parent.folioPaymentMethod ?? "CASH").slice(0, 48),
-      referenceNumber: input.referenceNumber ?? undefined,
+      folioPaymentMethod: sanitizeFolioPaymentMethod(input.folioPaymentMethod ?? parent.folioPaymentMethod ?? "CASH"),
+      ...(ref ? { referenceNumber: ref } : {}),
       chargeDate: input.chargeDate,
       postedAt: new Date(),
       parentTransactionId: parent.id,
@@ -415,15 +481,18 @@ export async function voidFolioTransaction(
   if (!txn) throw new Error("Transaction not found.");
   if (txn.voidedAt || txn.isVoided) throw new Error("Already voided.");
 
+  const voidActor = optionalHotelUserId(params.staffId);
+  if (!voidActor) throw new Error("A valid staff user is required to void a folio line.");
+
   await db.folioTransaction.update({
     where: { id: params.transactionId },
     data: {
       voidedAt: new Date(),
-      voidedByUserId: params.staffId,
-      voidReason: params.reason.slice(0, 500),
+      voidedByUserId: voidActor,
+      voidReason: params.reason.trim().slice(0, 500),
       folioPaymentStatus: FolioTxnPaymentStatus.VOIDED,
       isVoided: true,
-      updatedByUserId: params.staffId
+      updatedByUserId: voidActor
     }
   });
 }
@@ -451,7 +520,8 @@ export async function listFolioTransactions(params: {
     skip: params.skip ?? 0,
     include: {
       createdBy: { select: { fullName: true, email: true } },
-      voidedBy: { select: { fullName: true, email: true } }
+      voidedBy: { select: { fullName: true, email: true } },
+      parentTransaction: { select: { id: true, transactionType: true, itemName: true } }
     }
   });
 }
