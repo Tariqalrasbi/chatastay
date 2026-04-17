@@ -11,6 +11,8 @@ export type PartnerSetupConfig = {
   /** Room-service prep; if empty, falls back to restaurant number for RS folio charges. */
   outletRoomServiceWhatsAppE164: string;
   outletActivityWhatsAppE164: string;
+  googleReviewLink: string;
+  feedbackNotificationsEnabled: boolean;
   aiEnabled: boolean;
   aiTone: "friendly" | "premium" | "concise";
   instantWelcomeTemplate: string;
@@ -41,6 +43,8 @@ const defaultPartnerSetupConfig: PartnerSetupConfig = {
   outletCoffeeShopWhatsAppE164: "",
   outletRoomServiceWhatsAppE164: "",
   outletActivityWhatsAppE164: "",
+  googleReviewLink: "",
+  feedbackNotificationsEnabled: true,
   aiEnabled: true,
   aiTone: "friendly",
   instantWelcomeTemplate: "Welcome to {{hotel_name}}. Tell us your check-in/check-out dates and number of guests to get instant options.",
@@ -91,6 +95,11 @@ function sanitizePartnerConfig(parsed: Partial<PartnerSetupConfig> | undefined):
     outletRoomServiceWhatsAppE164:
       source.outletRoomServiceWhatsAppE164 ?? defaultPartnerSetupConfig.outletRoomServiceWhatsAppE164,
     outletActivityWhatsAppE164: source.outletActivityWhatsAppE164 ?? defaultPartnerSetupConfig.outletActivityWhatsAppE164,
+    googleReviewLink: source.googleReviewLink ?? defaultPartnerSetupConfig.googleReviewLink,
+    feedbackNotificationsEnabled:
+      typeof source.feedbackNotificationsEnabled === "boolean"
+        ? source.feedbackNotificationsEnabled
+        : defaultPartnerSetupConfig.feedbackNotificationsEnabled,
     aiEnabled: typeof source.aiEnabled === "boolean" ? source.aiEnabled : defaultPartnerSetupConfig.aiEnabled,
     aiTone:
       source.aiTone === "friendly" || source.aiTone === "premium" || source.aiTone === "concise"

@@ -592,6 +592,13 @@ function isGuestFeedbackSkipComment(text: string): boolean {
   return n === "fb_skip_comment" || n === "skip" || n === "no" || n === "no thanks" || n === "not now";
 }
 
+function isManagerContactRequested(text: string): boolean | null {
+  const n = normalizeText(text).replace(/\s+/g, "_");
+  if (n === "fb_mgr_yes" || n === "yes_contact_me") return true;
+  if (n === "fb_mgr_no" || n === "no_thanks") return false;
+  return null;
+}
+
 /** Parse a non-negative integer from message (e.g. "2", "0", "3 adults") for structured booking steps. */
 function parseStepNumber(text: string, max: number, allowZero = false): number | null {
   const trimmed = text.trim();
@@ -1409,6 +1416,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     },
     orderBy: { createdAt: "desc" }
   });
+  const partnerCfg = loadPartnerSetupConfig(hotel.id);
 
   const feedbackRating = parseGuestFeedbackRating(input.text);
   if (feedbackPendingBooking && feedbackRating !== null) {
@@ -1422,6 +1430,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         status: feedbackRating >= 4 ? GuestFeedbackStatus.AWAITING_COMMENT : GuestFeedbackStatus.AWAITING_CATEGORY
       }
     });
+    const feedbackBooking = await prisma.booking.findUnique({
+      where: { id: created.bookingId },
+      select: { roomUnit: { select: { name: true } }, referenceCode: true, checkOut: true }
+    });
     await prisma.auditLog.create({
       data: {
         hotelId: hotel.id,
@@ -1432,14 +1444,35 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         metadataJson: JSON.stringify({ rating: feedbackRating })
       }
     });
+    if (feedbackRating <= 2 && !created.lowRatingAlertedAt && partnerCfg.feedbackNotificationsEnabled) {
+      await prisma.guestFeedback.update({
+        where: { id: created.id },
+        data: { lowRatingAlertedAt: new Date() }
+      });
+      const lowBody = `Low guest rating ${feedbackRating}⭐ received${
+        feedbackBooking?.roomUnit?.name ? ` · Room ${feedbackBooking.roomUnit.name}` : ""
+      }${feedbackBooking?.referenceCode ? ` · ${feedbackBooking.referenceCode}` : ""}.`;
+      await createRoleRoutedNotification({
+        hotelId: hotel.id,
+        roles: [UserRole.MANAGER, UserRole.FRONTDESK, UserRole.OWNER],
+        title: "Low guest rating alert",
+        body: lowBody,
+        category: "bookings",
+        severity: "high",
+        link: "/admin/profile",
+        sourceType: "GUEST_FEEDBACK_LOW_RATING",
+        sourceId: created.id,
+        requiresAttention: true
+      }).catch(() => undefined);
+    }
     if (feedbackRating >= 4) {
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
-          body: "Thank you! Would you like to share anything we did well?",
+          body: "Thank you for your feedback 😊 Would you be willing to share your experience on Google? It helps us a lot.",
           buttons: [
-            { id: "fb_add_comment", title: "Add a comment" },
-            { id: "fb_skip_comment", title: "Skip" }
+            { id: "fb_google_review", title: "Leave a review" },
+            { id: "fb_google_skip", title: "Skip" }
           ],
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
@@ -1447,7 +1480,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Thank you! Would you like to share anything we did well? Reply with your comment, or type SKIP.",
+          body: "Thank you for your feedback 😊 Would you be willing to share your experience on Google? Reply REVIEW or SKIP.",
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1463,6 +1496,25 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         }
       });
     } else {
+      try {
+        await sendWhatsAppButtons({
+          to: normalizedPhone,
+          body: "Thank you for your feedback. We are sorry your experience was not ideal.\n\nWould you like a manager to contact you to resolve this?",
+          buttons: [
+            { id: "fb_mgr_yes", title: "Yes, contact me" },
+            { id: "fb_mgr_no", title: "No, thanks" }
+          ],
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      } catch {
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: "Would you like a manager to contact you to resolve this? Reply YES CONTACT ME or NO THANKS.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      }
       try {
         await sendWhatsAppList({
           to: normalizedPhone,
@@ -1497,6 +1549,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
+          body: "Thank you for your feedback. We are sorry your experience was not ideal.",
+          aiIntent: "GUEST_FEEDBACK_RECOVERY_PROMPT",
+          aiConfidence: 0.99
+        }
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
           body: "Thank you. What could we improve?",
           aiIntent: "GUEST_FEEDBACK_CATEGORY_PROMPT",
           aiConfidence: 0.99
@@ -1508,6 +1570,37 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (feedbackOpen) {
+    const managerChoice = isManagerContactRequested(input.text);
+    if (managerChoice !== null && feedbackOpen.rating <= 2) {
+      if (managerChoice) {
+        await prisma.guestFeedback.update({
+          where: { id: feedbackOpen.id },
+          data: { managerFollowUpRequestedAt: new Date() }
+        });
+        if (partnerCfg.feedbackNotificationsEnabled) {
+          await createRoleRoutedNotification({
+            hotelId: hotel.id,
+            roles: [UserRole.MANAGER, UserRole.FRONTDESK, UserRole.OWNER],
+            title: "Guest asked for manager follow-up",
+            body: `Recovery follow-up requested for ${feedbackOpen.rating}⭐ feedback.`,
+            category: "bookings",
+            severity: "high",
+            link: "/admin/profile",
+            sourceType: "GUEST_FEEDBACK_MANAGER_FOLLOWUP",
+            sourceId: feedbackOpen.id,
+            requiresAttention: true
+          }).catch(() => undefined);
+        }
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: "Thank you. Our manager will contact you shortly.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      }
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
     if (feedbackOpen.status === GuestFeedbackStatus.AWAITING_CATEGORY) {
       const picked = parseGuestFeedbackCategory(input.text);
       if (picked) {
@@ -1563,6 +1656,40 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     if (feedbackOpen.status === GuestFeedbackStatus.AWAITING_COMMENT) {
       const comment = String(input.text ?? "").trim();
       const normalizedComment = normalizeText(comment).replace(/\s+/g, "_");
+      if (normalizedComment === "fb_google_review" || normalizedComment === "review") {
+        const reviewLink = partnerCfg.googleReviewLink?.trim();
+        await prisma.guestFeedback.update({
+          where: { id: feedbackOpen.id },
+          data: {
+            publicReviewClickedAt: new Date(),
+            status: GuestFeedbackStatus.COMPLETED
+          }
+        });
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: reviewLink
+            ? `Thank you so much 🙏 You can leave your review here:\n${reviewLink}`
+            : "Thank you so much 🙏 Please leave your review on Google when convenient.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+      if (normalizedComment === "fb_google_skip" || normalizedComment === "skip" || normalizedComment === "fb_skip_comment") {
+        await prisma.guestFeedback.update({
+          where: { id: feedbackOpen.id },
+          data: { status: GuestFeedbackStatus.COMPLETED }
+        });
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: "Thank you for your feedback 🙏",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
       if (normalizedComment === "fb_add_comment" || normalizedComment === "add_a_comment") {
         const prompt = "Please share your feedback in a short message. We are listening.";
         await sendWhatsAppText({

@@ -890,6 +890,14 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
       })
     : [];
   const feedbackMap = new Map(feedbackByHotel.map((x) => [x.hotelId, { avg: x._avg.rating ?? 0, count: x._count._all }]));
+  const lowByHotel = hotelIds.length
+    ? await prisma.guestFeedback.groupBy({
+        by: ["hotelId"],
+        where: { hotelId: { in: hotelIds }, rating: { lte: 2 } },
+        _count: { _all: true }
+      })
+    : [];
+  const lowMap = new Map(lowByHotel.map((x) => [x.hotelId, x._count._all]));
 
   const trialingSubs =
     kpi.subscriptionsByStatus.find((s) => s.status === "TRIALING")?.count ?? 0;
@@ -1026,7 +1034,7 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Guest rating overview</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th></tr></thead>
+  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th><th>Low ratings (≤2)</th></tr></thead>
   <tbody>${
     hotelRowsSorted
       .map((h) => {
@@ -1035,9 +1043,10 @@ ${attentionBlock}
     <td><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a></td>
     <td>${fb && fb.count > 0 ? `${fb.avg.toFixed(1)} ⭐` : "—"}</td>
     <td>${fb?.count ?? 0}</td>
+    <td>${lowMap.get(h.hotelId) ?? 0}</td>
   </tr>`;
       })
-      .join("") || `<tr><td colspan="3" class="muted">No feedback yet.</td></tr>`
+      .join("") || `<tr><td colspan="4" class="muted">No feedback yet.</td></tr>`
   }</tbody>
 </table>
 

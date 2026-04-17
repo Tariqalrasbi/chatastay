@@ -797,12 +797,25 @@ model GuestFeedback {
   category   GuestFeedbackCategory?
   comment    String?
   status     GuestFeedbackStatus @default(AWAITING_COMMENT)
+  /// Set when a low rating should trigger internal escalation (once).
+  lowRatingAlertedAt DateTime?
+  /// Guest requested manager follow-up for recovery.
+  managerFollowUpRequestedAt DateTime?
+  /// Staff marks recovery resolved (future admin action).
+  managerFollowUpClosedAt DateTime?
+  /// Guest tapped "Leave a review" for public review growth.
+  publicReviewClickedAt DateTime?
+  /// Growth segmentation flags.
+  isHappyGuest Boolean @default(false)
+  isPromoter  Boolean @default(false)
+  isIssueCase Boolean @default(false)
   createdAt  DateTime            @default(now())
   updatedAt  DateTime            @updatedAt
 
   @@index([hotelId, createdAt])
   @@index([hotelId, bookingId])
   @@index([hotelId, rating])
+  @@index([hotelId, managerFollowUpRequestedAt, managerFollowUpClosedAt])
 }
 
 /// Financial ledger container for a stay. Default MAIN folio per booking; structure allows split/company folios later.

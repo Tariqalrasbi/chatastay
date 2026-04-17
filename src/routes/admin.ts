@@ -3890,7 +3890,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   <a class="btn-link" href="/admin/leads">Lead pipeline</a>`
       : "";
   const profileDayRange = inventoryDayRangeExclusive(dayStart);
-  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings, feedbackAgg, feedbackRecent, lowFeedbackCount] = await Promise.all([
+  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings, feedbackAgg, feedbackRecent, lowFeedbackCount, unresolvedFeedbackCount] = await Promise.all([
     prisma.booking.count({ where: { hotelId: hotel.id } }),
     prisma.booking.count({
       where: { hotelId: hotel.id, createdAt: { gte: monthStart } }
@@ -3929,11 +3929,20 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         category: true,
         comment: true,
         createdAt: true,
-        guestName: true
+        guestName: true,
+        managerFollowUpRequestedAt: true,
+        managerFollowUpClosedAt: true
       }
     }),
     prisma.guestFeedback.count({
       where: { hotelId: hotel.id, rating: { lte: 2 } }
+    }),
+    prisma.guestFeedback.count({
+      where: {
+        hotelId: hotel.id,
+        managerFollowUpRequestedAt: { not: null },
+        managerFollowUpClosedAt: null
+      }
     })
   ]);
   const feedbackAvg = Number((feedbackAgg._avg.rating ?? 0).toFixed(2));
@@ -3945,6 +3954,11 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
       <td>${escapeHtml(r.category ? String(r.category).replaceAll("_", " ") : "—")}</td>
       <td>${escapeHtml((r.comment ?? "—").slice(0, 220))}</td>
       <td>${escapeHtml(r.guestName ?? "Guest")}</td>
+      <td>${
+        r.managerFollowUpRequestedAt && !r.managerFollowUpClosedAt
+          ? '<span class="badge alert">Needs follow-up</span>'
+          : '<span class="badge ok">Closed</span>'
+      }</td>
       <td>${formatDateTime(r.createdAt)}</td>
     </tr>`
     )
@@ -4213,11 +4227,11 @@ ${profilePropertyOnboarded}
     <article class="stat"><h3>Average rating</h3><p>${feedbackCount ? `${feedbackAvg.toFixed(1)} ⭐` : "—"}</p></article>
     <article class="stat"><h3>Total reviews</h3><p>${feedbackCount}</p></article>
     <article class="stat"><h3>Low ratings (≤2)</h3><p>${lowFeedbackCount}</p></article>
-    <article class="stat"><h3>Latest review</h3><p>${feedbackRecent[0] ? formatDate(feedbackRecent[0].createdAt) : "—"}</p></article>
+    <article class="stat"><h3>Unresolved issues</h3><p>${unresolvedFeedbackCount}</p></article>
   </div>
   <table>
-    <thead><tr><th>Rating</th><th>Category</th><th>Comment</th><th>Guest</th><th>Date</th></tr></thead>
-    <tbody>${feedbackRows || '<tr><td colspan="5">No feedback yet.</td></tr>'}</tbody>
+    <thead><tr><th>Rating</th><th>Category</th><th>Comment</th><th>Guest</th><th>Recovery</th><th>Date</th></tr></thead>
+    <tbody>${feedbackRows || '<tr><td colspan="6">No feedback yet.</td></tr>'}</tbody>
   </table>
 </section>
 
@@ -16916,6 +16930,17 @@ ${errorNotice}
           config.amenitiesSummary
         )}</textarea>
       </label>
+      <label>Google review link (optional)
+        <input type="url" name="googleReviewLink" value="${escapeHtml(
+          config.googleReviewLink ?? ""
+        )}" placeholder="https://g.page/r/..." style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <label style="display:flex; align-items:center; gap:8px">
+        <input type="checkbox" name="feedbackNotificationsEnabled" value="1" ${
+          config.feedbackNotificationsEnabled ? "checked" : ""
+        } />
+        Enable instant low-rating notifications
+      </label>
     </section>
     <section>
       <h3>Property Details</h3>
@@ -17141,6 +17166,8 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
     outletCoffeeShopWhatsAppE164: String(req.body.outletCoffeeShopWhatsAppE164 ?? "").trim(),
     outletRoomServiceWhatsAppE164: String(req.body.outletRoomServiceWhatsAppE164 ?? "").trim(),
     outletActivityWhatsAppE164: String(req.body.outletActivityWhatsAppE164 ?? "").trim(),
+    googleReviewLink: String(req.body.googleReviewLink ?? "").trim(),
+    feedbackNotificationsEnabled: req.body.feedbackNotificationsEnabled === "1",
     aiEnabled: req.body.aiEnabled === "1",
     aiTone:
       req.body.aiTone === "premium" || req.body.aiTone === "concise"
