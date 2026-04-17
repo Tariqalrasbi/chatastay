@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import path from "node:path";
+import { prisma } from "./db";
+import { ensureGuestFeedbackFollowupColumnsSqlite } from "./core/sqliteGuestFeedbackSchemaRepair";
 import { apiRouter } from "./routes/api";
 import { adminRouter, authRouter } from "./routes/admin";
 import { housekeepingRouter } from "./routes/housekeeping";
@@ -46,27 +48,37 @@ app.use("/", publicHotelRouter);
 app.use("/owner", ownerRouter);
 app.use("/whatsapp/webhook", whatsappWebhookRouter);
 
-const server = app.listen(port, host, () => {
-  const urlHost = host === "0.0.0.0" ? "localhost" : host;
-  console.log(`ChatAstay server listening on http://${urlHost}:${port}`);
-  console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
-  console.log(`(Keep this terminal open while you use the app.)`);
-  logWhatsAppStartupHints();
-  startPreArrivalReminderScheduler();
-  startOwnerDailyDigestScheduler();
-  startHotelDailyDigestScheduler();
-  startGuestAutoFollowupScheduler();
-  startAutoOptimizationScheduler();
-});
+async function start(): Promise<void> {
+  await prisma.$connect();
+  await ensureGuestFeedbackFollowupColumnsSqlite(prisma);
 
-server.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(
-      `[chatastay] Port ${port} is already in use. Stop the other process or use another port, e.g. PORT=3001 npm run dev\n` +
-        `            (macOS) See what holds the port: lsof -nP -iTCP:${port} -sTCP:LISTEN`
-    );
-  } else {
-    console.error("[chatastay] Server failed to start:", err.message);
-  }
+  const server = app.listen(port, host, () => {
+    const urlHost = host === "0.0.0.0" ? "localhost" : host;
+    console.log(`ChatAstay server listening on http://${urlHost}:${port}`);
+    console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
+    console.log(`(Keep this terminal open while you use the app.)`);
+    logWhatsAppStartupHints();
+    startPreArrivalReminderScheduler();
+    startOwnerDailyDigestScheduler();
+    startHotelDailyDigestScheduler();
+    startGuestAutoFollowupScheduler();
+    startAutoOptimizationScheduler();
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `[chatastay] Port ${port} is already in use. Stop the other process or use another port, e.g. PORT=3001 npm run dev\n` +
+          `            (macOS) See what holds the port: lsof -nP -iTCP:${port} -sTCP:LISTEN`
+      );
+    } else {
+      console.error("[chatastay] Server failed to start:", err.message);
+    }
+    process.exit(1);
+  });
+}
+
+void start().catch((err: unknown) => {
+  console.error("[chatastay] Server failed to start:", err);
   process.exit(1);
 });
