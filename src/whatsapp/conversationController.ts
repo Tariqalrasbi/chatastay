@@ -718,6 +718,44 @@ async function sendBookingCheckOutPrompt(params: {
   });
 }
 
+async function sendCountSelectionListWithFallback(params: {
+  to: string;
+  phoneNumberId?: string;
+  conversationId: string;
+  body: string;
+  buttonText: string;
+  rowPrefix: string;
+  min: number;
+  max: number;
+  fallbackPrompt: string;
+}): Promise<void> {
+  const rows = Array.from({ length: params.max - params.min + 1 }, (_, i) => {
+    const value = params.min + i;
+    return {
+      id: `${params.rowPrefix}_${value}`,
+      title: String(value)
+    };
+  });
+  try {
+    await sendWhatsAppList({
+      to: params.to,
+      body: params.body,
+      buttonText: params.buttonText,
+      sections: [{ title: "Select", rows }],
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  } catch {
+    const numbered = rows.map((r) => r.title).join(", ");
+    await sendWhatsAppText({
+      to: params.to,
+      body: `${params.fallbackPrompt}\nOptions: ${numbered}`,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  }
+}
+
 function isMenuChoiceMyBooking(text: string): boolean {
   const t = text.trim().toLowerCase();
   return t === "my_booking" || t === "my booking";
@@ -2427,12 +2465,17 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
 
     if (quoteEditTarget === "guests") {
-      const body = "How many adults will be staying? (Reply with a number, e.g. 2)" + BOOKING_NAV_HINT;
-      await sendWhatsAppText({
+      const body = "How many adults will be staying?";
+      await sendCountSelectionListWithFallback({
         to: normalizedPhone,
-        body,
+        conversationId: conversation.id,
         phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
+        body,
+        buttonText: "Adults",
+        rowPrefix: "adults",
+        min: 1,
+        max: 8,
+        fallbackPrompt: "How many adults will be staying? Reply with a number, e.g. 2."
       });
       await saveConversationSession({
         hotelId: hotel.id,
@@ -2446,7 +2489,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body,
+          body: "How many adults will be staying?",
           aiIntent: "BOOKING_EDIT_GUESTS",
           aiConfidence: 0.95
         }
@@ -2456,12 +2499,17 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
 
     if (quoteEditTarget === "rooms") {
-      const body = "How many rooms do you need? (Reply with a number, e.g. 1 or 2)";
-      await sendWhatsAppText({
+      const body = "How many rooms do you need?";
+      await sendCountSelectionListWithFallback({
         to: normalizedPhone,
-        body,
+        conversationId: conversation.id,
         phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
+        body,
+        buttonText: "Rooms",
+        rowPrefix: "rooms",
+        min: 1,
+        max: 6,
+        fallbackPrompt: "How many rooms do you need? Reply with a number, e.g. 1 or 2."
       });
       await saveConversationSession({
         hotelId: hotel.id,
@@ -3393,11 +3441,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     if (step === "adults") {
       const num = parseStepNumber(input.text, 20);
       if (num === null) {
-        await sendWhatsAppText({
+        await sendCountSelectionListWithFallback({
           to: normalizedPhone,
-          body: "Please reply with the number of adults (e.g. 1, 2, or 3).",
+          conversationId: conversation.id,
           phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
+          body: "Please choose the number of adults:",
+          buttonText: "Adults",
+          rowPrefix: "adults",
+          min: 1,
+          max: 8,
+          fallbackPrompt: "Please reply with the number of adults (e.g. 1, 2, or 3)."
         });
         await prisma.message.create({
           data: {
@@ -3410,18 +3463,23 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           }
         });
       } else {
-        await sendWhatsAppText({
+        await sendCountSelectionListWithFallback({
           to: normalizedPhone,
-          body: "How many children will be staying? (Reply with a number, e.g. 0 or 2)",
+          conversationId: conversation.id,
           phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
+          body: "How many children will be staying?",
+          buttonText: "Children",
+          rowPrefix: "children",
+          min: 0,
+          max: 6,
+          fallbackPrompt: "How many children will be staying? Reply with a number, e.g. 0 or 2."
         });
         await prisma.message.create({
           data: {
             hotelId: hotel.id,
             conversationId: conversation.id,
             direction: MessageDirection.OUTBOUND,
-            body: "How many children will be staying? (Reply with a number, e.g. 0 or 2)",
+            body: "How many children will be staying?",
             aiIntent: "BOOKING_STEP_CHILDREN",
             aiConfidence: 0.95
           }
@@ -3447,11 +3505,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     if (step === "children") {
       const num = parseStepNumber(input.text, 20, true);
       if (num === null) {
-        await sendWhatsAppText({
+        await sendCountSelectionListWithFallback({
           to: normalizedPhone,
-          body: "Please reply with the number of children (e.g. 0, 1, or 2).",
+          conversationId: conversation.id,
           phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
+          body: "Please choose the number of children:",
+          buttonText: "Children",
+          rowPrefix: "children",
+          min: 0,
+          max: 6,
+          fallbackPrompt: "Please reply with the number of children (e.g. 0, 1, or 2)."
         });
         await prisma.message.create({
           data: {
@@ -3621,11 +3684,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     if (step === "rooms") {
       const num = parseStepNumber(input.text, 10);
       if (num === null) {
-        await sendWhatsAppText({
+        await sendCountSelectionListWithFallback({
           to: normalizedPhone,
-          body: "Please reply with the number of rooms (e.g. 1 or 2).",
+          conversationId: conversation.id,
           phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
+          body: "Please choose the number of rooms:",
+          buttonText: "Rooms",
+          rowPrefix: "rooms",
+          min: 1,
+          max: 6,
+          fallbackPrompt: "Please reply with the number of rooms (e.g. 1 or 2)."
         });
         await prisma.message.create({
           data: {
