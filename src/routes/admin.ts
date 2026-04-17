@@ -7533,10 +7533,14 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       <div>
         <p class="rud-drawer-kicker muted">Guest ledger</p>
         <h3 id="folio-charge-title" class="rud-drawer-title">Post charge</h3>
+        <p class="rud-drawer-context muted">${escapeHtml(unit.name)}${
+          booking ? " · " + bookingRefShort + " · " + stayCheck : ""
+        }</p>
       </div>
       <button type="button" class="rud-drawer-close" data-close-charge aria-label="Close">&times;</button>
     </div>
-    <form id="folio-charge-form" class="rud-drawer-body">
+    <form id="folio-charge-form" class="rud-drawer-form">
+      <div class="rud-drawer-scroll">
       <input type="hidden" name="date" value="${dateKey}" />
       <select id="folio-charge-category" name="chargeCategory" class="rud-sr-only" tabindex="-1" aria-hidden="true">
         <option value="RESTAURANT">Restaurant</option>
@@ -7629,8 +7633,9 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <textarea id="folio-notes" class="rud-input rud-textarea" rows="2"></textarea>
       </label>
       <p id="folio-charge-err" class="rud-form-err badge alert" style="display:none"></p>
-      <div class="rud-drawer-actions">
-        <button type="button" class="btn-link" data-close-charge>Cancel</button>
+      </div>
+      <div class="rud-drawer-actions" role="group" aria-label="Charge actions">
+        <button type="button" class="btn-link rud-drawer-cancel" data-close-charge>Cancel</button>
         <button type="submit" class="rud-drawer-submit rud-drawer-submit-charge">Post charge</button>
       </div>
     </form>
@@ -7643,10 +7648,14 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       <div>
         <p class="rud-drawer-kicker muted">Guest ledger</p>
         <h3 id="folio-pay-title" class="rud-drawer-title">Add payment</h3>
+        <p class="rud-drawer-context muted">${escapeHtml(unit.name)}${
+          booking ? " · " + bookingRefShort + " · " + stayCheck : ""
+        }</p>
       </div>
       <button type="button" class="rud-drawer-close" data-close-payment aria-label="Close">&times;</button>
     </div>
-    <form id="folio-payment-form" class="rud-drawer-body">
+    <form id="folio-payment-form" class="rud-drawer-form">
+      <div class="rud-drawer-scroll">
       <input type="hidden" name="date" value="${dateKey}" />
       <label class="rud-field">Amount (${escapeHtml(cur)}) <span class="rud-req">*</span>
         <input type="number" id="folio-pay-amount" class="rud-input" min="0.01" step="0.01" required />
@@ -7675,8 +7684,9 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <textarea id="folio-pay-notes" class="rud-input rud-textarea" rows="2"></textarea>
       </label>
       <p id="folio-pay-err" class="rud-form-err badge alert" style="display:none"></p>
-      <div class="rud-drawer-actions">
-        <button type="button" class="btn-link" data-close-payment>Cancel</button>
+      </div>
+      <div class="rud-drawer-actions" role="group" aria-label="Payment actions">
+        <button type="button" class="btn-link rud-drawer-cancel" data-close-payment>Cancel</button>
         <button type="submit" class="rud-drawer-submit rud-drawer-submit-pay">Add payment</button>
       </div>
     </form>
@@ -8109,17 +8119,20 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   .rud-outstanding { margin-top:18px; padding:16px; border-radius:12px; background:linear-gradient(135deg,#fffbeb 0%,#fef3c7 100%); border:1px solid #fbbf24; }
   .rud-outstanding-label { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#92400e; }
   .rud-outstanding-value { font-size:1.75rem; font-weight:900; color:#78350f; letter-spacing:-0.02em; margin-top:4px; }
+  /* Panel shell: sticky head + scroll body + pinned action footer (reuse for future drawers). */
   .rud-drawer-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.5); z-index:10040; }
-  .rud-drawer { position:fixed; top:0; right:0; bottom:0; z-index:10045; width:min(440px,100%); max-width:100%; pointer-events:none; }
+  .rud-drawer { position:fixed; top:0; right:0; bottom:0; z-index:10045; width:min(440px,100%); max-width:100%; height:100dvh; max-height:100dvh; pointer-events:none; padding-bottom:env(safe-area-inset-bottom,0); box-sizing:border-box; }
   .rud-drawer > .rud-drawer-sheet { pointer-events:auto; }
-  .rud-drawer-sheet { height:100%; background:#fff; box-shadow:-12px 0 40px rgba(15,23,42,.18); display:flex; flex-direction:column; border-left:1px solid #e2e8f0; animation:rud-drawer-slide .22s ease; }
+  .rud-drawer-sheet { height:100%; max-height:100%; background:#fff; box-shadow:-12px 0 40px rgba(15,23,42,.18); display:flex; flex-direction:column; border-left:1px solid #e2e8f0; animation:rud-drawer-slide .22s ease; min-height:0; }
   @keyframes rud-drawer-slide { from { transform:translateX(12px); opacity:.92; } to { transform:translateX(0); opacity:1; } }
-  .rud-drawer-head { flex-shrink:0; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:18px 20px; border-bottom:1px solid #e2e8f0; background:linear-gradient(180deg,#fafafa,#fff); }
+  .rud-drawer-head { flex-shrink:0; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:16px 18px 14px; padding-top:max(16px,env(safe-area-inset-top,0)); border-bottom:1px solid #e2e8f0; background:linear-gradient(180deg,#fafafa,#fff); }
   .rud-drawer-kicker { margin:0 0 4px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
   .rud-drawer-title { margin:0; font-size:1.15rem; font-weight:800; color:#0f172a; }
-  .rud-drawer-close { border:0; background:#f1f5f9; width:36px; height:36px; border-radius:10px; font-size:1.35rem; line-height:1; cursor:pointer; color:#64748b; flex-shrink:0; }
+  .rud-drawer-context { margin:6px 0 0; font-size:12px; line-height:1.45; max-width:min(360px,100%); word-break:break-word; }
+  .rud-drawer-close { border:0; background:#f1f5f9; min-width:44px; min-height:44px; width:44px; height:44px; border-radius:10px; font-size:1.35rem; line-height:1; cursor:pointer; color:#64748b; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
   .rud-drawer-close:hover { background:#e2e8f0; color:#0f172a; }
-  .rud-drawer-body { flex:1; overflow-y:auto; padding:18px 20px 24px; display:flex; flex-direction:column; gap:14px; }
+  .rud-drawer-form { flex:1; min-height:0; display:flex; flex-direction:column; }
+  .rud-drawer-scroll { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:16px 18px 20px; padding-bottom:calc(24px + env(safe-area-inset-bottom,0)); display:flex; flex-direction:column; gap:14px; }
   .rud-field { display:grid; gap:6px; margin:0; }
   .rud-field-label { font-size:12px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:.04em; }
   .rud-fieldset { border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; margin:0; }
@@ -8144,8 +8157,10 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   .rud-hint { margin:4px 0 0; font-size:12px; }
   .rud-req { color:#b91c1c; }
   .rud-form-err { margin:0; }
-  .rud-drawer-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:auto; padding-top:12px; flex-wrap:wrap; border-top:1px solid #f1f5f9; }
-  .rud-drawer-submit { padding:11px 20px; border:0; border-radius:10px; font-weight:800; font-size:14px; cursor:pointer; }
+  .rud-drawer-actions { flex-shrink:0; display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:12px; padding:12px 18px 14px; padding-bottom:max(14px,calc(10px + env(safe-area-inset-bottom,0))); border-top:1px solid #e2e8f0; background:#fff; box-shadow:0 -10px 28px rgba(15,23,42,.07); }
+  .rud-drawer-cancel { min-height:44px; padding:8px 14px; display:inline-flex; align-items:center; font-size:14px; font-weight:600; }
+  .rud-drawer-submit { min-height:44px; padding:11px 22px; border:0; border-radius:10px; font-weight:800; font-size:14px; cursor:pointer; }
+  .rud-drawer-submit:disabled { opacity:.55; cursor:not-allowed; }
   .rud-drawer-submit-charge { background:#0f766e; color:#fff; }
   .rud-drawer-submit-pay { background:#0369a1; color:#fff; }
   .rud-hidden { display:none !important; }
