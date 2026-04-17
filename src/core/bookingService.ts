@@ -1,4 +1,11 @@
-import { BookingStatus, ChannelProvider, ConversationState, PaymentStatus, UserRole } from "@prisma/client";
+import {
+  BookingStatus,
+  ChannelProvider,
+  ConversationState,
+  HousekeepingTaskStatus,
+  PaymentStatus,
+  UserRole
+} from "@prisma/client";
 import { recordBookingStatusChange } from "./bookingStatusHistory";
 import { allocateBookingReferenceCode } from "./bookingReference";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -17,6 +24,16 @@ function parseOpsRoomStatusFromNotes(notes: string | null | undefined): OpsRoomS
   if (!notes) return null;
   const m = notes.match(/@manual-status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)@/i);
   return (m?.[1]?.toUpperCase() as OpsRoomStatus | undefined) ?? null;
+}
+
+/** Blocks guest assignment when unit is in cleaning or maintenance (room-board [status:] or legacy @manual-status). */
+export function isRoomUnitBlockedForGuestAssignment(notes: string | null | undefined): boolean {
+  const ops = parseOpsRoomStatusFromNotes(notes);
+  if (ops === "CLEANING" || ops === "MAINTENANCE") return true;
+  if (!notes) return false;
+  const m = notes.match(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/i);
+  const s = m?.[1]?.toUpperCase();
+  return s === "CLEANING" || s === "MAINTENANCE";
 }
 
 export async function autoAssignRoomUnitForBookingTx(params: {
@@ -49,8 +66,7 @@ export async function autoAssignRoomUnitForBookingTx(params: {
   const occupied = new Set(overlaps.map((row) => row.roomUnitId).filter((id): id is string => Boolean(id)));
   const candidate = units.find((unit) => {
     if (occupied.has(unit.id)) return false;
-    const ops = parseOpsRoomStatusFromNotes(unit.notes);
-    return ops !== "CLEANING" && ops !== "MAINTENANCE";
+    return !isRoomUnitBlockedForGuestAssignment(unit.notes);
   });
   return candidate?.id ?? null;
 }
@@ -384,6 +400,149 @@ export async function createConfirmedBookingAtomic(params: {
     propertyId: offer.propertyId,
     nights: offer.nights,
     totalAmount: offer.total
+  };
+}
+
+/**
+ * Physical unit overlap check (any room type). Excludes the given booking so moves stay idempotent.
+ */
+export async function assertRoomUnitAvailableForBookingStayTx(
+  tx: Prisma.TransactionClient,
+  params: {
+    hotelId: string;
+    roomUnitId: string;
+    checkIn: Date;
+    checkOut: Date;
+    excludeBookingId: string;
+  }
+): Promise<void> {
+  const unit = await tx.roomUnit.findFirst({
+    where: { id: params.roomUnitId, hotelId: params.hotelId, isActive: true },
+    select: { id: true, notes: true }
+  });
+  if (!unit) {
+    throw new Error("Target room unit was not found or is inactive.");
+  }
+  if (isRoomUnitBlockedForGuestAssignment(unit.notes)) {
+    throw new Error("Target room is blocked for housekeeping or maintenance.");
+  }
+
+  const overlap = await tx.booking.count({
+    where: {
+      hotelId: params.hotelId,
+      roomUnitId: params.roomUnitId,
+      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+      checkIn: { lt: params.checkOut },
+      checkOut: { gt: params.checkIn },
+      id: { not: params.excludeBookingId }
+    }
+  });
+  if (overlap > 0) {
+    throw new Error("Target room is already assigned for overlapping stay dates.");
+  }
+}
+
+export type BookingRoomReassignmentResult = {
+  fromRoomUnitId: string | null;
+  toRoomUnitId: string;
+  fromRoomUnitName: string | null;
+  toRoomUnitName: string;
+};
+
+/**
+ * Moves a booking to another physical unit (same room type). Updates MAIN folio unit, folio lines tied to the old unit,
+ * and open housekeeping tasks for this booking on the old unit. Caller should log audit.
+ */
+export async function reassignBookingRoomUnitTx(
+  tx: Prisma.TransactionClient,
+  params: { hotelId: string; bookingId: string; targetRoomUnitId: string }
+): Promise<BookingRoomReassignmentResult> {
+  const booking = await tx.booking.findFirst({
+    where: { id: params.bookingId, hotelId: params.hotelId },
+    select: {
+      id: true,
+      roomTypeId: true,
+      roomUnitId: true,
+      checkIn: true,
+      checkOut: true,
+      status: true
+    }
+  });
+  if (!booking) {
+    throw new Error("Booking not found.");
+  }
+  if (booking.status !== BookingStatus.PENDING && booking.status !== BookingStatus.CONFIRMED) {
+    throw new Error("Only pending or confirmed bookings can change room assignment.");
+  }
+
+  const target = await tx.roomUnit.findFirst({
+    where: { id: params.targetRoomUnitId, hotelId: params.hotelId, isActive: true },
+    select: { id: true, name: true, roomTypeId: true, notes: true }
+  });
+  if (!target) {
+    throw new Error("Target room unit was not found or is inactive.");
+  }
+  if (target.roomTypeId !== booking.roomTypeId) {
+    throw new Error(
+      "Room change requires the same room category as the booking. Adjust room type separately if an upgrade/downgrade is needed."
+    );
+  }
+
+  await assertRoomUnitAvailableForBookingStayTx(tx, {
+    hotelId: params.hotelId,
+    roomUnitId: target.id,
+    checkIn: booking.checkIn,
+    checkOut: booking.checkOut,
+    excludeBookingId: booking.id
+  });
+
+  const fromId = booking.roomUnitId;
+  if (fromId === target.id) {
+    return {
+      fromRoomUnitId: fromId,
+      toRoomUnitId: target.id,
+      fromRoomUnitName: target.name,
+      toRoomUnitName: target.name
+    };
+  }
+
+  let fromName: string | null = null;
+  if (fromId) {
+    const fromUnit = await tx.roomUnit.findUnique({ where: { id: fromId }, select: { name: true } });
+    fromName = fromUnit?.name ?? null;
+  }
+
+  await tx.booking.update({
+    where: { id: booking.id },
+    data: { roomUnitId: target.id }
+  });
+
+  await tx.folio.updateMany({
+    where: { hotelId: params.hotelId, bookingId: booking.id, folioCode: "MAIN" },
+    data: { roomUnitId: target.id }
+  });
+
+  if (fromId) {
+    await tx.folioTransaction.updateMany({
+      where: { hotelId: params.hotelId, bookingId: booking.id, roomUnitId: fromId },
+      data: { roomUnitId: target.id }
+    });
+    await tx.housekeepingTask.updateMany({
+      where: {
+        hotelId: params.hotelId,
+        bookingId: booking.id,
+        roomUnitId: fromId,
+        status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+      },
+      data: { roomUnitId: target.id }
+    });
+  }
+
+  return {
+    fromRoomUnitId: fromId,
+    toRoomUnitId: target.id,
+    fromRoomUnitName: fromName,
+    toRoomUnitName: target.name
   };
 }
 

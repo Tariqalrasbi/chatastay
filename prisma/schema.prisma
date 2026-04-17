@@ -285,6 +285,7 @@ model Hotel {
   conversations  Conversation[]
   messages       Message[]
   bookings       Booking[]
+  bookingGroups  BookingGroup[]
   subscriptions  Subscription[]
   invoices       Invoice[]
   paymentIntents PaymentIntent[]
@@ -669,6 +670,18 @@ model Message {
   @@unique([conversationId, providerMessageId])
 }
 
+/// Links multiple room bookings under one payer / account (family or group). Optional; null = standalone booking.
+model BookingGroup {
+  id        String    @id @default(cuid())
+  hotelId   String
+  hotel     Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  label     String?
+  createdAt DateTime  @default(now())
+  bookings  Booking[]
+
+  @@index([hotelId, createdAt])
+}
+
 model Booking {
   id             String        @id @default(cuid())
   hotelId        String
@@ -679,6 +692,10 @@ model Booking {
   roomType       RoomType      @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
   roomUnitId     String?
   roomUnit       RoomUnit?     @relation(fields: [roomUnitId], references: [id], onDelete: SetNull)
+  bookingGroupId String?
+  bookingGroup   BookingGroup? @relation(fields: [bookingGroupId], references: [id], onDelete: SetNull)
+  /// When part of a BookingGroup, marks the booking that owns invoicing / payer accountability in the UI (one per group).
+  isPrimaryPayer Boolean       @default(false)
   guestId        String
   guest          Guest         @relation(fields: [guestId], references: [id], onDelete: Restrict)
   conversationId String?
@@ -724,6 +741,7 @@ model Booking {
 
   @@unique([hotelId, referenceCode])
   @@index([hotelId, referenceCode])
+  @@index([hotelId, bookingGroupId])
 }
 
 /// Immutable log of booking lifecycle status changes (PMS audit / reporting).

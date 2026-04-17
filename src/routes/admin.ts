@@ -59,7 +59,14 @@ import {
 import { getHousekeepingStaffPerformance } from "../core/hkPerformance";
 import { defaultHotelSlug } from "../config/tenancy";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
-import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
+import {
+  assertRoomUnitAvailableForBookingStayTx,
+  autoAssignRoomUnitForBookingTx,
+  isRoomUnitBlockedForGuestAssignment,
+  reassignBookingRoomUnitTx,
+  releaseInventoryForStayRange,
+  reserveInventoryForBooking
+} from "../core/bookingService";
 import { recordBookingStatusChange } from "../core/bookingStatusHistory";
 import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { loadPartnerSetupConfig, savePartnerSetupConfig, applyPartnerTemplate, type PartnerSetupConfig } from "../core/partnerSetup";
@@ -7035,6 +7042,39 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     })
   ]);
 
+  let linkedRoomsBanner = "";
+  if (booking?.bookingGroupId) {
+    const siblings = await prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        bookingGroupId: booking.bookingGroupId,
+        id: { not: booking.id },
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.PENDING] }
+      },
+      orderBy: { checkIn: "asc" },
+      select: { id: true, referenceCode: true, roomUnit: { select: { name: true } } },
+      take: 12
+    });
+    if (siblings.length) {
+      const parts: string[] = [];
+      for (const s of siblings) {
+        const uc = s.roomUnit?.name ?? (await getBookingUnitCode(s.id));
+        parts.push(
+          `<a class="inline-link" href="/admin/bookings/${encodeURIComponent(s.id)}">${escapeHtml(
+            displayBookingReference(s)
+          )}</a>${uc ? ` <span class="muted">(${escapeHtml(uc)})</span>` : ""}`
+        );
+      }
+      linkedRoomsBanner = `<p class="rud-banner-warn" style="margin:0 0 10px"><strong>Other linked rooms (same group):</strong> ${parts.join(
+        " · "
+      )}</p>`;
+    }
+  }
+  const rudChangeRoomLink =
+    booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.PENDING)
+      ? `<a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/change-room">Change room</a>`
+      : "";
+
   const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
   const hasConfirmed = Boolean(booking && booking.status === "CONFIRMED");
   const hasPending = Boolean(booking && booking.status === "PENDING");
@@ -7307,12 +7347,14 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     </div>
   </header>
   ${savedNotice}
+  ${linkedRoomsBanner}
   <div id="folio-toast" class="rud-toast" role="status" aria-live="polite"></div>
 
   <nav class="rud-toolbar" aria-label="Page actions">
     <div class="rud-toolbar-row rud-toolbar-secondary">
       <a class="btn-link" href="/admin/profile">Back to Hotel Profile</a>
       <a class="btn-link primary" href="/admin/room-board?date=${dateKey}">Back to Room Board</a>
+      ${rudChangeRoomLink}
       <a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/invoice?date=${dateKey}">Open guest invoice</a>
       <form method="post" action="/admin/room-board/unit/${encodeURIComponent(unit.id)}/send-whatsapp" style="display:inline-flex;margin:0">
         <input type="hidden" name="date" value="${dateKey}" />
@@ -13894,6 +13936,20 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
   const receiptSentNotice = req.query.receiptSent ? '<p class="badge ok">Receipt PDF sent to guest.</p>' : "";
   const invoiceErrorNotice =
     typeof req.query.invoiceError === "string" ? `<p class="badge alert">${escapeHtml(req.query.invoiceError)}</p>` : "";
+  const roomChangedNotice = req.query.roomChanged
+    ? '<p class="badge ok">Room assignment updated. Folio lines, housekeeping tasks, and the room board now follow the new unit where applicable.</p>'
+    : "";
+  const linkedAddedNotice = req.query.linkedAdded
+    ? '<p class="badge ok">Linked room booking created under the same group.</p>'
+    : "";
+  const roomChangeErrBanner =
+    typeof req.query.roomChangeError === "string" && req.query.roomChangeError.trim().length > 0
+      ? `<p class="badge alert" role="alert">${escapeHtml(req.query.roomChangeError.trim().slice(0, 500))}</p>`
+      : "";
+  const canChangeRoom =
+    booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.PENDING;
+  const canAddLinkedRoom =
+    booking.status !== BookingStatus.CANCELLED && booking.status !== BookingStatus.NO_SHOW;
   const [selectedUnitCode, latestInvoiceDispatch, fbFolio, fbOrders] = await Promise.all([
     getBookingUnitCode(booking.id),
     getLatestInvoiceDispatch(booking.id),
@@ -13943,6 +13999,53 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
     )
     .join("");
 
+  let groupSectionHtml = "";
+  if (booking.bookingGroupId) {
+    const members = await prisma.booking.findMany({
+      where: { hotelId: hotel.id, bookingGroupId: booking.bookingGroupId },
+      orderBy: { createdAt: "asc" },
+      include: { roomType: true, roomUnit: { select: { name: true } }, paymentIntents: true }
+    });
+    let groupRollupOutstanding = 0;
+    const rows: string[] = [];
+    for (const m of members) {
+      const unitCode = m.roomUnit?.name ?? (await getBookingUnitCode(m.id));
+      const succ = m.paymentIntents
+        .filter((p) => p.status === PaymentStatus.SUCCEEDED)
+        .reduce((sum, p) => sum + p.amount, 0);
+      const summary = await getFolioSummary({
+        hotelId: hotel.id,
+        bookingId: m.id,
+        bookingTotalAmount: m.totalAmount,
+        currency: m.currency,
+        paymentIntentsSucceededTotal: succ
+      });
+      groupRollupOutstanding += summary.outstandingBalance;
+      const primaryLabel = m.isPrimaryPayer ? ' <span class="badge ok" style="font-size:11px">Primary payer</span>' : "";
+      rows.push(`<tr>
+      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(m.id)}">${escapeHtml(displayBookingReference(m))}</a>${primaryLabel}</td>
+      <td>${escapeHtml(m.roomType.name)}</td>
+      <td>${unitCode ? escapeHtml(unitCode) : '<span class="muted">—</span>'}</td>
+      <td>${formatDate(m.checkIn)} → ${formatDate(m.checkOut)}</td>
+      <td><span class="badge ${getBadgeClass(m.status)}">${escapeHtml(m.status)}</span></td>
+      <td style="text-align:right">${formatMoney(summary.outstandingBalance, m.currency)}</td>
+      </tr>`);
+    }
+    groupSectionHtml = `
+<section style="margin:18px 0">
+  <h3>Linked rooms (same booking group)</h3>
+  <p class="muted" style="margin-top:0">One guest account; each row is its own stay and folio. Combined outstanding is for front-desk visibility only.</p>
+  <table>
+    <thead><tr><th>Booking</th><th>Room type</th><th>Unit</th><th>Stay</th><th>Status</th><th style="text-align:right">Outstanding</th></tr></thead>
+    <tbody>${rows.join("") || "<tr><td colspan=\"6\">No rows</td></tr>"}</tbody>
+    <tfoot><tr><th colspan="5" style="text-align:right">Combined outstanding</th><th style="text-align:right">${formatMoney(
+      groupRollupOutstanding,
+      booking.currency
+    )}</th></tr></tfoot>
+  </table>
+</section>`;
+  }
+
   const conversationLink = booking.conversationId
     ? `<a class="inline-link" href="/admin/conversations/${encodeURIComponent(booking.conversationId)}">Open linked conversation</a>`
     : '<span class="muted">No conversation linked.</span>';
@@ -13957,12 +14060,26 @@ ${invoiceSentNotice}
 ${quotationSentNotice}
 ${receiptSentNotice}
 ${invoiceErrorNotice}
+${roomChangedNotice}
+${linkedAddedNotice}
+${roomChangeErrBanner}
 ${noUnitWarning}
+${groupSectionHtml}
 <div class="actions">
   <a class="btn-link" href="/admin/bookings">Back to reports</a>
   <a class="btn-link" href="/admin/calendar?start=${formatDate(booking.checkIn)}&days=14">Open calendar around stay</a>
   <a class="btn-link primary" href="/admin/inventory?start=${formatDate(booking.checkIn)}&days=7">Adjust inventory around check-in</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/select-unit">Select room unit</a>
+  ${
+    canChangeRoom
+      ? `<a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/change-room">Change room</a>`
+      : ""
+  }
+  ${
+    canAddLinkedRoom
+      ? `<a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/add-linked-room">Add linked room</a>`
+      : ""
+  }
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/confirm">Confirmation summary</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/fb-order">Post F&amp;B charge (restaurant / coffee)</a>
   <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">F&amp;B menu &amp; prices</a>
@@ -14146,6 +14263,11 @@ adminRouter.get("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT
     return;
   }
 
+  const selectUnitError =
+    typeof req.query.error === "string" && req.query.error.trim().length > 0
+      ? `<p class="badge alert" role="alert">${escapeHtml(req.query.error.trim().slice(0, 500))}</p>`
+      : "";
+
   const [selectedUnitCode, minInventory, bookedUnits, allUnits] = await Promise.all([
     getBookingUnitCode(booking.id),
     getMinInventoryForStay({
@@ -14165,11 +14287,12 @@ adminRouter.get("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT
     prisma.roomUnit.findMany({
       where: { hotelId: hotel.id, roomTypeId: booking.roomTypeId, isActive: true },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-      select: { name: true }
+      select: { name: true, notes: true }
     })
   ]);
 
   const availableUnits = allUnits
+    .filter((unit) => !isRoomUnitBlockedForGuestAssignment(unit.notes))
     .map((unit) => unit.name)
     .filter((name) => !bookedUnits.has(name) || name === selectedUnitCode);
 
@@ -14180,6 +14303,7 @@ adminRouter.get("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT
   const content = `
 <h2>Select Room Unit</h2>
 <p class="muted">Assign one specific unit to this booking before final confirmation.</p>
+${selectUnitError}
 ${renderBookingWizard(2, { bookingId: booking.id, conversationId: booking.conversationId ?? undefined })}
 <div class="actions">
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Back to booking</a>
@@ -14239,10 +14363,27 @@ adminRouter.post("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDI
     return;
   }
 
-  await prisma.booking.update({
-    where: { id: booking.id },
-    data: { roomUnitId: unit.id }
-  });
+  try {
+    await prisma.$transaction(async (tx) => {
+      await assertRoomUnitAvailableForBookingStayTx(tx, {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        excludeBookingId: booking.id
+      });
+      await tx.booking.update({
+        where: { id: booking.id },
+        data: { roomUnitId: unit.id }
+      });
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Could not assign this unit.";
+    res.redirect(
+      `/admin/bookings/${encodeURIComponent(booking.id)}/select-unit?error=${encodeURIComponent(msg)}`
+    );
+    return;
+  }
 
   await logAudit({
     hotelId: hotel.id,
@@ -14284,6 +14425,439 @@ adminRouter.post("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDI
   }
 
   res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}/confirm`);
+});
+
+adminRouter.get("/bookings/:id/change-room", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Change room</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    include: { guest: true, roomType: true }
+  });
+  if (!booking) {
+    res.status(404).type("html").send(renderLayout("<h2>Change room</h2><p>Booking not found.</p>", true));
+    return;
+  }
+  if (booking.status === BookingStatus.CANCELLED || booking.status === BookingStatus.NO_SHOW) {
+    res.redirect(
+      `/admin/bookings/${encodeURIComponent(booking.id)}?roomChangeError=${encodeURIComponent(
+        "Cancelled or no-show bookings cannot change room."
+      )}`
+    );
+    return;
+  }
+
+  const errQ = typeof req.query.error === "string" ? req.query.error.trim() : "";
+  const errorBanner = errQ ? `<p class="badge alert" role="alert">${escapeHtml(errQ.slice(0, 500))}</p>` : "";
+
+  const [selectedUnitCode, bookedUnits, allUnits] = await Promise.all([
+    getBookingUnitCode(booking.id),
+    getBookedUnitsForStay({
+      hotelId: hotel.id,
+      roomTypeId: booking.roomTypeId,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      excludeBookingId: booking.id
+    }),
+    prisma.roomUnit.findMany({
+      where: { hotelId: hotel.id, roomTypeId: booking.roomTypeId, isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: { id: true, name: true, notes: true }
+    })
+  ]);
+
+  const eligible = allUnits.filter((u) => {
+    if (isRoomUnitBlockedForGuestAssignment(u.notes)) return false;
+    const taken = bookedUnits.has(u.name) && u.name !== selectedUnitCode;
+    return !taken;
+  });
+
+  const optionsHtml = eligible
+    .map(
+      (u) =>
+        `<option value="${escapeHtml(u.id)}">${escapeHtml(u.name)}${
+          u.id === booking.roomUnitId ? " (current)" : ""
+        }</option>`
+    )
+    .join("");
+
+  const content = `
+<h2>Change room</h2>
+<p class="muted">Move this stay to another physical room of the same category. Availability is checked for the full stay (${escapeHtml(
+    formatDate(booking.checkIn)
+  )} → ${escapeHtml(formatDate(booking.checkOut))}).</p>
+${errorBanner}
+<div class="actions">
+  <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Back to booking</a>
+  <a class="btn-link" href="/admin/room-board?date=${formatDateForInput(startOfDay(booking.checkIn))}">Room board</a>
+</div>
+<table>
+  <tbody>
+    <tr><th>Booking</th><td>${escapeHtml(displayBookingReference(booking))} <code>${escapeHtml(booking.id)}</code></td></tr>
+    <tr><th>Guest</th><td>${escapeHtml(booking.guest.fullName ?? booking.guest.phoneE164)}</td></tr>
+    <tr><th>Room type</th><td>${escapeHtml(booking.roomType.name)}</td></tr>
+    <tr><th>Current unit</th><td>${selectedUnitCode ? escapeHtml(selectedUnitCode) : '<span class="muted">Not assigned</span>'}</td></tr>
+  </tbody>
+</table>
+<form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/change-room" style="max-width:520px; margin-top:16px; display:grid; gap:10px">
+  <label>Target room
+    <select name="targetRoomUnitId" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="">Select a room</option>
+      ${optionsHtml || '<option value="" disabled>No eligible units</option>'}
+    </select>
+  </label>
+  <label>Reason (optional)
+    <textarea name="reason" maxlength="500" rows="2" placeholder="e.g. Guest request, maintenance in original room" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px"></textarea>
+  </label>
+  <label style="display:flex; gap:8px; align-items:flex-start; font-weight:600">
+    <input type="checkbox" name="confirmed" value="1" required style="margin-top:4px" />
+    <span>I confirm this room change. Availability is validated again when you save.</span>
+  </label>
+  <button type="submit" style="padding:10px 14px; border:0; border-radius:8px; background:#128c7e; color:#fff; font-weight:700" ${
+    eligible.length ? "" : "disabled"
+  }>Apply change</button>
+</form>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/bookings/:id/change-room", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  if (req.body.confirmed !== "1") {
+    res.redirect(
+      `/admin/bookings/${encodeURIComponent(bookingId)}/change-room?error=${encodeURIComponent(
+        "Confirm the room change before saving."
+      )}`
+    );
+    return;
+  }
+  const targetRoomUnitId = String(req.body.targetRoomUnitId ?? "").trim();
+  const reason = String(req.body.reason ?? "").trim().slice(0, 500);
+  if (!targetRoomUnitId) {
+    res.redirect(
+      `/admin/bookings/${encodeURIComponent(bookingId)}/change-room?error=${encodeURIComponent("Select a target room.")}`
+    );
+    return;
+  }
+
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    select: { id: true, status: true }
+  });
+  if (!booking) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  if (booking.status === BookingStatus.CANCELLED || booking.status === BookingStatus.NO_SHOW) {
+    res.redirect(
+      `/admin/bookings/${encodeURIComponent(bookingId)}?roomChangeError=${encodeURIComponent(
+        "Cancelled or no-show bookings cannot change room."
+      )}`
+    );
+    return;
+  }
+
+  let meta: Awaited<ReturnType<typeof reassignBookingRoomUnitTx>>;
+  try {
+    meta = await prisma.$transaction(async (tx) =>
+      reassignBookingRoomUnitTx(tx, { hotelId: hotel.id, bookingId: booking.id, targetRoomUnitId })
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Room change failed.";
+    res.redirect(`/admin/bookings/${encodeURIComponent(bookingId)}/change-room?error=${encodeURIComponent(msg)}`);
+    return;
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "BOOKING_ROOM_REASSIGNED",
+    entityType: "Booking",
+    entityId: booking.id,
+    bookingId: booking.id,
+    metadata: {
+      fromRoomUnitId: meta.fromRoomUnitId,
+      toRoomUnitId: meta.toRoomUnitId,
+      fromRoomUnitName: meta.fromRoomUnitName,
+      toRoomUnitName: meta.toRoomUnitName,
+      reason: reason || undefined
+    }
+  });
+
+  res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}?roomChanged=1`);
+});
+
+adminRouter.get("/bookings/:id/add-linked-room", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Add linked room</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const bookingId = String(req.params.id ?? "");
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    include: { guest: true, roomType: true }
+  });
+  if (!booking) {
+    res.status(404).type("html").send(renderLayout("<h2>Add linked room</h2><p>Booking not found.</p>", true));
+    return;
+  }
+  if (booking.status === BookingStatus.CANCELLED) {
+    res.redirect(`/admin/bookings/${encodeURIComponent(booking.id)}`);
+    return;
+  }
+
+  const errQ = typeof req.query.error === "string" ? req.query.error.trim() : "";
+  const errorBanner = errQ ? `<p class="badge alert" role="alert">${escapeHtml(errQ.slice(0, 500))}</p>` : "";
+
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, baseNightlyRate: true }
+  });
+  const roomOptions = roomTypes
+    .map(
+      (rt) =>
+        `<option value="${escapeHtml(rt.id)}">${escapeHtml(rt.name)} (${formatMoney(rt.baseNightlyRate, hotel.currency)}/night)</option>`
+    )
+    .join("");
+
+  const content = `
+<h2>Add linked room</h2>
+<p class="muted">Create another confirmed stay for <strong>${escapeHtml(
+    booking.guest.fullName ?? booking.guest.phoneE164
+  )}</strong> under the same booking group (one payer / family). Each room keeps its own folio; totals are shown together on the primary booking.</p>
+${errorBanner}
+<div class="actions">
+  <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Back to booking</a>
+</div>
+<form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/add-linked-room" style="max-width:640px; display:grid; gap:10px; margin-top:12px">
+  <label>Room type
+    <select name="roomTypeId" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">${roomOptions}</select>
+  </label>
+  <div class="grid-2">
+    <label>Check-in
+      <input type="date" name="checkIn" value="${formatDateForInput(startOfDay(booking.checkIn))}" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    </label>
+    <label>Check-out
+      <input type="date" name="checkOut" value="${formatDateForInput(startOfDay(booking.checkOut))}" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Adults
+      <input type="number" name="adults" value="${booking.adults}" min="1" max="8" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    </label>
+    <label>Children
+      <input type="number" name="children" value="${booking.children}" min="0" max="6" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+    </label>
+  </div>
+  <p class="muted" style="margin:0;font-size:13px">Room rent is calculated from the room type rack rate × nights (same as a quick desk booking). Assign the physical unit on the next screen if auto-assign cannot pick one.</p>
+  <button type="submit" style="padding:10px 14px; border:0; border-radius:8px; background:#128c7e; color:#fff; font-weight:700">Create linked booking</button>
+</form>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/bookings/:id/add-linked-room", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+  if (!hotel) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  const primaryId = String(req.params.id ?? "");
+  const roomTypeId = String(req.body.roomTypeId ?? "").trim();
+  const checkIn = startOfDay(parseDateInput(req.body.checkIn, startOfDay(new Date())));
+  const checkOut = startOfDay(parseDateInput(req.body.checkOut, addDays(checkIn, 1)));
+  const adults = clamp(parseIntegerInput(req.body.adults, 2), 1, 8);
+  const children = clamp(parseIntegerInput(req.body.children, 0), 0, 6);
+
+  const fail = (msg: string) => {
+    res.redirect(`/admin/bookings/${encodeURIComponent(primaryId)}/add-linked-room?error=${encodeURIComponent(msg)}`);
+  };
+
+  if (checkOut.getTime() <= checkIn.getTime()) {
+    fail("Check-out must be after check-in.");
+    return;
+  }
+
+  const primary = await prisma.booking.findFirst({
+    where: { id: primaryId, hotelId: hotel.id },
+    include: { guest: true }
+  });
+  if (!primary) {
+    res.redirect("/admin/bookings");
+    return;
+  }
+  if (primary.status === BookingStatus.CANCELLED) {
+    fail("Cannot add rooms to a cancelled booking.");
+    return;
+  }
+
+  const roomType = await prisma.roomType.findFirst({
+    where: { id: roomTypeId, hotelId: hotel.id, isActive: true }
+  });
+  if (!roomType) {
+    fail("Select a valid room type.");
+    return;
+  }
+
+  const occ = manualCheckInFitsRoomType(roomType, adults, children);
+  if (!occ.ok) {
+    fail(occ.message);
+    return;
+  }
+
+  const nights = nightsBetweenCheckInOut(checkIn, checkOut);
+  const totalAmount = Number((roomType.baseNightlyRate * nights).toFixed(2));
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    fail("Total amount must be greater than zero.");
+    return;
+  }
+
+  const newBookingId = buildBookingId();
+  let assignedUnitId: string | null = null;
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      let groupId = primary.bookingGroupId;
+      if (!groupId) {
+        const g = await tx.bookingGroup.create({
+          data: { hotelId: hotel.id, label: primary.referenceCode ?? primary.id.slice(0, 8) }
+        });
+        groupId = g.id;
+        await tx.booking.update({
+          where: { id: primary.id },
+          data: { bookingGroupId: groupId, isPrimaryPayer: true }
+        });
+      } else {
+        const hasPrimary = await tx.booking.findFirst({
+          where: { bookingGroupId: groupId, isPrimaryPayer: true },
+          select: { id: true }
+        });
+        if (!hasPrimary) {
+          await tx.booking.update({
+            where: { id: primary.id },
+            data: { isPrimaryPayer: true }
+          });
+        }
+      }
+
+      await assertInventoryCanReserveTx(tx, {
+        hotelId: hotel.id,
+        roomTypeId: roomType.id,
+        checkIn,
+        checkOut,
+        rooms: 1
+      });
+
+      const referenceCode = await allocateBookingReferenceCode(tx, {
+        hotelId: hotel.id,
+        source: ChannelProvider.DIRECT,
+        refDate: new Date()
+      });
+
+      await tx.booking.create({
+        data: {
+          id: newBookingId,
+          hotelId: hotel.id,
+          propertyId: roomType.propertyId,
+          roomTypeId: roomType.id,
+          guestId: primary.guestId,
+          conversationId: primary.conversationId,
+          checkIn,
+          checkOut,
+          nights,
+          adults,
+          children,
+          totalAmount,
+          currency: hotel.currency,
+          status: BookingStatus.CONFIRMED,
+          paymentStatus: primary.paymentStatus,
+          source: ChannelProvider.DIRECT,
+          referenceCode,
+          bookingGroupId: groupId!,
+          isPrimaryPayer: false,
+          mealPlan: primary.mealPlan ?? undefined
+        }
+      });
+
+      await recordBookingStatusChange(tx, {
+        hotelId: hotel.id,
+        bookingId: newBookingId,
+        fromStatus: null,
+        toStatus: BookingStatus.CONFIRMED,
+        source: "BOOKING_GROUP_ADD_ROOM"
+      });
+
+      await reserveInventoryForBooking({
+        tx,
+        hotelId: hotel.id,
+        roomTypeId: roomType.id,
+        propertyId: roomType.propertyId,
+        checkIn,
+        checkOut,
+        rooms: 1
+      });
+
+      assignedUnitId = await autoAssignRoomUnitForBookingTx({
+        tx,
+        hotelId: hotel.id,
+        roomTypeId: roomType.id,
+        checkIn,
+        checkOut,
+        excludeBookingId: newBookingId
+      });
+      if (assignedUnitId) {
+        await tx.booking.update({
+          where: { id: newBookingId },
+          data: { roomUnitId: assignedUnitId }
+        });
+      }
+
+      await ensureActiveFolio(tx, {
+        hotelId: hotel.id,
+        bookingId: newBookingId,
+        guestId: primary.guestId,
+        roomUnitId: assignedUnitId ?? undefined,
+        currency: hotel.currency,
+        staffId: null
+      });
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Could not create linked booking.";
+    fail(msg);
+    return;
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "BOOKING_GROUP_ROOM_ADDED",
+    entityType: "Booking",
+    entityId: newBookingId,
+    bookingId: newBookingId,
+    metadata: {
+      primaryBookingId: primary.id,
+      roomTypeId,
+      checkIn: formatDateForInput(checkIn),
+      checkOut: formatDateForInput(checkOut),
+      nights,
+      totalAmount
+    }
+  });
+
+  await refreshGuestSegmentTagsForGuest(primary.guestId).catch(() => undefined);
+
+  res.redirect(
+    assignedUnitId
+      ? `/admin/bookings/${encodeURIComponent(newBookingId)}?linkedAdded=1`
+      : `/admin/bookings/${encodeURIComponent(newBookingId)}/select-unit?fromGroup=1`
+  );
 });
 
 adminRouter.get("/bookings/:id/confirm", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
