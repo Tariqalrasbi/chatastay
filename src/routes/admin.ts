@@ -3989,7 +3989,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
           })
         : "";
       const unitDataAttr = card.unitId ? ` data-room-unit-id="${escapeHtml(card.unitId)}"` : "";
-      return `<div class="room-board-card ${colorClass}"${unitDataAttr}>
+      return `<div class="room-board-card ${colorClass}"${unitDataAttr} style="display:flex;flex-direction:column;min-width:0;max-width:100%;overflow-x:clip;align-items:stretch">
         <strong>${escapeHtml(card.unitName)}</strong>${card.unitId ? "" : ' <span class="badge pending" style="font-size:10px">no unit</span>'}
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.roomTypeName)}</div>
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.status)}</div>
@@ -4083,9 +4083,9 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   </div>
   <p style="margin-top:8px"><a class="btn-link" href="/admin/room-board">Open full room board</a></p>
   <style>
-    .room-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
-    .room-board-card { display:block; text-decoration:none; border-radius:10px; padding:10px; border:1px solid transparent; color:inherit; background:#fff; contain:layout; min-height:0; }
-    .room-board-card-actions { margin-top:10px; padding-top:10px; border-top:1px solid rgba(15,23,42,.12); width:100%; box-sizing:border-box; }
+    .room-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; align-items:stretch; }
+    .room-board-card { text-decoration:none; border-radius:10px; padding:10px; border:1px solid transparent; color:inherit; background:#fff; contain:layout; min-height:0; }
+    .room-board-card-actions { margin-top:auto; padding-top:10px; border-top:1px solid rgba(15,23,42,.12); width:100%; max-width:100%; box-sizing:border-box; flex-shrink:0; }
     .room-board-card:hover { opacity:0.92; }
     .room-board-green { border-color:#22c55e; background:#dcfce7; color:#166534; }
     .room-board-blue { border-color:#3b82f6; background:#dbeafe; color:#1e40af; }
@@ -4484,11 +4484,13 @@ function roomBoardStatusFormHtml(opts: {
   const selPad = opts.variant === "profile" ? "6px" : "4px 6px";
   const btnPad = opts.variant === "profile" ? "6px 10px" : "4px 8px";
   const s = opts.status;
+  const selIdRaw = `rbsel-${opts.unitId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+  const selId = selIdRaw.length > 0 ? selIdRaw : "rbsel-unit";
   return `<div class="room-board-card-actions" data-room-unit-id="${escapeHtml(opts.unitId)}">
-  <form method="post" action="/admin/room-board/unit/${encodeURIComponent(opts.unitId)}/status" class="room-board-status-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;width:100%;box-sizing:border-box;margin:0">
+  <form method="post" action="/admin/room-board/unit/${encodeURIComponent(opts.unitId)}/status" class="room-board-status-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;width:100%;max-width:100%;min-width:0;box-sizing:border-box;margin:0">
     <input type="hidden" name="date" value="${formatDateForInput(opts.boardDate)}" />
     ${hiddenReturn}
-    <select name="status" aria-label="Set room status" style="padding:${selPad};border:1px solid #d8dee6;border-radius:8px;font-size:12px;flex:1;min-width:0;max-width:100%">
+    <select id="${selId}" name="status" aria-label="Set room status" style="padding:${selPad};border:1px solid #d8dee6;border-radius:8px;font-size:12px;flex:1 1 auto;min-width:0;max-width:100%">
       <option value="AVAILABLE" ${s === "AVAILABLE" ? "selected" : ""}>Available</option>
       <option value="RESERVED" ${s === "RESERVED" ? "selected" : ""}>Reserved</option>
       <option value="OCCUPIED" ${s === "OCCUPIED" ? "selected" : ""}>Occupied</option>
@@ -5180,7 +5182,7 @@ adminRouter.get("/hk/room-board", requireAuth, requireHousekeepingPortal, requir
         returnTo: hkReturn,
         variant: "hk"
       });
-      return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:10px; border:2px solid currentColor; contain:layout;" data-room-unit-id="${escapeHtml(c.unitId!)}">
+      return `<div class="room-board-card ${statusClass}" style="display:flex;flex-direction:column;min-width:0;max-width:100%;overflow-x:clip;align-items:stretch;border-radius:10px; padding:10px; border:2px solid currentColor; contain:layout;" data-room-unit-id="${escapeHtml(c.unitId!)}">
   <div style="font-weight:800; font-size:1rem;">${escapeHtml(c.unitName)}</div>
   <div style="margin-top:6px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
   ${statusForm}
@@ -5204,12 +5206,13 @@ ${updatedNotice}
   <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Cleaning</strong><div>${statusCounts.CLEANING}</div></div>
   <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Maintenance</strong><div>${statusCounts.MAINTENANCE}</div></div>
 </div>
-<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px;">
+<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px; align-items:stretch;">
   ${roomCardsHtml || '<p class="muted">No rooms.</p>'}
 </div>
 <style>
   .room-board-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; }
-  .room-board-card-actions { margin-top:10px; padding-top:8px; border-top:1px solid rgba(15,23,42,.12); width:100%; box-sizing:border-box; }
+  .room-board-card { display:flex; flex-direction:column; min-width:0; max-width:100%; overflow-x:clip; align-items:stretch; }
+  .room-board-card-actions { margin-top:auto; padding-top:8px; border-top:1px solid rgba(15,23,42,.12); width:100%; max-width:100%; box-sizing:border-box; flex-shrink:0; }
   .room-status-available { background:#dcfce7; color:#166534; }
   .room-status-reserved { background:#dbeafe; color:#1e40af; }
   .room-status-occupied { background:#fee2e2; color:#991b1b; }
@@ -5288,7 +5291,7 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
             : "";
         const unitAttr =
           c.unitId && !c.isUnassignedBooking ? ` data-room-unit-id="${escapeHtml(c.unitId)}"` : "";
-        return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px; contain:layout;"${unitAttr}>
+        return `<div class="room-board-card ${statusClass}" style="display:flex;flex-direction:column;min-width:0;max-width:100%;overflow-x:clip;align-items:stretch;border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px; contain:layout;"${unitAttr}>
   <div style="font-weight:700; font-size:0.92rem; margin-bottom:2px;">${escapeHtml(c.unitName)}${c.isUnassignedBooking ? ' <span class="badge pending" style="font-size:10px">no unit</span>' : ""}</div>
   <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">${escapeHtml(c.name)}</div>
   <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
@@ -5346,7 +5349,7 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
   <article class="stat" style="border-left-color:#a855f7"><h3>Maintenance</h3><p>${statusCounts.MAINTENANCE}</p></article>
 </div>
 <p class="muted" style="margin-bottom:8px">Legend: <span class="room-board-badge room-status-available">Available</span> <span class="room-board-badge room-status-reserved">Reserved</span> <span class="room-board-badge room-status-occupied">Occupied</span> <span class="room-board-badge room-status-cleaning">Cleaning</span> <span class="room-board-badge room-status-maintenance">Maintenance</span></p>
-<div class="room-board-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:8px;">
+<div class="room-board-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:8px; align-items:stretch;">
   ${roomCardsHtml || '<p class="muted">No rooms match the filter.</p>'}
 </div>
 <style>
@@ -5367,8 +5370,10 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
     flex-shrink:0;
   }
   .room-board-date-arrow:hover { background:#e2e8f0; color:#075e54; }
+  .room-board-grid { align-items: stretch; }
+  .room-board-card { display:flex; flex-direction:column; min-width:0; max-width:100%; overflow-x:clip; align-items:stretch; }
   .room-board-card:hover { opacity:0.92; }
-  .room-board-card-actions { margin-top:8px; padding-top:8px; border-top:1px solid rgba(15,23,42,.12); width:100%; box-sizing:border-box; }
+  .room-board-card-actions { margin-top:auto; padding-top:8px; border-top:1px solid rgba(15,23,42,.12); width:100%; max-width:100%; box-sizing:border-box; flex-shrink:0; }
   .room-board-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; }
   .room-status-available { background:#dcfce7; color:#166534; border-color:#22c55e; }
   .room-status-reserved { background:#dbeafe; color:#1e40af; border-color:#3b82f6; }
