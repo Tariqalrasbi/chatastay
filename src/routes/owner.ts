@@ -13,6 +13,50 @@ import { isOwnerDigestSmtpConfigured } from "../core/ownerDigestMail";
 
 export const ownerRouter = Router();
 
+type FeedbackHealthStatus = "normal" | "watch" | "action_needed" | "no_feedback";
+
+function deriveFeedbackSignals(params: {
+  averageRating: number | null;
+  responseCount: number;
+  lowRatingCount: number;
+  recentLowRatingCount: number;
+  latestLowRatingAt: Date | null;
+}): {
+  averageRating: number | null;
+  responseCount: number;
+  lowRatingCount: number;
+  lowRatingRate: number;
+  latestLowRatingAt: Date | null;
+  recentNegativeFeedbackFlag: boolean;
+  repeatedIssueAlert: boolean;
+  feedbackStatus: FeedbackHealthStatus;
+} {
+  const responseCount = Math.max(0, params.responseCount || 0);
+  const lowRatingCount = Math.max(0, params.lowRatingCount || 0);
+  const averageRating = typeof params.averageRating === "number" ? params.averageRating : null;
+  const lowRatingRate = responseCount > 0 ? Number(((lowRatingCount / responseCount) * 100).toFixed(1)) : 0;
+  const recentNegativeFeedbackFlag = (params.recentLowRatingCount || 0) > 0;
+  const repeatedIssueAlert = (params.recentLowRatingCount || 0) >= 2;
+  const feedbackStatus: FeedbackHealthStatus =
+    responseCount === 0
+      ? "no_feedback"
+      : averageRating !== null && (averageRating < 3 || lowRatingCount >= 2)
+        ? "action_needed"
+        : (averageRating !== null && averageRating < 4) || lowRatingCount >= 1
+          ? "watch"
+          : "normal";
+  return {
+    averageRating,
+    responseCount,
+    lowRatingCount,
+    lowRatingRate,
+    latestLowRatingAt: params.latestLowRatingAt,
+    recentNegativeFeedbackFlag,
+    repeatedIssueAlert,
+    feedbackStatus
+  };
+}
+
 const ownerSessionCookieName = "chatastay_owner_session";
 const ownerSessions = new Map<string, { email: string; expiresAt: number }>();
 const ownerSessionTtlMs = 8 * 60 * 60 * 1000;
@@ -913,6 +957,13 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
   const hotelRowsSorted = [...kpi.hotelRows].sort(
     (a, b) => b.roomRevenue + b.fbRevenue - (a.roomRevenue + a.fbRevenue)
   );
+  const ratedRows = hotelRowsSorted.filter((h) => (feedbackMap.get(h.hotelId)?.count ?? 0) > 0);
+  const topRated = [...ratedRows]
+    .sort((a, b) => (feedbackMap.get(b.hotelId)?.avg ?? 0) - (feedbackMap.get(a.hotelId)?.avg ?? 0))
+    .slice(0, 3);
+  const lowRated = [...ratedRows]
+    .sort((a, b) => (feedbackMap.get(a.hotelId)?.avg ?? 0) - (feedbackMap.get(b.hotelId)?.avg ?? 0))
+    .slice(0, 3);
   const cancellationsTotal = kpi.hotelRows.reduce((sum, r) => sum + r.bookingsCancelled, 0);
 
   const roomRevLines = kpi.portfolioRoomRevenueByCurrency.length
@@ -972,6 +1023,7 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
       ? `${(feedbackMap.get(h.hotelId)?.avg ?? 0).toFixed(1)} ⭐ <span class="muted">(${feedbackMap.get(h.hotelId)?.count ?? 0})</span>`
       : "—"
   }</td>
+  <td><a class="btn-link" href="/hotel/${encodeURIComponent(h.slug)}" target="_blank" rel="noopener noreferrer">Public page</a></td>
   <td>${h.campaigns} <span class="muted">(${h.campaignSentOk} sent)</span></td>
   <td>${h.openInvoiceCount > 0 ? `${formatMoney(h.openInvoiceTotal, h.currency)} (${h.openInvoiceCount})` : "—"}</td>
 </tr>`;
@@ -1034,7 +1086,7 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Guest rating overview</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th><th>Low ratings (≤2)</th></tr></thead>
+  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th><th>Low ratings (≤2)</th><th>Preview</th></tr></thead>
   <tbody>${
     hotelRowsSorted
       .map((h) => {
@@ -1044,11 +1096,34 @@ ${attentionBlock}
     <td>${fb && fb.count > 0 ? `${fb.avg.toFixed(1)} ⭐` : "—"}</td>
     <td>${fb?.count ?? 0}</td>
     <td>${lowMap.get(h.hotelId) ?? 0}</td>
+    <td><a class="btn-link" href="/hotel/${encodeURIComponent(h.slug)}" target="_blank" rel="noopener noreferrer">Open</a></td>
   </tr>`;
       })
-      .join("") || `<tr><td colspan="4" class="muted">No feedback yet.</td></tr>`
+      .join("") || `<tr><td colspan="5" class="muted">No feedback yet.</td></tr>`
   }</tbody>
 </table>
+
+<h3 style="margin-top:22px">Rating leaders and risks</h3>
+<div class="grid-2">
+  <article class="stat">
+    <h3>Top 3 hotels</h3>
+    <ul>${topRated
+      .map(
+        (h) =>
+          `<li><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a> · ${(feedbackMap.get(h.hotelId)?.avg ?? 0).toFixed(1)} ⭐ <a class="muted" href="/hotel/${encodeURIComponent(h.slug)}" target="_blank" rel="noopener noreferrer">preview</a></li>`
+      )
+      .join("") || `<li class="muted">Not enough rating data.</li>`}</ul>
+  </article>
+  <article class="stat">
+    <h3>Lowest 3 hotels</h3>
+    <ul>${lowRated
+      .map(
+        (h) =>
+          `<li><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a> · ${(feedbackMap.get(h.hotelId)?.avg ?? 0).toFixed(1)} ⭐ <a class="muted" href="/hotel/${encodeURIComponent(h.slug)}" target="_blank" rel="noopener noreferrer">preview</a></li>`
+      )
+      .join("") || `<li class="muted">Not enough rating data.</li>`}</ul>
+  </article>
+</div>
 
 <h3 style="margin-top:22px">Subscription status (all hotels)</h3>
 <table>
@@ -1071,8 +1146,8 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Hotel comparison</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
-  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="10" class="muted">No hotels</td></tr>`}</tbody>
+  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Public</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
+  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="11" class="muted">No hotels</td></tr>`}</tbody>
 </table>`;
 
   res.type("html").send(ownerLayout(content, true));

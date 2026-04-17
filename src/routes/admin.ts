@@ -133,6 +133,50 @@ import {
 export const adminRouter = Router();
 export const authRouter = Router();
 
+type FeedbackHealthStatus = "normal" | "watch" | "action_needed" | "no_feedback";
+
+function deriveFeedbackSignals(params: {
+  averageRating: number | null;
+  responseCount: number;
+  lowRatingCount: number;
+  recentLowRatingCount: number;
+  latestLowRatingAt: Date | null;
+}): {
+  averageRating: number | null;
+  responseCount: number;
+  lowRatingCount: number;
+  lowRatingRate: number;
+  latestLowRatingAt: Date | null;
+  recentNegativeFeedbackFlag: boolean;
+  repeatedIssueAlert: boolean;
+  feedbackStatus: FeedbackHealthStatus;
+} {
+  const responseCount = Math.max(0, params.responseCount || 0);
+  const lowRatingCount = Math.max(0, params.lowRatingCount || 0);
+  const averageRating = typeof params.averageRating === "number" ? params.averageRating : null;
+  const lowRatingRate = responseCount > 0 ? Number(((lowRatingCount / responseCount) * 100).toFixed(1)) : 0;
+  const recentNegativeFeedbackFlag = (params.recentLowRatingCount || 0) > 0;
+  const repeatedIssueAlert = (params.recentLowRatingCount || 0) >= 2;
+  const feedbackStatus: FeedbackHealthStatus =
+    responseCount === 0
+      ? "no_feedback"
+      : averageRating !== null && (averageRating < 3 || lowRatingCount >= 2)
+        ? "action_needed"
+        : (averageRating !== null && averageRating < 4) || lowRatingCount >= 1
+          ? "watch"
+          : "normal";
+  return {
+    averageRating,
+    responseCount,
+    lowRatingCount,
+    lowRatingRate,
+    latestLowRatingAt: params.latestLowRatingAt,
+    recentNegativeFeedbackFlag,
+    repeatedIssueAlert,
+    feedbackStatus
+  };
+}
+
 const viewsDir = path.join(process.cwd(), "src", "views");
 const sessionCookieName = "chatastay_admin_session";
 type PermissionAction = "VIEW" | "EDIT" | "CREATE" | "DELETE" | "MANAGE";
@@ -3890,7 +3934,8 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   <a class="btn-link" href="/admin/leads">Lead pipeline</a>`
       : "";
   const profileDayRange = inventoryDayRangeExclusive(dayStart);
-  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings, feedbackAgg, feedbackRecent, lowFeedbackCount, unresolvedFeedbackCount] = await Promise.all([
+  const feedbackRecentSince = addDays(now, -30);
+  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings, feedbackAgg, feedbackRecent, lowFeedbackCount, unresolvedFeedbackCount, recentLowFeedbackCount, latestLowFeedback] = await Promise.all([
     prisma.booking.count({ where: { hotelId: hotel.id } }),
     prisma.booking.count({
       where: { hotelId: hotel.id, createdAt: { gte: monthStart } }
@@ -3943,10 +3988,33 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         managerFollowUpRequestedAt: { not: null },
         managerFollowUpClosedAt: null
       }
+    }),
+    prisma.guestFeedback.count({
+      where: { hotelId: hotel.id, rating: { lte: 2 }, createdAt: { gte: feedbackRecentSince } }
+    }),
+    prisma.guestFeedback.findFirst({
+      where: { hotelId: hotel.id, rating: { lte: 2 } },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true }
     })
   ]);
-  const feedbackAvg = Number((feedbackAgg._avg.rating ?? 0).toFixed(2));
-  const feedbackCount = feedbackAgg._count._all;
+  const feedbackSignals = deriveFeedbackSignals({
+    averageRating: feedbackAgg._avg.rating ?? null,
+    responseCount: feedbackAgg._count._all,
+    lowRatingCount: lowFeedbackCount,
+    recentLowRatingCount: recentLowFeedbackCount,
+    latestLowRatingAt: latestLowFeedback?.createdAt ?? null
+  });
+  const feedbackAvg = feedbackSignals.averageRating === null ? null : Number(feedbackSignals.averageRating.toFixed(2));
+  const feedbackCount = feedbackSignals.responseCount;
+  const feedbackStatusBadge =
+    feedbackSignals.feedbackStatus === "action_needed"
+      ? '<span class="badge alert">Action needed</span>'
+      : feedbackSignals.feedbackStatus === "watch"
+        ? '<span class="badge pending">Watch</span>'
+        : feedbackSignals.feedbackStatus === "normal"
+          ? '<span class="badge ok">Normal</span>'
+          : '<span class="badge">No feedback yet</span>';
   const feedbackRows = feedbackRecent
     .map(
       (r) => `<tr>
@@ -4224,15 +4292,22 @@ ${profilePropertyOnboarded}
 <section style="margin-top: 14px">
   <h3>Guest feedback</h3>
   <div class="grid-4">
-    <article class="stat"><h3>Average rating</h3><p>${feedbackCount ? `${feedbackAvg.toFixed(1)} ⭐` : "—"}</p></article>
+    <article class="stat"><h3>Average rating</h3><p>${feedbackCount && feedbackAvg !== null ? `${feedbackAvg.toFixed(1)} ⭐` : "—"}</p></article>
     <article class="stat"><h3>Total reviews</h3><p>${feedbackCount}</p></article>
-    <article class="stat"><h3>Low ratings (≤2)</h3><p>${lowFeedbackCount}</p></article>
+    <article class="stat"><h3>Low ratings (≤2)</h3><p>${feedbackSignals.lowRatingCount} <span class="muted">(${feedbackSignals.lowRatingRate.toFixed(1)}%)</span></p></article>
     <article class="stat"><h3>Unresolved issues</h3><p>${unresolvedFeedbackCount}</p></article>
   </div>
+  <p class="muted" style="margin-top:8px">
+    Feedback alert: ${feedbackStatusBadge}
+    ${feedbackSignals.recentNegativeFeedbackFlag ? ' · <span class="badge pending">Recent negative feedback</span>' : ""}
+    ${feedbackSignals.repeatedIssueAlert ? ' · <span class="badge alert">Repeated issue alert</span>' : ""}
+    · Latest low rating: ${feedbackSignals.latestLowRatingAt ? formatDateTime(feedbackSignals.latestLowRatingAt) : "—"}
+  </p>
   <table>
     <thead><tr><th>Rating</th><th>Category</th><th>Comment</th><th>Guest</th><th>Recovery</th><th>Date</th></tr></thead>
     <tbody>${feedbackRows || '<tr><td colspan="6">No feedback yet.</td></tr>'}</tbody>
   </table>
+  <p class="muted" style="margin-top:8px">Public trust page: <a class="inline-link" href="/hotel/${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Open public rating page</a></p>
 </section>
 
 <section style="margin-top: 14px">

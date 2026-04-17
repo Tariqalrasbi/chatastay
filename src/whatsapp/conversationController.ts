@@ -1427,6 +1427,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         guestId: guest.id,
         guestName: guest.fullName ?? undefined,
         rating: feedbackRating,
+        isHappyGuest: feedbackRating >= 4,
+        isPromoter: feedbackRating === 5,
+        isIssueCase: feedbackRating <= 2,
         status: feedbackRating >= 4 ? GuestFeedbackStatus.AWAITING_COMMENT : GuestFeedbackStatus.AWAITING_CATEGORY
       }
     });

@@ -6,6 +6,7 @@ import { adminRouter, authRouter } from "./routes/admin";
 import { housekeepingRouter } from "./routes/housekeeping";
 import { guestRouter } from "./routes/guest";
 import { ownerRouter } from "./routes/owner";
+import { publicHotelRouter } from "./routes/publicHotel";
 import { whatsappWebhookRouter } from "./whatsapp/webhookRouter";
 import { logWhatsAppStartupHints } from "./whatsapp/send";
 import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
@@ -41,6 +42,7 @@ app.use("/auth", authRouter);
 app.use("/admin", adminRouter);
 app.use("/hk", housekeepingRouter);
 app.use("/guest", guestRouter);
+app.use("/", publicHotelRouter);
 app.use("/owner", ownerRouter);
 app.use("/whatsapp/webhook", whatsappWebhookRouter);
 
