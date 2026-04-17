@@ -7912,7 +7912,10 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
           submitBtn.removeAttribute("data-ui-state-disabled");
         }
       }
-      var p = US && US.withBlocking ? US.withBlocking(doFetch, "folio-charge", { timeoutMs: 60000 }) : doFetch();
+      var p =
+        US && US.withBlocking
+          ? US.withBlocking(doFetch, "folio-charge", { timeoutMs: 60000, timeoutLabel: "folio-charge" })
+          : doFetch();
       Promise.resolve(p).catch(function () {}).finally(release);
     });
   }
@@ -7962,7 +7965,10 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
           submitBtn.removeAttribute("data-ui-state-disabled");
         }
       }
-      var p = US && US.withBlocking ? US.withBlocking(doFetch, "folio-payment", { timeoutMs: 60000 }) : doFetch();
+      var p =
+        US && US.withBlocking
+          ? US.withBlocking(doFetch, "folio-payment", { timeoutMs: 60000, timeoutLabel: "folio-payment" })
+          : doFetch();
       Promise.resolve(p).catch(function () {}).finally(release);
     });
   }

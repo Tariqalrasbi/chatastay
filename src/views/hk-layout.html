@@ -231,11 +231,13 @@
     <script>
       (function (g) {
         var blockCounts = new Map();
+        var silentCounts = new Map();
         var openModals = new Set();
         var safetyTimerIds = [];
         var blockOverlayEl = null;
+        var singleFlightChains = new Map();
 
-        function totalBlocks() {
+        function overlayBlockTotal() {
           var n = 0;
           blockCounts.forEach(function (c) {
             n += c;
@@ -243,18 +245,23 @@
           return n;
         }
 
+        function ensureBlockOverlay() {
+          if (!blockOverlayEl) {
+            blockOverlayEl = g.document.createElement("div");
+            blockOverlayEl.id = "uiStateBlockOverlay";
+            blockOverlayEl.setAttribute("aria-hidden", "true");
+            blockOverlayEl.style.cssText =
+              "display:none;position:fixed;inset:0;z-index:2147483640;background:rgba(15,23,42,0.05);cursor:wait;pointer-events:auto;";
+            g.document.body.appendChild(blockOverlayEl);
+          }
+          return blockOverlayEl;
+        }
+
         function syncBlockOverlay() {
-          if (totalBlocks() > 0) {
-            if (!blockOverlayEl) {
-              blockOverlayEl = g.document.createElement("div");
-              blockOverlayEl.id = "uiStateBlockOverlay";
-              blockOverlayEl.setAttribute("aria-hidden", "true");
-              blockOverlayEl.style.cssText =
-                "display:none;position:fixed;inset:0;z-index:2147483640;background:rgba(15,23,42,0.04);cursor:wait;";
-              g.document.body.appendChild(blockOverlayEl);
-            }
-            blockOverlayEl.style.display = "block";
-            blockOverlayEl.setAttribute("aria-hidden", "false");
+          if (overlayBlockTotal() > 0) {
+            var el = ensureBlockOverlay();
+            el.style.display = "block";
+            el.setAttribute("aria-hidden", "false");
           } else if (blockOverlayEl) {
             blockOverlayEl.style.display = "none";
             blockOverlayEl.setAttribute("aria-hidden", "true");
@@ -269,7 +276,7 @@
           });
         }
 
-        function resetAdminOverlayState() {
+        function applyShellHeal() {
           healStuckDom();
           var panel = g.document.getElementById("adminNotifPanel");
           if (panel) {
@@ -291,21 +298,48 @@
         }
 
         var UIState = {
-          block: function (reason) {
+          healDomArtifacts: function () {
+            applyShellHeal();
+          },
+          block: function (reason, opts) {
+            opts = opts || {};
             var k = String(reason || "default");
-            blockCounts.set(k, (blockCounts.get(k) || 0) + 1);
+            if (opts.noOverlay) {
+              silentCounts.set(k, (silentCounts.get(k) || 0) + 1);
+            } else {
+              blockCounts.set(k, (blockCounts.get(k) || 0) + 1);
+            }
             syncBlockOverlay();
           },
-          unblock: function (reason) {
+          unblock: function (reason, opts) {
+            opts = opts || {};
             var k = String(reason || "default");
-            var next = (blockCounts.get(k) || 0) - 1;
-            if (next <= 0) blockCounts.delete(k);
-            else blockCounts.set(k, next);
+            if (opts.force) {
+              blockCounts.delete(k);
+              silentCounts.delete(k);
+            } else if (opts.noOverlay) {
+              var sn = (silentCounts.get(k) || 0) - 1;
+              if (sn <= 0) silentCounts.delete(k);
+              else silentCounts.set(k, sn);
+            } else {
+              var next = (blockCounts.get(k) || 0) - 1;
+              if (next <= 0) blockCounts.delete(k);
+              else blockCounts.set(k, next);
+            }
             syncBlockOverlay();
           },
-          reset: function () {
+          reset: function (reason) {
+            if (reason != null && String(reason) !== "") {
+              var rk = String(reason);
+              blockCounts.delete(rk);
+              silentCounts.delete(rk);
+              syncBlockOverlay();
+              return;
+            }
             blockCounts.clear();
+            silentCounts.clear();
             openModals.clear();
+            singleFlightChains.clear();
             safetyTimerIds.forEach(function (id) {
               g.clearTimeout(id);
             });
@@ -314,7 +348,7 @@
               blockOverlayEl.style.display = "none";
               blockOverlayEl.setAttribute("aria-hidden", "true");
             }
-            resetAdminOverlayState();
+            applyShellHeal();
             g.document.querySelectorAll("form").forEach(function (f) {
               delete f.dataset.uiSubmitting;
               delete f.dataset.uiSafetyTimerId;
@@ -330,18 +364,24 @@
             g.document.body.classList.add("modal-open");
           },
           closeModal: function (id) {
-            var sid = String(id || "modal");
-            openModals.delete(sid);
+            if (id == null || String(id) === "") {
+              openModals.clear();
+              g.document.body.classList.remove("modal-open");
+              return;
+            }
+            openModals.delete(String(id));
             if (openModals.size === 0) g.document.body.classList.remove("modal-open");
           },
-          withTimeout: function (promise, ms) {
+          withTimeout: function (promise, ms, label) {
+            var ms2 = ms == null || !g.isFinite(ms) || ms <= 0 ? 60000 : ms;
+            var msg = label ? "Operation timed out: " + label : "Operation timed out";
             return new Promise(function (resolve, reject) {
               var settled = false;
               var t = g.setTimeout(function () {
                 if (settled) return;
                 settled = true;
-                reject(new Error("Operation timed out"));
-              }, ms);
+                reject(new Error(msg));
+              }, ms2);
               Promise.resolve(promise).then(
                 function (v) {
                   if (settled) return;
@@ -361,16 +401,44 @@
           withBlocking: function (fn, reason, opts) {
             opts = opts || {};
             var r = String(reason || "default");
-            UIState.block(r);
+            var bo = opts.blockOpts || {};
+            UIState.block(r, bo);
             var chain = Promise.resolve().then(function () {
               return fn();
             });
-            if (opts.timeoutMs != null && opts.timeoutMs > 0) {
-              chain = UIState.withTimeout(chain, opts.timeoutMs);
+            var tms = opts.timeoutMs;
+            if (tms != null && tms > 0) {
+              chain = UIState.withTimeout(chain, tms, opts.timeoutLabel);
             }
             return chain.finally(function () {
-              UIState.unblock(r);
+              UIState.unblock(r, opts.unblockOpts != null ? opts.unblockOpts : bo);
             });
+          },
+          safeNavigate: function (url) {
+            try {
+              UIState.reset();
+              g.location.assign(String(url));
+            } catch (e) {
+              UIState.reset();
+              throw e;
+            }
+          },
+          makeSingleFlight: function (fn, key) {
+            var k = String(key == null ? "default" : key);
+            return function () {
+              var self = this;
+              var args = Array.prototype.slice.call(arguments);
+              if (singleFlightChains.has(k)) return singleFlightChains.get(k);
+              var p = Promise.resolve()
+                .then(function () {
+                  return fn.apply(self, args);
+                })
+                .finally(function () {
+                  singleFlightChains.delete(k);
+                });
+              singleFlightChains.set(k, p);
+              return p;
+            };
           },
           beginSubmitGuard: function (form) {
             if (!form) return true;
@@ -412,49 +480,62 @@
           UIState.reset();
         }
 
-        if (g.document.readyState === "loading") {
-          g.document.addEventListener("DOMContentLoaded", selfHeal);
-        } else {
+        function bindLoginFormsSafely() {
+          g.document.querySelectorAll('form[action="/admin/login"], form[action="/auth/staff-login"]').forEach(function (form) {
+            if (form.dataset.uiLoginBound === "1") return;
+            form.dataset.uiLoginBound = "1";
+            form.addEventListener("submit", function (e) {
+              if (!UIState.beginSubmitGuard(form)) {
+                e.preventDefault();
+                return;
+              }
+              var btn = form.querySelector('button[type="submit"]');
+              var loginReason = "login:" + (form.getAttribute("action") || "form");
+              try {
+                UIState.block(loginReason, { noOverlay: true });
+                UIState.healDomArtifacts();
+                if (btn) {
+                  btn.disabled = true;
+                  btn.setAttribute("data-ui-state-disabled", "1");
+                }
+              } catch (err) {
+                UIState.unblock(loginReason, { noOverlay: true, force: true });
+                UIState.endSubmitGuard(form);
+                if (btn) {
+                  btn.disabled = false;
+                  btn.removeAttribute("data-ui-state-disabled");
+                }
+                e.preventDefault();
+                throw err;
+              } finally {
+                UIState.scheduleSubmitSafety(
+                  form,
+                  function () {
+                    UIState.unblock(loginReason, { noOverlay: true, force: true });
+                    UIState.endSubmitGuard(form);
+                    if (btn) {
+                      btn.disabled = false;
+                      btn.removeAttribute("data-ui-state-disabled");
+                    }
+                  },
+                  28000
+                );
+              }
+            });
+          });
+        }
+
+        function boot() {
           selfHeal();
+          bindLoginFormsSafely();
+        }
+
+        if (g.document.readyState === "loading") {
+          g.document.addEventListener("DOMContentLoaded", boot);
+        } else {
+          boot();
         }
         g.window.addEventListener("pageshow", selfHeal);
-
-        g.document.querySelectorAll('form[action="/admin/login"], form[action="/auth/staff-login"]').forEach(function (form) {
-          form.addEventListener("submit", function (e) {
-            if (!UIState.beginSubmitGuard(form)) {
-              e.preventDefault();
-              return;
-            }
-            var btn = form.querySelector('button[type="submit"]');
-            try {
-              resetAdminOverlayState();
-              if (btn) {
-                btn.disabled = true;
-                btn.setAttribute("data-ui-state-disabled", "1");
-              }
-            } catch (err) {
-              UIState.endSubmitGuard(form);
-              if (btn) {
-                btn.disabled = false;
-                btn.removeAttribute("data-ui-state-disabled");
-              }
-              e.preventDefault();
-              throw err;
-            } finally {
-              UIState.scheduleSubmitSafety(
-                form,
-                function () {
-                  UIState.endSubmitGuard(form);
-                  if (btn) {
-                    btn.disabled = false;
-                    btn.removeAttribute("data-ui-state-disabled");
-                  }
-                },
-                28000
-              );
-            }
-          });
-        });
       })(typeof window !== "undefined" ? window : this);
     </script>
   </body>
