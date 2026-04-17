@@ -912,6 +912,12 @@ function getAdminNotificationScript(): string {
 
 function renderLayout(content: string, authenticated: boolean): string {
   const layout = readView("layout.html");
+  const sess = authenticated ? auditActorContext.getStore()?.session : undefined;
+  const uiErrorContextAttrs = sess
+    ? ` data-ui-user-id="${escapeHtml(sess.staffId)}" data-ui-role="${escapeHtml(String(sess.role))}" data-ui-hotel-slug="${escapeHtml(platformHotelSlug)}"${
+        sess.activePropertyId ? ` data-ui-property-id="${escapeHtml(String(sess.activePropertyId))}"` : ""
+      }`
+    : "";
   const perm = authenticated ? auditActorContext.getStore()?.session?.permissions : undefined;
   const role = authenticated ? auditActorContext.getStore()?.session?.role : undefined;
   const isFrontdesk = role === "FRONTDESK";
@@ -1032,6 +1038,7 @@ function renderLayout(content: string, authenticated: boolean): string {
   const langSwitcherHtml = '<a href="?lang=en" data-lang-link="en">EN</a><a href="?lang=ar" data-lang-link="ar">AR</a>';
 
   return layout
+    .replace("{{uiErrorContextAttrs}}", uiErrorContextAttrs)
     .replaceAll("{{lang}}", "en")
     .replaceAll("{{dir}}", "ltr")
     .replaceAll("{{adminTitle}}", "ChatAstay Admin")
@@ -1131,11 +1138,18 @@ function getAdminPropertySwitcherScript(): string {
 
 function renderHkLayout(params: { title: string; content: string; active: "tasks" | "board" }): string {
   const layout = readView("hk-layout.html");
+  const hkSess = auditActorContext.getStore()?.session;
+  const uiErrorContextAttrs = hkSess
+    ? ` data-ui-user-id="${escapeHtml(hkSess.staffId)}" data-ui-role="${escapeHtml(String(hkSess.role))}" data-ui-hotel-slug="${escapeHtml(platformHotelSlug)}"${
+        hkSess.activePropertyId ? ` data-ui-property-id="${escapeHtml(String(hkSess.activePropertyId))}"` : ""
+      }`
+    : "";
   const tasksCls = params.active === "tasks" ? ' class="active"' : "";
   const boardCls = params.active === "board" ? ' class="active"' : "";
   const navLinks = `<a href="/admin/hk"${tasksCls}>My tasks</a><a href="/admin/hk/room-board"${boardCls}>Room board</a>`;
   const logoutForm = '<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>';
   return layout
+    .replace("{{uiErrorContextAttrs}}", uiErrorContextAttrs)
     .replace("{{pageTitle}}", escapeHtml(params.title))
     .replace("{{navLinks}}", navLinks)
     .replace("{{logoutForm}}", logoutForm)

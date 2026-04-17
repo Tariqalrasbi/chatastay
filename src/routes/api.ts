@@ -9,6 +9,7 @@ import { buildBookingInvoicePdf } from "../core/invoicePdf";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { sendWhatsAppDocument } from "../whatsapp/send";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
+import { logClientUiError, normalizeClientUiError } from "../core/uiErrorIngest";
 
 export const apiRouter = Router();
 const defaultHotelSlug = "al-ashkhara-beach-resort";
@@ -609,4 +610,23 @@ apiRouter.post("/payments/webhook/stripe", async (req, res) => {
     const message = error instanceof Error ? error.message : "Invalid Stripe webhook payload.";
     res.status(400).json({ error: message });
   }
+});
+
+/** Browser UI error / rejection / API-failure reports (sanitized; never throws). */
+apiRouter.post("/ui-errors", (req, res) => {
+  try {
+    const normalized = normalizeClientUiError(req.body);
+    if (normalized) {
+      const msg = (normalized.message || "").trim();
+      if (!msg && !normalized.stack && !normalized.context) {
+        res.status(204).end();
+        return;
+      }
+      if (!msg) normalized.message = "(no message)";
+      logClientUiError(normalized);
+    }
+  } catch {
+    /* ignore */
+  }
+  res.status(204).end();
 });
