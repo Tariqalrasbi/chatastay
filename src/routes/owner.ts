@@ -934,6 +934,7 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
       })
     : [];
   const feedbackMap = new Map(feedbackByHotel.map((x) => [x.hotelId, { avg: x._avg.rating ?? 0, count: x._count._all }]));
+  const recentFeedbackSince = ownerStartOfDay(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
   const lowByHotel = hotelIds.length
     ? await prisma.guestFeedback.groupBy({
         by: ["hotelId"],
@@ -942,6 +943,35 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
       })
     : [];
   const lowMap = new Map(lowByHotel.map((x) => [x.hotelId, x._count._all]));
+  const recentLowByHotel = hotelIds.length
+    ? await prisma.guestFeedback.groupBy({
+        by: ["hotelId"],
+        where: { hotelId: { in: hotelIds }, rating: { lte: 2 }, createdAt: { gte: recentFeedbackSince } },
+        _count: { _all: true }
+      })
+    : [];
+  const recentLowMap = new Map(recentLowByHotel.map((x) => [x.hotelId, x._count._all]));
+  const latestLowByHotel = hotelIds.length
+    ? await prisma.guestFeedback.groupBy({
+        by: ["hotelId"],
+        where: { hotelId: { in: hotelIds }, rating: { lte: 2 } },
+        _max: { createdAt: true }
+      })
+    : [];
+  const latestLowMap = new Map(latestLowByHotel.map((x) => [x.hotelId, x._max.createdAt ?? null]));
+  const feedbackSignalByHotel = new Map(
+    hotelIds.map((hotelId) => {
+      const fb = feedbackMap.get(hotelId);
+      const signal = deriveFeedbackSignals({
+        averageRating: fb && fb.count > 0 ? fb.avg : null,
+        responseCount: fb?.count ?? 0,
+        lowRatingCount: lowMap.get(hotelId) ?? 0,
+        recentLowRatingCount: recentLowMap.get(hotelId) ?? 0,
+        latestLowRatingAt: latestLowMap.get(hotelId) ?? null
+      });
+      return [hotelId, signal];
+    })
+  );
 
   const trialingSubs =
     kpi.subscriptionsByStatus.find((s) => s.status === "TRIALING")?.count ?? 0;
@@ -1010,6 +1040,21 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
               : h.subscriptionStatus
                 ? `<span class="badge pending">${escapeHtml(h.subscriptionStatus)}</span>`
                 : "—";
+      const feedbackSignal = feedbackSignalByHotel.get(h.hotelId) ?? deriveFeedbackSignals({
+        averageRating: null,
+        responseCount: 0,
+        lowRatingCount: 0,
+        recentLowRatingCount: 0,
+        latestLowRatingAt: null
+      });
+      const feedbackStatusBadge =
+        feedbackSignal.feedbackStatus === "action_needed"
+          ? '<span class="badge alert">Action needed</span>'
+          : feedbackSignal.feedbackStatus === "watch"
+            ? '<span class="badge pending">Watch</span>'
+            : feedbackSignal.feedbackStatus === "normal"
+              ? '<span class="badge ok">Normal</span>'
+              : '<span class="badge">No feedback</span>';
       return `<tr>
   <td><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a><div class="muted" style="font-size:11px">${escapeHtml(h.slug)}</div></td>
   <td>${statusBadge}</td>
@@ -1019,10 +1064,11 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
   <td>${formatMoney(h.fbRevenue, h.currency)}</td>
   <td>${h.conversations}</td>
   <td>${
-    (feedbackMap.get(h.hotelId)?.count ?? 0) > 0
-      ? `${(feedbackMap.get(h.hotelId)?.avg ?? 0).toFixed(1)} ⭐ <span class="muted">(${feedbackMap.get(h.hotelId)?.count ?? 0})</span>`
+    feedbackSignal.responseCount > 0 && feedbackSignal.averageRating !== null
+      ? `${feedbackSignal.averageRating.toFixed(1)} ⭐ <span class="muted">(${feedbackSignal.responseCount})</span><div class="muted" style="font-size:11px">Low: ${feedbackSignal.lowRatingCount} (${feedbackSignal.lowRatingRate.toFixed(1)}%)</div>`
       : "—"
   }</td>
+  <td>${feedbackStatusBadge}${feedbackSignal.recentNegativeFeedbackFlag ? '<div class="muted" style="font-size:11px">Recent negative</div>' : ""}</td>
   <td><a class="btn-link" href="/hotel/${encodeURIComponent(h.slug)}" target="_blank" rel="noopener noreferrer">Public page</a></td>
   <td>${h.campaigns} <span class="muted">(${h.campaignSentOk} sent)</span></td>
   <td>${h.openInvoiceCount > 0 ? `${formatMoney(h.openInvoiceTotal, h.currency)} (${h.openInvoiceCount})` : "—"}</td>
@@ -1086,20 +1132,29 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Guest rating overview</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th><th>Low ratings (≤2)</th><th>Preview</th></tr></thead>
+  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th><th>Low ratings (≤2)</th><th>Alert</th><th>Preview</th></tr></thead>
   <tbody>${
     hotelRowsSorted
       .map((h) => {
-        const fb = feedbackMap.get(h.hotelId);
+        const signal = feedbackSignalByHotel.get(h.hotelId);
+        const feedbackStatusBadge =
+          signal?.feedbackStatus === "action_needed"
+            ? '<span class="badge alert">Action needed</span>'
+            : signal?.feedbackStatus === "watch"
+              ? '<span class="badge pending">Watch</span>'
+              : signal?.feedbackStatus === "normal"
+                ? '<span class="badge ok">Normal</span>'
+                : '<span class="badge">No feedback</span>';
         return `<tr>
     <td><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a></td>
-    <td>${fb && fb.count > 0 ? `${fb.avg.toFixed(1)} ⭐` : "—"}</td>
-    <td>${fb?.count ?? 0}</td>
-    <td>${lowMap.get(h.hotelId) ?? 0}</td>
+    <td>${signal?.responseCount ? `${(signal.averageRating ?? 0).toFixed(1)} ⭐` : "—"}</td>
+    <td>${signal?.responseCount ?? 0}</td>
+    <td>${signal?.lowRatingCount ?? 0} <span class="muted">(${(signal?.lowRatingRate ?? 0).toFixed(1)}%)</span></td>
+    <td>${feedbackStatusBadge}${signal?.latestLowRatingAt ? `<div class="muted" style="font-size:11px">Last low: ${escapeHtml(formatDate(signal.latestLowRatingAt))}</div>` : ""}</td>
     <td><a class="btn-link" href="/hotel/${encodeURIComponent(h.slug)}" target="_blank" rel="noopener noreferrer">Open</a></td>
   </tr>`;
       })
-      .join("") || `<tr><td colspan="5" class="muted">No feedback yet.</td></tr>`
+      .join("") || `<tr><td colspan="6" class="muted">No feedback yet.</td></tr>`
   }</tbody>
 </table>
 
@@ -1146,8 +1201,8 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Hotel comparison</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Public</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
-  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="11" class="muted">No hotels</td></tr>`}</tbody>
+  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Feedback alert</th><th>Public</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
+  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="12" class="muted">No hotels</td></tr>`}</tbody>
 </table>`;
 
   res.type("html").send(ownerLayout(content, true));
