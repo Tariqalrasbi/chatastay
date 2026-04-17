@@ -447,6 +447,7 @@ function isBookingSummaryReturnText(text: string): boolean {
 }
 
 type QuoteReplyAction = "cancel" | "change_details" | "confirm" | null;
+type QuoteEditTarget = "dates" | "guests" | "rooms" | "meal_plan";
 
 function parseQuoteReplyAction(text: string): QuoteReplyAction {
   const normalized = normalizeText(text);
@@ -483,6 +484,66 @@ function parseQuoteReplyAction(text: string): QuoteReplyAction {
   }
 
   return null;
+}
+
+function parseQuoteEditTarget(text: string): QuoteEditTarget | null {
+  const normalized = normalizeText(text);
+  const compact = normalized.replace(/\s+/g, "_");
+  if (
+    compact === "edit_dates" ||
+    compact === "change_dates" ||
+    compact === "quote_edit_dates" ||
+    normalized.includes("change date") ||
+    normalized.includes("edit date") ||
+    normalized.includes("update date")
+  ) {
+    return "dates";
+  }
+  if (
+    compact === "edit_guests" ||
+    compact === "change_guests" ||
+    compact === "quote_edit_guests" ||
+    normalized.includes("change guest") ||
+    normalized.includes("edit guest") ||
+    normalized.includes("add guest")
+  ) {
+    return "guests";
+  }
+  if (
+    compact === "edit_rooms" ||
+    compact === "change_rooms" ||
+    compact === "quote_edit_rooms" ||
+    normalized.includes("change room") ||
+    normalized.includes("edit room") ||
+    normalized.includes("update room")
+  ) {
+    return "rooms";
+  }
+  if (
+    compact === "edit_meal_plan" ||
+    compact === "change_meal_plan" ||
+    compact === "quote_edit_meal_plan" ||
+    compact === "meal_plan" ||
+    normalized.includes("meal plan") ||
+    normalized.includes("breakfast") ||
+    normalized.includes("half board") ||
+    normalized.includes("full board")
+  ) {
+    return "meal_plan";
+  }
+  return null;
+}
+
+function isGenericQuoteEditRequest(text: string): boolean {
+  const normalized = normalizeText(text);
+  return (
+    normalized === "edit" ||
+    normalized === "change" ||
+    normalized === "change details" ||
+    normalized === "edit details" ||
+    normalized === "modify booking" ||
+    normalized === "update booking"
+  );
 }
 
 function isQuoteConfirmActionText(text: string): boolean {
@@ -1070,7 +1131,7 @@ async function buildTurnResult(params: {
     return {
       nextState: "collecting_dates",
       conversationState: DbConversationState.QUALIFYING,
-      responseBody: "Sure. What would you like to change: dates, guests, or rooms?",
+      responseBody: "Sure. What would you like to change: dates, guests, rooms, or meal plan?",
       updateSession: { awaitingGuestName: false }
     };
   }
@@ -1097,7 +1158,7 @@ async function buildTurnResult(params: {
     return {
       nextState: "collecting_dates",
       conversationState: DbConversationState.QUALIFYING,
-      responseBody: "Sure. What would you like to change: dates, guests, or rooms?",
+      responseBody: "Sure. What would you like to change: dates, guests, rooms, or meal plan?",
       updateSession: { awaitingGuestName: false }
     };
   }
@@ -2269,6 +2330,234 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         direction: MessageDirection.OUTBOUND,
         body: BOOKING_SUBMENU_BODY,
         aiIntent: "BOOKING_BACK_TO_SUBMENU_NO_STEP",
+        aiConfidence: 0.95
+      }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  const quoteEditTarget = parseQuoteEditTarget(input.text);
+  const quoteAction = parseQuoteReplyAction(input.text);
+  if (
+    conversationMode === "BOOKING_MODE" &&
+    (currentState === "quoted" || currentState === "awaiting_confirmation") &&
+    !persisted.bookingStep &&
+    !persisted.awaitingGuestName &&
+    (quoteAction === "change_details" || quoteEditTarget || isGenericQuoteEditRequest(input.text))
+  ) {
+    const hasQuoteContext =
+      Boolean(persisted.checkIn && persisted.checkOut) &&
+      Boolean((persisted.suggestedRoomTypeName && persisted.suggestedRoomTypeName.trim()) || persisted.suggestedRoomTypeId) &&
+      typeof persisted.guestCount === "number" &&
+      persisted.guestCount > 0 &&
+      typeof persisted.totalAmount === "number" &&
+      Number.isFinite(persisted.totalAmount);
+    if (!hasQuoteContext) {
+      const recoveryBody = "Let’s update your request. Please share the booking details you want to change.";
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: recoveryBody,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: recoveryBody,
+          aiIntent: "BOOKING_EDIT_RECOVERY",
+          aiConfidence: 0.92
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    const baseUpdateState = {
+      language: persisted.language || "en",
+      stage: "new",
+      lastActivityAt: new Date().toISOString(),
+      conversationMode: "BOOKING_MODE" as const,
+      awaitingGuestName: false,
+      awaitingBookingLookup: false,
+      myBookingCandidateIds: persisted.myBookingCandidateIds,
+      phoneNumberId: hotel.phoneNumberId,
+      checkIn: persisted.checkIn,
+      checkOut: persisted.checkOut,
+      checkInOptions: persisted.checkInOptions,
+      checkOutOptions: persisted.checkOutOptions,
+      manualCheckInDate: persisted.manualCheckInDate,
+      manualCheckOutDate: persisted.manualCheckOutDate,
+      guestCount: persisted.guestCount,
+      roomCount: persisted.roomCount,
+      capacityPickRoomTypes: persisted.capacityPickRoomTypes,
+      adultCount: persisted.adultCount,
+      childCount: persisted.childCount,
+      bookingRoomOffers: persisted.bookingRoomOffers,
+      suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+      suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+      suggestedPropertyId: persisted.suggestedPropertyId,
+      nightlyRate: persisted.nightlyRate,
+      nights: persisted.nights,
+      totalAmount: persisted.totalAmount,
+      bookingMealPlanCode: persisted.bookingMealPlanCode,
+      fbCartDraft: persisted.fbCartDraft,
+      pendingPrebookOrder: persisted.pendingPrebookOrder,
+      bookingFlowReturn: persisted.bookingFlowReturn
+    };
+
+    if (quoteEditTarget === "dates") {
+      await sendBookingCheckInPrompt({
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseUpdateState, bookingStep: "checkin" }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    if (quoteEditTarget === "guests") {
+      const body = "How many adults will be staying? (Reply with a number, e.g. 2)" + BOOKING_NAV_HINT;
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseUpdateState, bookingStep: "adults" }
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body,
+          aiIntent: "BOOKING_EDIT_GUESTS",
+          aiConfidence: 0.95
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    if (quoteEditTarget === "rooms") {
+      const body = "How many rooms do you need? (Reply with a number, e.g. 1 or 2)";
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseUpdateState, bookingStep: "rooms" }
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body,
+          aiIntent: "BOOKING_EDIT_ROOMS",
+          aiConfidence: 0.95
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    if (quoteEditTarget === "meal_plan") {
+      await sendWhatsAppList({
+        to: normalizedPhone,
+        body: "Choose your meal package:",
+        buttonText: "Meal plan",
+        sections: [
+          {
+            title: "Packages",
+            rows: [
+              { id: "mp_none", title: "No meal plan", description: "Room only" },
+              { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
+              { id: "mp_full", title: "Full board", description: "All main meals" },
+              { id: "mp_view", title: "View menu", description: "Browse categories" }
+            ]
+          }
+        ],
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseUpdateState, bookingStep: "meal_plan" }
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: "Choose your meal package:",
+          aiIntent: "BOOKING_EDIT_MEAL_PLAN",
+          aiConfidence: 0.96
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    try {
+      await sendWhatsAppList({
+        to: normalizedPhone,
+        body: "Sure — what would you like to change?",
+        buttonText: "Edit details",
+        sections: [
+          {
+            title: "Edit options",
+            rows: [
+              { id: "edit_dates", title: "Dates", description: "Check-in / check-out" },
+              { id: "edit_guests", title: "Guests", description: "Adults / children" },
+              { id: "edit_rooms", title: "Rooms", description: "Number of rooms" },
+              { id: "edit_meal_plan", title: "Meal plan", description: "Room only / board options" }
+            ]
+          }
+        ],
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+    } catch {
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body: "Sure — what would you like to change: dates, guests, rooms, or meal plan?",
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+    }
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: "Sure — what would you like to change: dates, guests, rooms, or meal plan?",
+        aiIntent: "BOOKING_EDIT_MENU",
         aiConfidence: 0.95
       }
     });
