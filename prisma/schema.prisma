@@ -256,6 +256,13 @@ enum HousekeepingTaskSource {
   FRONTDESK
 }
 
+/// How the current assignee was chosen (audit / operations).
+enum HousekeepingAssignmentMode {
+  AUTO
+  MANUAL
+  SELF_CLAIMED
+}
+
 model Hotel {
   id             String                  @id @default(cuid())
   slug           String                  @unique
@@ -356,6 +363,7 @@ model HotelUser {
   hkTasksAssigned              HousekeepingTask[]     @relation("HKTaskAssignedTo")
   hkTasksCreated               HousekeepingTask[]     @relation("HKTaskCreatedBy")
   hkTasksCompleted             HousekeepingTask[]     @relation("HKTaskCompletedBy")
+  hkTasksManualAssigned        HousekeepingTask[]     @relation("HKTaskManualAssignedBy")
   passwordResetTokens          PasswordResetToken[]
 }
 
@@ -1047,6 +1055,10 @@ model HousekeepingTask {
 
   assignedToUserId  String?
   assignedTo        HotelUser?             @relation("HKTaskAssignedTo", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  assignmentMode    HousekeepingAssignmentMode?
+  manualAssignedByUserId String?
+  manualAssignedBy  HotelUser?             @relation("HKTaskManualAssignedBy", fields: [manualAssignedByUserId], references: [id], onDelete: SetNull)
+  claimedAt         DateTime?
   createdByUserId   String?
   createdBy         HotelUser?             @relation("HKTaskCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
   completedByUserId String?

@@ -15,6 +15,7 @@ import {
   FolioOutletCategory,
   FolioTransactionType,
   FolioTxnPaymentStatus,
+  HousekeepingAssignmentMode,
   HousekeepingTaskSource,
   HousekeepingTaskStatus,
   MessageDirection,
@@ -50,6 +51,11 @@ import {
   trackDecisionEventSafe
 } from "../core/decisionAnalytics";
 import { prisma } from "../db";
+import {
+  formatHousekeepingAssignmentMode,
+  pickCleanerForAutoAssign,
+  rankHousekeepingCleanersForAutoAssign
+} from "../core/hkAssignment";
 import { defaultHotelSlug } from "../config/tenancy";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
@@ -1824,6 +1830,16 @@ async function ensureHousekeepingTaskForCleaningTx(
       notes: writeHousekeepingShift(params.notes ?? undefined, deriveHousekeepingShift(new Date()))
     }
   });
+  const picked = await pickCleanerForAutoAssign(tx, params.hotelId);
+  if (picked) {
+    await tx.housekeepingTask.update({
+      where: { id: task.id },
+      data: {
+        assignedToUserId: picked.id,
+        assignmentMode: HousekeepingAssignmentMode.AUTO
+      }
+    });
+  }
   return { created: true, taskId: task.id };
 }
 
@@ -2022,20 +2038,9 @@ function computeHousekeepingPriority(params: {
   }).level;
 }
 
-async function loadHousekeepingCleanerWorkloads(hotelId: string): Promise<Array<{ id: string; name: string; inProgress: number }>> {
-  const hkUsers = await prisma.hotelUser.findMany({
-    where: { hotelId, isActive: true, role: UserRole.HOUSEKEEPING },
-    select: { id: true, fullName: true }
-  });
-  const rows: Array<{ id: string; name: string; inProgress: number }> = [];
-  for (const u of hkUsers) {
-    const inProgress = await prisma.housekeepingTask.count({
-      where: { hotelId, assignedToUserId: u.id, status: HousekeepingTaskStatus.IN_PROGRESS }
-    });
-    rows.push({ id: u.id, name: u.fullName, inProgress });
-  }
-  rows.sort((a, b) => a.inProgress - b.inProgress || a.name.localeCompare(b.name));
-  return rows;
+async function loadHousekeepingCleanerWorkloads(hotelId: string): Promise<Array<{ id: string; name: string; active: number }>> {
+  const ranked = await rankHousekeepingCleanersForAutoAssign(prisma, hotelId);
+  return ranked.map((r) => ({ id: r.id, name: r.fullName, active: r.activeWorkload }));
 }
 
 async function notifyHousekeepingStaff(opts: {
@@ -2117,6 +2122,34 @@ function isPlatformOwnerEmail(email: string | undefined | null): boolean {
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
   return extra.includes(normalized);
+}
+
+/** Leads + client property onboarding — platform owner / super-admin only (not hotel partner staff). */
+function isPlatformAcquisitionSession(session: AdminSession | undefined): boolean {
+  if (!session) return false;
+  if (session.staffId === "STAFF-SUPERADMIN") return true;
+  return isPlatformOwnerEmail(session.email);
+}
+
+function requirePlatformAcquisition(req: Request, res: Response, next: NextFunction): void {
+  const session = getSession(req);
+  if (!session) {
+    res.redirect("/admin/login");
+    return;
+  }
+  if (!isPlatformAcquisitionSession(session)) {
+    res
+      .status(403)
+      .type("html")
+      .send(
+        renderLayout(
+          "<h2>Access denied</h2><p>Lead pipeline and platform property onboarding are restricted to platform administrators.</p>",
+          true
+        )
+      );
+    return;
+  }
+  next();
 }
 
 function requirePlatformOwner(req: Request, res: Response, next: NextFunction): void {
@@ -2337,7 +2370,8 @@ adminRouter.get("/login", (req, res) => {
 });
 
 adminRouter.get("/onboard", async (req, res) => {
-  if (isAuthenticated(req)) {
+  const session = getSession(req);
+  if (session && !isPlatformAcquisitionSession(session)) {
     res.redirect("/admin/profile");
     return;
   }
@@ -2354,9 +2388,13 @@ adminRouter.get("/onboard", async (req, res) => {
   const cityVal = escapeHtml(String(req.query.city ?? lead?.location ?? ""));
   const emailVal = escapeHtml(String(req.query.email ?? lead?.contactEmail ?? ""));
   const ownerNameVal = escapeHtml(String(req.query.ownerName ?? lead?.contactName ?? ""));
+  const onboardTitle = session ? "Onboard new property" : "Partner onboarding";
+  const onboardLead = session
+    ? "Creates a new property under this platform account, default room type, units, and a property owner login."
+    : "Set up your property in minutes. This creates your property, default room setup, and owner account.";
   const content = `
-<h2>Partner Onboarding</h2>
-<p class="muted">Set up your property in minutes. This creates your property, default room setup, and owner account.</p>
+<h2>${escapeHtml(onboardTitle)}</h2>
+<p class="muted">${onboardLead}</p>
 ${errHtml}
 <form method="post" action="/admin/onboard" style="max-width:760px; display:grid; gap:12px">
   <input type="hidden" name="leadId" value="${escapeHtml(lead?.id ?? leadId)}" />
@@ -2389,12 +2427,13 @@ ${errHtml}
   </label>
   <button type="submit" style="padding:10px 16px; border:0; border-radius:10px; background:#25d366; color:#083d2d; font-weight:700; width:fit-content">Create property</button>
 </form>
-<p class="muted" style="margin-top:12px"><a href="/admin/login">Back to login</a></p>`;
-  res.type("html").send(renderLayout(content, false));
+<p class="muted" style="margin-top:12px">${session ? '<a class="inline-link" href="/admin/profile">Back to profile</a>' : '<a href="/admin/login">Back to login</a>'}</p>`;
+  res.type("html").send(renderLayout(content, Boolean(session)));
 });
 
 adminRouter.post("/onboard", async (req, res) => {
-  if (isAuthenticated(req)) {
+  const session = getSession(req);
+  if (session && !isPlatformAcquisitionSession(session)) {
     res.redirect("/admin/profile");
     return;
   }
@@ -2528,6 +2567,10 @@ adminRouter.post("/onboard", async (req, res) => {
       dedupeKey: `lead_converted:${leadId}:${created.propertyId}`,
       metadata: { leadId, propertyId: created.propertyId, propertyName }
     });
+  }
+  if (session && isPlatformAcquisitionSession(session)) {
+    res.redirect("/admin/profile?propertyOnboarded=1");
+    return;
   }
   res.redirect("/admin/login?onboard=1");
 });
@@ -3495,7 +3538,7 @@ function leadOutreachTemplate(template: "initial_intro" | "followup_1" | "follow
   return `Hello from WhatsStay. We help hotels like ${leadHotelName} automate WhatsApp booking, guest operations, upsell, and follow-up in one platform. Would you like a quick walkthrough?`;
 }
 
-adminRouter.get("/leads", requirePermission("USERS", "VIEW"), async (req, res) => {
+adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Leads</h2><p>No hotel data found.</p>", true));
@@ -3595,7 +3638,7 @@ adminRouter.get("/leads", requirePermission("USERS", "VIEW"), async (req, res) =
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/leads", requirePermission("USERS", "EDIT"), async (req, res) => {
+adminRouter.post("/leads", requireAuth, requirePlatformAcquisition, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/leads");
@@ -3626,7 +3669,7 @@ adminRouter.post("/leads", requirePermission("USERS", "EDIT"), async (req, res) 
   res.redirect("/admin/leads");
 });
 
-adminRouter.post("/leads/:leadId/status", requirePermission("USERS", "EDIT"), async (req, res) => {
+adminRouter.post("/leads/:leadId/status", requireAuth, requirePlatformAcquisition, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/leads");
@@ -3663,7 +3706,7 @@ adminRouter.post("/leads/:leadId/status", requirePermission("USERS", "EDIT"), as
   res.redirect("/admin/leads");
 });
 
-adminRouter.post("/leads/:leadId/outreach", requirePermission("USERS", "EDIT"), async (req, res) => {
+adminRouter.post("/leads/:leadId/outreach", requireAuth, requirePlatformAcquisition, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true, displayName: true } });
   if (!hotel) {
     res.redirect("/admin/leads");
@@ -3810,6 +3853,14 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   const dayStart = now;
   const dayEndExclusive = addDays(dayStart, 1);
   const profileUnitUpdated = req.query.unitUpdated ? '<p class="badge ok">Room status updated.</p>' : "";
+  const profilePropertyOnboarded =
+    req.query.propertyOnboarded === "1" ? '<p class="badge ok">New client property was onboarded successfully.</p>' : "";
+  const sessionProfile = getSession(req);
+  const platformAcquisitionActions =
+    sessionProfile && isPlatformAcquisitionSession(sessionProfile)
+      ? `<a class="btn-link" href="/admin/onboard">Onboard new property</a>
+  <a class="btn-link" href="/admin/leads">Lead pipeline</a>`
+      : "";
   const profileDayRange = inventoryDayRangeExclusive(dayStart);
   const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings] = await Promise.all([
     prisma.booking.count({ where: { hotelId: hotel.id } }),
@@ -4006,10 +4057,10 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   const content = `
 <h2>Property overview</h2>
 <p class="muted">Operational snapshot for ${escapeHtml(hotel.displayName)}.</p>
+${profilePropertyOnboarded}
 <div class="actions">
   <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
-  <a class="btn-link" href="/admin/onboard">Onboard new property</a>
-  <a class="btn-link" href="/admin/leads">Lead pipeline</a>
+  ${platformAcquisitionActions}
   <a class="btn-link" href="/admin/room-board">Rooms</a>
   <a class="btn-link" href="/admin/rooms">Room rates &amp; configuration</a>
 </div>
@@ -4847,8 +4898,8 @@ adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) 
       }
     }
   }
-  const hkLoads = await loadHousekeepingCleanerWorkloads(hotel.id);
-  const hkSuggest = hkLoads[0]?.name;
+  const hkNextAuto = await pickCleanerForAutoAssign(prisma, hotel.id);
+  const hkSuggest = hkNextAuto?.fullName;
   const hkDecorated = openTasks.map((t) => {
     const hkShift = parseHousekeepingShift(t.notes) ?? deriveHousekeepingShift(t.startedAt ?? t.createdAt);
     const hint = t.booking?.checkIn
@@ -4919,13 +4970,14 @@ ${hkChip("Night", { mine: hkListFilters.mine, priority: hkListFilters.priority, 
       const priCell = `<span style="font-size:11px;font-weight:700;padding:2px 7px;border-radius:999px;background:${priColor};color:#fff">${t.hkPriority}</span><div class="muted" style="font-size:10px;margin-top:4px;line-height:1.35">${escapeHtml(t.hkReason)}</div>`;
       const suggestLine =
         !t.assignedToUserId && hkSuggest
-          ? `<div class="muted" style="font-size:11px;margin-top:4px">Suggested: ${escapeHtml(hkSuggest)}</div>`
+          ? `<div class="muted" style="font-size:11px;margin-top:4px">Fair queue — next auto-assign: ${escapeHtml(hkSuggest)}</div>`
           : "";
       const assignee = t.assignedToUserId
         ? t.assignedToUserId === session.staffId
           ? `<span class="badge ok">You</span>`
           : `<span class="badge pending">${escapeHtml(t.assignedTo?.fullName ?? "Assigned")}</span>`
         : '<span class="muted">—</span>';
+      const modeHint = `<div class="muted" style="font-size:10px;margin-top:3px">${escapeHtml(formatHousekeepingAssignmentMode(t.assignmentMode, Boolean(t.assignedToUserId)))}</div>`;
       const claimedMeta =
         t.startedAt != null
           ? `<div class="muted" style="font-size:12px;margin-top:4px">Started ${escapeHtml(formatDateTime(t.startedAt))}</div>`
@@ -4947,7 +4999,7 @@ ${hkChip("Night", { mine: hkListFilters.mine, priority: hkListFilters.priority, 
       } else if (t.assignedToUserId && t.assignedToUserId !== session.staffId) {
         actions = '<span class="muted">In use by another housekeeper</span>';
       }
-      return `<tr><td>${roomLabel}</td><td>${priCell}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${suggestLine}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
+      return `<tr><td>${roomLabel}</td><td>${priCell}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${modeHint}${suggestLine}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
     })
     .join("");
   const hkCrit = hkDecorated.filter((t) => t.hkPriority === "CRITICAL").length;
@@ -4992,7 +5044,12 @@ adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPort
   }
   const claim = await prisma.housekeepingTask.updateMany({
     where: { id: task.id, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING, assignedToUserId: null },
-    data: { assignedToUserId: session.staffId }
+    data: {
+      assignedToUserId: session.staffId,
+      assignmentMode: HousekeepingAssignmentMode.SELF_CLAIMED,
+      claimedAt: new Date(),
+      manualAssignedByUserId: null
+    }
   });
   if (claim.count === 0) {
     await logAudit({
@@ -12428,6 +12485,7 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     include: {
       roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
       assignedTo: { select: { fullName: true, email: true } },
+      manualAssignedBy: { select: { fullName: true } },
       booking: { select: { id: true, referenceCode: true, checkIn: true, checkOut: true, guest: { select: { isVip: true } } } }
     }
   });
@@ -12455,7 +12513,8 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   }
 
   const cleanerWorkloads = await loadHousekeepingCleanerWorkloads(hotel.id);
-  const suggestedCleanerName = cleanerWorkloads[0]?.name;
+  const nextAutoCleaner = await pickCleanerForAutoAssign(prisma, hotel.id);
+  const suggestedCleanerName = nextAutoCleaner?.fullName;
 
   const openTaskDecorated = openTasks.map((t) => {
     const shift = parseHousekeepingShift(t.notes) ?? deriveHousekeepingShift(t.startedAt ?? t.createdAt);
@@ -12556,30 +12615,61 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   });
 
   const rowHtml = (t: (typeof sortedOpenTasks)[0]) => {
+    const rowCleanerOptions = cleanerWorkloads
+      .map(
+        (w) =>
+          `<option value="${escapeHtml(w.id)}" ${t.assignedToUserId === w.id ? "selected" : ""}>${escapeHtml(w.name)}</option>`
+      )
+      .join("");
     const roomLabel = `${t.roomUnit.name} (${t.roomUnit.roomType.name})`;
     const assigneeName = t.assignedTo ? escapeHtml(t.assignedTo.fullName) : "Unassigned";
+    const modeLine = `<div class="muted" style="font-size:11px;margin-top:4px">${escapeHtml(formatHousekeepingAssignmentMode(t.assignmentMode, Boolean(t.assignedToUserId)))}</div>`;
+    const adminLine =
+      t.manualAssignedBy && t.assignmentMode === HousekeepingAssignmentMode.MANUAL
+        ? `<div class="muted" style="font-size:11px;margin-top:2px">Set by ${escapeHtml(t.manualAssignedBy.fullName)}</div>`
+        : "";
     const suggestLine =
       !t.assignedToUserId && suggestedCleanerName
-        ? `<div class="muted" style="font-size:11px;margin-top:4px">Suggested: ${escapeHtml(suggestedCleanerName)} (lightest in-progress load)</div>`
+        ? `<div class="muted" style="font-size:11px;margin-top:4px">Next auto-assign: ${escapeHtml(suggestedCleanerName)}</div>`
         : "";
     const assignee =
       t.assignedToUserId && staffId && t.assignedToUserId === staffId
-        ? `<span class="badge ok">Claimed by me — ${assigneeName}</span>`
+        ? `<span class="badge ok">You — ${assigneeName}</span>`
         : t.assignedTo
-          ? `<span class="badge pending">Claimed by ${assigneeName}</span>`
-          : '<span class="muted">Unclaimed</span>';
+          ? `<span class="badge pending">${assigneeName}</span>`
+          : '<span class="muted">Unassigned</span>';
     const ref = t.booking?.referenceCode ? escapeHtml(t.booking.referenceCode) : "—";
-    const claimedAt = t.startedAt ? `<div class="muted" style="font-size:11px;margin-top:4px">Claimed at ${escapeHtml(formatDateTime(t.startedAt))}</div>` : "";
-    const claimDisabled = Boolean(t.assignedToUserId && (!staffId || t.assignedToUserId !== staffId));
+    const claimTime = t.claimedAt ?? t.startedAt;
+    const claimedAt =
+      claimTime && t.assignmentMode === HousekeepingAssignmentMode.SELF_CLAIMED
+        ? `<div class="muted" style="font-size:11px;margin-top:4px">Self-claimed ${escapeHtml(formatDateTime(claimTime))}</div>`
+        : t.startedAt
+          ? `<div class="muted" style="font-size:11px;margin-top:4px">Started ${escapeHtml(formatDateTime(t.startedAt))}</div>`
+          : "";
     const claimBtn =
-      canAct && t.status === HousekeepingTaskStatus.PENDING
+      canAct && t.status === HousekeepingTaskStatus.PENDING && !t.assignedToUserId
         ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/claim" style="display:inline-flex;gap:6px;align-items:center;margin:0">
             <select name="shift" style="padding:4px 6px;border:1px solid #d8dee6;border-radius:8px">
               <option value="MORNING" ${t.hkShift === "MORNING" ? "selected" : ""}>Morning</option>
               <option value="EVENING" ${t.hkShift === "EVENING" ? "selected" : ""}>Evening</option>
               <option value="NIGHT" ${t.hkShift === "NIGHT" ? "selected" : ""}>Night</option>
             </select>
-            <button type="submit" ${claimDisabled ? "disabled" : ""} style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Claim</button>
+            <button type="submit" style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Claim task</button>
+          </form>`
+        : "";
+    const startBtn =
+      canAct &&
+      t.status === HousekeepingTaskStatus.PENDING &&
+      staffId &&
+      t.assignedToUserId === staffId &&
+      !t.startedAt
+        ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/start" style="display:inline-flex;gap:6px;align-items:center;margin:0 0 0 6px">
+            <select name="shift" style="padding:4px 6px;border:1px solid #d8dee6;border-radius:8px">
+              <option value="MORNING" ${t.hkShift === "MORNING" ? "selected" : ""}>Morning</option>
+              <option value="EVENING" ${t.hkShift === "EVENING" ? "selected" : ""}>Evening</option>
+              <option value="NIGHT" ${t.hkShift === "NIGHT" ? "selected" : ""}>Night</option>
+            </select>
+            <button type="submit" style="padding:4px 10px;border-radius:8px;border:0;background:#0b6e6e;color:#fff;cursor:pointer;font-weight:600">Start cleaning</button>
           </form>`
         : "";
     const doneBtn =
@@ -12591,15 +12681,15 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
         ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/complete" style="display:inline;margin:0 0 0 6px"><input type="hidden" name="targetStatus" value="MAINTENANCE" /><button type="submit" style="padding:4px 10px;border-radius:8px;border:0;background:#6b21a8;color:#fff;cursor:pointer;font-weight:600">Mark maintenance</button></form>`
         : "";
     const reassignSelect =
-      canManageAssignments && t.assignedToUserId
+      canManageAssignments && cleanerWorkloads.length
         ? `<form method="post" action="/admin/housekeeping/task/${encodeURIComponent(t.id)}/reassign" style="display:inline;margin:0 0 0 6px">
-            <input type="email" name="assigneeEmail" required placeholder="reassign email" style="padding:4px 8px;border:1px solid #d8dee6;border-radius:8px;width:170px" />
+            <select name="assigneeId" required style="padding:4px 6px;border:1px solid #d8dee6;border-radius:8px;max-width:200px">${rowCleanerOptions}</select>
             <select name="shift" style="padding:4px 6px;border:1px solid #d8dee6;border-radius:8px">
               <option value="MORNING" ${t.hkShift === "MORNING" ? "selected" : ""}>Morning</option>
               <option value="EVENING" ${t.hkShift === "EVENING" ? "selected" : ""}>Evening</option>
               <option value="NIGHT" ${t.hkShift === "NIGHT" ? "selected" : ""}>Night</option>
             </select>
-            <button type="submit" style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">Reassign</button>
+            <button type="submit" style="padding:4px 10px;border-radius:8px;border:1px solid #d8dee6;background:#fff;cursor:pointer">${t.assignedToUserId ? "Reassign" : "Assign cleaner"}</button>
           </form>`
         : "";
     const priorityBadgeColor = t.hkPriority === "CRITICAL" ? "#b91c1c" : t.hkPriority === "HIGH" ? "#dc2626" : t.hkPriority === "MEDIUM" ? "#ca8a04" : "#475569";
@@ -12607,11 +12697,11 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
       <td>${escapeHtml(roomLabel)}</td>
       <td>${escapeHtml(t.status)}</td>
       <td>${escapeHtml(t.source)}</td>
-      <td>${assignee}${suggestLine}${claimedAt}<div style="margin-top:4px;font-size:11px;color:#475569">Elapsed: ${escapeHtml(formatDurationMinutes(t.elapsedMinutes))}</div></td>
+      <td>${assignee}${modeLine}${adminLine}${suggestLine}${claimedAt}<div style="margin-top:4px;font-size:11px;color:#475569">Elapsed: ${escapeHtml(formatDurationMinutes(t.elapsedMinutes))}</div></td>
       <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:${priorityBadgeColor};color:#fff">${t.hkPriority}</span><div class="muted" style="font-size:10px;margin-top:4px;line-height:1.35">${escapeHtml(t.hkReason)}</div></td>
       <td><span class="badge pending">${t.hkShift}</span></td>
       <td>${ref}</td>
-      <td style="white-space:nowrap">${claimBtn}${doneBtn}${maintenanceBtn}${reassignSelect}</td>
+      <td style="white-space:nowrap">${claimBtn}${startBtn}${doneBtn}${maintenanceBtn}${reassignSelect}</td>
     </tr>`;
   };
 
@@ -12704,7 +12794,7 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
   }).length;
   const workloadRows = cleanerWorkloads
     .slice(0, 12)
-    .map((w) => `<tr><td>${escapeHtml(w.name)}</td><td>${w.inProgress}</td></tr>`)
+    .map((w) => `<tr><td>${escapeHtml(w.name)}</td><td>${w.active}</td></tr>`)
     .join("");
 
   const content = `
@@ -12773,8 +12863,8 @@ ${alertsHtml}
 </section>
 <section style="margin-bottom:18px;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">
   <div style="border:1px solid #d8dee6;border-radius:12px;padding:12px;background:#fff">
-    <h3 style="margin:0 0 8px;font-size:15px">Cleaner workload (in progress)</h3>
-    <p class="muted" style="font-size:12px;margin:0 0 8px">HOUSEKEEPING-role users only. Suggestion uses lightest load for unclaimed rooms.</p>
+    <h3 style="margin:0 0 8px;font-size:15px">Cleaner workload (active queue)</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">HOUSEKEEPING-role users only. Counts PENDING + IN_PROGRESS assigned to each cleaner (fair rotation for auto-assign).</p>
     <div style="overflow:auto;max-height:220px">
       <table class="data-table" style="min-width:200px;font-size:13px">
         <thead><tr><th>Cleaner</th><th>Active</th></tr></thead>
@@ -12868,7 +12958,10 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     data: {
       status: HousekeepingTaskStatus.IN_PROGRESS,
       assignedToUserId: session.staffId,
-      startedAt: now
+      startedAt: now,
+      assignmentMode: HousekeepingAssignmentMode.SELF_CLAIMED,
+      claimedAt: now,
+      manualAssignedByUserId: null
     }
   });
   if (claim.count === 0) {
@@ -12913,13 +13006,71 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
   res.redirect("/admin/housekeeping");
 });
 
+adminRouter.post("/housekeeping/task/:taskId/start", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const session = getSession(req);
+  const taskId = String(req.params.taskId ?? "");
+  const shift = parseHousekeepingShiftInput(req.body.shift);
+  if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  const task = await prisma.housekeepingTask.findFirst({
+    where: {
+      id: taskId,
+      hotelId: hotel.id,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: session.staffId,
+      startedAt: null
+    }
+  });
+  if (!task) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  const upd = await prisma.housekeepingTask.updateMany({
+    where: {
+      id: task.id,
+      hotelId: hotel.id,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: session.staffId,
+      startedAt: null
+    },
+    data: { status: HousekeepingTaskStatus.IN_PROGRESS, startedAt: new Date() }
+  });
+  if (upd.count === 0) {
+    res.redirect("/admin/housekeeping");
+    return;
+  }
+  await prisma.roomUnit.update({
+    where: { id: task.roomUnitId },
+    data: {
+      notes: writeManualRoomStatusToNotes((await prisma.roomUnit.findUnique({ where: { id: task.roomUnitId }, select: { notes: true } }))?.notes, "CLEANING")
+    }
+  });
+  const refreshed = await prisma.housekeepingTask.findUnique({ where: { id: task.id }, select: { notes: true } });
+  await prisma.housekeepingTask.update({
+    where: { id: task.id },
+    data: { notes: writeHousekeepingShift(refreshed?.notes, shift) }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOUSEKEEPING_TASK_STARTED",
+    entityType: "HousekeepingTask",
+    entityId: task.id,
+    metadata: { roomUnitId: task.roomUnitId, startedByUserId: session.staffId, shift, portal: "housekeeping-dashboard" }
+  });
+  res.redirect("/admin/housekeeping");
+});
+
 adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ module: "HOUSEKEEPING", action: "MANAGE" }, { module: "ROOMS", action: "MANAGE" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
-  const assigneeEmail = String(req.body.assigneeEmail ?? "").trim().toLowerCase();
+  const assigneeId = String((req.body as { assigneeId?: unknown }).assigneeId ?? "").trim();
+  const assigneeEmail = String((req.body as { assigneeEmail?: unknown }).assigneeEmail ?? "").trim().toLowerCase();
   const shift = parseHousekeepingShiftInput(req.body.shift);
-  if (!hotel || !session || !assigneeEmail) {
+  if (!hotel || !session) {
     res.redirect("/admin/housekeeping");
     return;
   }
@@ -12931,10 +13082,19 @@ adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ 
     res.redirect("/admin/housekeeping");
     return;
   }
-  const assignee = await prisma.hotelUser.findFirst({
-    where: { hotelId: hotel.id, email: assigneeEmail, isActive: true },
-    select: { id: true, fullName: true, email: true }
-  });
+  let assignee =
+    assigneeId.length > 0
+      ? await prisma.hotelUser.findFirst({
+          where: { id: assigneeId, hotelId: hotel.id, isActive: true, role: UserRole.HOUSEKEEPING },
+          select: { id: true, fullName: true, email: true }
+        })
+      : null;
+  if (!assignee && assigneeEmail) {
+    assignee = await prisma.hotelUser.findFirst({
+      where: { hotelId: hotel.id, email: assigneeEmail, isActive: true, role: UserRole.HOUSEKEEPING },
+      select: { id: true, fullName: true, email: true }
+    });
+  }
   if (!assignee) {
     res.redirect("/admin/housekeeping");
     return;
@@ -12945,6 +13105,9 @@ adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ 
       assignedToUserId: assignee.id,
       status: HousekeepingTaskStatus.IN_PROGRESS,
       startedAt: task.assignedToUserId ? undefined : new Date(),
+      assignmentMode: HousekeepingAssignmentMode.MANUAL,
+      manualAssignedByUserId: hotelUserIdForPrismaFk(session.staffId),
+      claimedAt: null,
       notes: writeHousekeepingShift((await prisma.housekeepingTask.findUnique({ where: { id: task.id }, select: { notes: true } }))?.notes, shift)
     }
   });
@@ -12958,6 +13121,7 @@ adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ 
       assignedToUserId: assignee.id,
       assignedToEmail: assignee.email,
       reassignedByUserId: session.staffId,
+      assignmentMode: "MANUAL",
       shift
     }
   });

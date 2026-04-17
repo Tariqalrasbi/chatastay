@@ -2,7 +2,14 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { BookingStatus, HousekeepingTaskStatus, NotificationStatus, UserRole, type Prisma } from "@prisma/client";
+import {
+  BookingStatus,
+  HousekeepingAssignmentMode,
+  HousekeepingTaskStatus,
+  NotificationStatus,
+  UserRole,
+  type Prisma
+} from "@prisma/client";
 import { prisma } from "../db";
 import { createNotification, createRoleRoutedNotification } from "../core/notifications";
 
@@ -181,6 +188,7 @@ async function logAudit(params: {
 }
 
 async function claimTaskAtomic(tx: Prisma.TransactionClient, taskId: string, hotelId: string, staffId: string): Promise<boolean> {
+  const now = new Date();
   const result = await tx.housekeepingTask.updateMany({
     where: {
       id: taskId,
@@ -191,7 +199,10 @@ async function claimTaskAtomic(tx: Prisma.TransactionClient, taskId: string, hot
     data: {
       status: HousekeepingTaskStatus.IN_PROGRESS,
       assignedToUserId: staffId,
-      startedAt: new Date()
+      startedAt: now,
+      assignmentMode: HousekeepingAssignmentMode.SELF_CLAIMED,
+      claimedAt: now,
+      manualAssignedByUserId: null
     }
   });
   return result.count > 0;
@@ -334,6 +345,13 @@ housekeepingRouter.get("/", requireHousekeepingView, async (req, res) => {
         bookingGuestVip: bookingHint?.guest?.isVip === true
       });
       const elapsed = task?.startedAt ? formatMinutes(durationMinutes(task.startedAt, new Date())) : "—";
+      const canClaimUnassigned = Boolean(task && task.status === HousekeepingTaskStatus.PENDING && !task.assignedToUserId);
+      const needsStartAssigned = Boolean(
+        task &&
+          task.status === HousekeepingTaskStatus.PENDING &&
+          assignedToMe &&
+          !task.startedAt
+      );
 
       if (view === "mine" && !assignedToMe) return null;
       if (view === "cleaning" && status !== "CLEANING") return null;
@@ -345,8 +363,14 @@ housekeepingRouter.get("/", requireHousekeepingView, async (req, res) => {
       const bg = status === "AVAILABLE" ? "#dcfce7" : status === "MAINTENANCE" ? "#fee2e2" : "#fef9c3";
       const statusLabel = status === "MAINTENANCE" ? "MAINTENANCE" : status === "CLEANING" ? "CLEANING" : "AVAILABLE";
       const assignedLabel = task?.assignedTo ? task.assignedTo.fullName : "Unclaimed";
-      const claimDisabled = assignedToOther ? "disabled" : "";
-      const lockText = assignedToOther ? `Claimed by ${assignedLabel}` : assignedToMe ? `Claimed by me` : "Unclaimed";
+      const claimDisabled = !canClaimUnassigned ? "disabled" : "";
+      const lockText = assignedToOther
+        ? `Assigned to ${assignedLabel}`
+        : assignedToMe && needsStartAssigned
+          ? "Assigned to you — start cleaning to begin"
+          : assignedToMe
+            ? "Your task (in progress)"
+            : "Unclaimed";
       const taskIdInput = task ? `<input type="hidden" name="taskId" value="${task.id}" />` : "";
       const priorityBg = priority === "CRITICAL" ? "#b91c1c" : priority === "HIGH" ? "#dc2626" : priority === "MEDIUM" ? "#ca8a04" : "#475569";
       return `<article style="background:${bg};border:1px solid #d1d5db;border-radius:12px;padding:12px;display:grid;gap:8px">
@@ -365,8 +389,20 @@ housekeepingRouter.get("/", requireHousekeepingView, async (req, res) => {
             <option value="EVENING" ${shift === "EVENING" ? "selected" : ""}>Evening</option>
             <option value="NIGHT" ${shift === "NIGHT" ? "selected" : ""}>Night</option>
           </select>
-          <button type="submit" ${claimDisabled} style="padding:10px;border:1px solid #94a3b8;border-radius:9px;background:#fff;font-weight:600">Claim room</button>
+          <button type="submit" ${claimDisabled} style="padding:10px;border:1px solid #94a3b8;border-radius:9px;background:#fff;font-weight:600">Claim task</button>
         </form>
+        ${
+          task && needsStartAssigned
+            ? `<form method="post" action="/hk/task/${encodeURIComponent(task.id)}/start-cleaning" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <select name="shift" style="padding:8px;border:1px solid #94a3b8;border-radius:8px">
+            <option value="MORNING" ${shift === "MORNING" ? "selected" : ""}>Morning</option>
+            <option value="EVENING" ${shift === "EVENING" ? "selected" : ""}>Evening</option>
+            <option value="NIGHT" ${shift === "NIGHT" ? "selected" : ""}>Night</option>
+          </select>
+          <button type="submit" style="padding:10px;border:0;border-radius:9px;background:#0f766e;color:#fff;font-weight:700">Start cleaning</button>
+        </form>`
+            : ""
+        }
         <form method="post" action="/hk/room/${encodeURIComponent(u.id)}/status" style="display:flex;gap:6px;flex-wrap:wrap">
           <input type="hidden" name="taskId" value="${task?.id ?? ""}" />
           <input type="hidden" name="shift" value="${shift}" />
@@ -432,6 +468,57 @@ housekeepingRouter.get("/", requireHousekeepingView, async (req, res) => {
     <section style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px">${cards || `<p style="color:#64748b">No rooms in this filter.</p>`}</section>
   </body></html>`;
   res.type("html").send(html);
+});
+
+housekeepingRouter.post("/task/:taskId/start-cleaning", requireHousekeepingEdit, async (req, res) => {
+  const session = getSession(req)!;
+  const taskId = String(req.params.taskId ?? "");
+  const shift = parseShiftInput(req.body.shift);
+  const task = await prisma.housekeepingTask.findFirst({
+    where: {
+      id: taskId,
+      hotelId: session.hotelId,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: session.staffId,
+      startedAt: null
+    }
+  });
+  if (!task) {
+    res.redirect("/hk");
+    return;
+  }
+  const upd = await prisma.housekeepingTask.updateMany({
+    where: {
+      id: task.id,
+      hotelId: session.hotelId,
+      status: HousekeepingTaskStatus.PENDING,
+      assignedToUserId: session.staffId,
+      startedAt: null
+    },
+    data: { status: HousekeepingTaskStatus.IN_PROGRESS, startedAt: new Date() }
+  });
+  if (upd.count === 0) {
+    res.redirect("/hk");
+    return;
+  }
+  const room = await prisma.roomUnit.findFirst({ where: { id: task.roomUnitId, hotelId: session.hotelId }, select: { notes: true } });
+  await prisma.roomUnit.update({
+    where: { id: task.roomUnitId },
+    data: { notes: writeStatus(room?.notes, "CLEANING") }
+  });
+  const noteRef = await prisma.housekeepingTask.findUnique({ where: { id: task.id }, select: { notes: true } });
+  await prisma.housekeepingTask.update({
+    where: { id: task.id },
+    data: { notes: writeShift(noteRef?.notes, shift) }
+  });
+  await logAudit({
+    hotelId: session.hotelId,
+    staffId: session.staffId,
+    action: "HOUSEKEEPING_TASK_STARTED",
+    roomId: task.roomUnitId,
+    newStatus: "CLEANING"
+  });
+  res.redirect("/hk");
 });
 
 housekeepingRouter.post("/room/:roomId/claim", requireHousekeepingEdit, async (req, res) => {
