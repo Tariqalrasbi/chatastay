@@ -16,11 +16,24 @@ export type HkStaffPerformanceRow = {
   claimedCount: number;
   inProgressCount: number;
   completedCount: number;
+  /** Average minutes from startedAt to completedAt when both exist; excludes invalid durations. */
   averageCompletionMinutes: number | null;
+  /** Same value as averageCompletionMinutes (operational shorthand). */
+  avgCompletionMinutes: number | null;
   completionRate: number | null;
   activeWorkload: number;
   manualAssignedCount: number;
   selfClaimedCount: number;
+  /** 0–100 from completionRate when assignedCount > 0; else null. */
+  reliabilityScore: number | null;
+  /** 0–100 min-max vs other staff with valid averages in this result set; lower avg minutes = higher score; single valid user = 100. */
+  speedScore: number | null;
+  /** 0–100 min-max of (completedCount + activeWorkload) among staff with any contribution in this result set; single eligible = 100. */
+  workloadBalanceScore: number | null;
+  /** Weighted blend of available sub-scores (reliability 0.5, speed 0.3, workload 0.2), reweighted if some are null. */
+  kpiScore: number | null;
+  /** Order position in this filtered dataset (1 = highest KPI among comparable rows). */
+  rank: number;
 };
 
 function displayNameForUser(u: { fullName: string; email: string | null; username: string | null }): string {
@@ -67,6 +80,112 @@ function mk(): Agg {
     inProgressCount: 0,
     activeWorkload: 0
   };
+}
+
+function clampInt0to100(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+/** Min–max on the current array only; null inputs stay null. "Lower is better" (e.g. minutes). */
+function normalizeLowerIsBetter(values: (number | null)[]): (number | null)[] {
+  const eligible = values.filter((v): v is number => v != null && Number.isFinite(v));
+  if (eligible.length === 0) return values.map(() => null);
+  const min = Math.min(...eligible);
+  const max = Math.max(...eligible);
+  return values.map((v) => {
+    if (v == null || !Number.isFinite(v)) return null;
+    if (max === min) return 100;
+    return clampInt0to100(((max - v) / (max - min)) * 100);
+  });
+}
+
+/** Min–max on the current array only; null inputs stay null. "Higher is better". */
+function normalizeHigherIsBetter(values: (number | null)[]): (number | null)[] {
+  const eligible = values.filter((v): v is number => v != null && Number.isFinite(v));
+  if (eligible.length === 0) return values.map(() => null);
+  const min = Math.min(...eligible);
+  const max = Math.max(...eligible);
+  return values.map((v) => {
+    if (v == null || !Number.isFinite(v)) return null;
+    if (max === min) return 100;
+    return clampInt0to100(((v - min) / (max - min)) * 100);
+  });
+}
+
+type HkStaffPerfBase = Omit<
+  HkStaffPerformanceRow,
+  | "avgCompletionMinutes"
+  | "reliabilityScore"
+  | "speedScore"
+  | "workloadBalanceScore"
+  | "kpiScore"
+  | "rank"
+>;
+
+function applyRankAndKpis(rows: HkStaffPerfBase[]): HkStaffPerformanceRow[] {
+  if (rows.length === 0) return [];
+
+  const avgMinsList = rows.map((r) => r.averageCompletionMinutes);
+  const speedScores = normalizeLowerIsBetter(avgMinsList);
+
+  const workloadRaw = rows.map((r) =>
+    r.completedCount === 0 && r.activeWorkload === 0 ? null : r.completedCount + r.activeWorkload
+  );
+  const workloadScores = normalizeHigherIsBetter(workloadRaw);
+
+  const withScores: HkStaffPerformanceRow[] = rows.map((r, i) => {
+    const avgCompletionMinutes = r.averageCompletionMinutes;
+    const reliabilityScore =
+      r.assignedCount > 0 && r.completionRate != null && Number.isFinite(r.completionRate)
+        ? clampInt0to100(r.completionRate * 100)
+        : null;
+    return {
+      ...r,
+      avgCompletionMinutes,
+      reliabilityScore,
+      speedScore: speedScores[i] ?? null,
+      workloadBalanceScore: workloadScores[i] ?? null,
+      kpiScore: null,
+      rank: 0
+    };
+  });
+
+  for (let i = 0; i < withScores.length; i++) {
+    const r = withScores[i];
+    const parts: { w: number; s: number }[] = [];
+    if (r.reliabilityScore != null) parts.push({ w: 0.5, s: r.reliabilityScore });
+    if (r.speedScore != null) parts.push({ w: 0.3, s: r.speedScore });
+    if (r.workloadBalanceScore != null) parts.push({ w: 0.2, s: r.workloadBalanceScore });
+    if (parts.length === 0) {
+      r.kpiScore = null;
+    } else {
+      const sumW = parts.reduce((a, p) => a + p.w, 0);
+      const blended = parts.reduce((a, p) => a + p.s * p.w, 0) / sumW;
+      r.kpiScore = clampInt0to100(blended);
+    }
+  }
+
+  const order = withScores
+    .map((r, idx) => ({ r, idx }))
+    .sort((a, b) => {
+      const ak = a.r.kpiScore;
+      const bk = b.r.kpiScore;
+      if (ak != null && bk != null && ak !== bk) return bk - ak;
+      if (ak != null && bk == null) return -1;
+      if (ak == null && bk != null) return 1;
+      const cc = b.r.completedCount - a.r.completedCount;
+      if (cc !== 0) return cc;
+      const wl = b.r.activeWorkload - a.r.activeWorkload;
+      if (wl !== 0) return wl;
+      return a.r.displayName.localeCompare(b.r.displayName, undefined, { sensitivity: "base" });
+    });
+
+  order.forEach((o, pos) => {
+    o.r.rank = pos + 1;
+  });
+
+  return withScores;
 }
 
 /**
@@ -210,7 +329,7 @@ export async function getHousekeepingStaffPerformance(
     }
   }
 
-  return hkUsers.map((u) => {
+  const baseRows: HkStaffPerfBase[] = hkUsers.map((u) => {
     const a = ensure(u.id);
     const avgMins = a.durationN > 0 ? Math.round(a.durationSum / a.durationN) : null;
     const completionRate = a.assignedCount > 0 ? Math.min(1, a.completedCount / a.assignedCount) : null;
@@ -229,6 +348,8 @@ export async function getHousekeepingStaffPerformance(
       selfClaimedCount: a.selfClaimedCount
     };
   });
+
+  return applyRankAndKpis(baseRows);
 }
 
 export { prisma };

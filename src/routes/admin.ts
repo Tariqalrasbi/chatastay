@@ -12834,8 +12834,21 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
         r.completionRate != null && r.assignedCount > 0
           ? `${Math.round(Math.min(1, r.completionRate) * 100)}%`
           : "—";
-      return `<tr>
+      const kpiCell = r.kpiScore != null ? String(r.kpiScore) : "—";
+      const speedCell = r.speedScore != null ? String(r.speedScore) : "—";
+      const relCell = r.reliabilityScore != null ? `${r.reliabilityScore}%` : "—";
+      const wlCell = r.workloadBalanceScore != null ? String(r.workloadBalanceScore) : "—";
+      const topRow =
+        r.rank <= 3
+          ? ' style="background:#f6faf9"'
+          : "";
+      return `<tr${topRow}>
+      <td style="font-weight:600">${r.rank}</td>
       <td>${escapeHtml(r.displayName)}${sec}</td>
+      <td>${kpiCell}</td>
+      <td title="Relative speed score (lower avg clean time scores higher within this table)">${speedCell}</td>
+      <td>${relCell}</td>
+      <td title="Relative contribution score (completed in period + active queue)">${wlCell}</td>
       <td>${r.activeWorkload}</td>
       <td>${r.assignedCount}</td>
       <td>${r.claimedCount}</td>
@@ -12943,9 +12956,14 @@ ${alertsHtml}
     <button type="submit" style="padding:8px 12px;border:1px solid #d8dee6;border-radius:8px;background:#fff;cursor:pointer;font-weight:600">Apply range</button>
   </form>
   <div style="overflow:auto">
-  <table class="data-table" style="min-width:920px;font-size:13px">
+  <table class="data-table" style="min-width:1120px;font-size:13px">
     <thead><tr>
+      <th>Rank</th>
       <th>Staff</th>
+      <th>KPI score</th>
+      <th>Speed</th>
+      <th>Reliability</th>
+      <th>Workload</th>
       <th>Active</th>
       <th>Assigned</th>
       <th>Claimed</th>
@@ -12956,9 +12974,10 @@ ${alertsHtml}
       <th>Completion rate</th>
       <th>Avg clean</th>
     </tr></thead>
-    <tbody>${staffPerformanceRows || '<tr><td colspan="10" class="muted">No housekeeping staff or no rows in range.</td></tr>'}</tbody>
+    <tbody>${staffPerformanceRows || '<tr><td colspan="15" class="muted">No housekeeping staff or no rows in range.</td></tr>'}</tbody>
   </table>
   </div>
+  <p class="muted" style="font-size:12px;margin:10px 0 0">KPI score is an internal operational indicator based on completion reliability, speed, and workload contribution.</p>
 </section>
 <section>
   <h3>Open tasks</h3>
