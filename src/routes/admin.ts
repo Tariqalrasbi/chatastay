@@ -3890,7 +3890,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   <a class="btn-link" href="/admin/leads">Lead pipeline</a>`
       : "";
   const profileDayRange = inventoryDayRangeExclusive(dayStart);
-  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings] = await Promise.all([
+  const [bookingsCount, bookingsThisMonth, confirmedCount, conversationsThisMonth, todayInventoryRows, todayBookings, feedbackAgg, feedbackRecent, lowFeedbackCount] = await Promise.all([
     prisma.booking.count({ where: { hotelId: hotel.id } }),
     prisma.booking.count({
       where: { hotelId: hotel.id, createdAt: { gte: monthStart } }
@@ -3914,8 +3914,41 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
       },
       include: { guest: true, roomUnit: true },
       orderBy: { checkIn: "asc" }
+    }),
+    prisma.guestFeedback.aggregate({
+      where: { hotelId: hotel.id },
+      _avg: { rating: true },
+      _count: { _all: true }
+    }),
+    prisma.guestFeedback.findMany({
+      where: { hotelId: hotel.id },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: {
+        rating: true,
+        category: true,
+        comment: true,
+        createdAt: true,
+        guestName: true
+      }
+    }),
+    prisma.guestFeedback.count({
+      where: { hotelId: hotel.id, rating: { lte: 2 } }
     })
   ]);
+  const feedbackAvg = Number((feedbackAgg._avg.rating ?? 0).toFixed(2));
+  const feedbackCount = feedbackAgg._count._all;
+  const feedbackRows = feedbackRecent
+    .map(
+      (r) => `<tr>
+      <td>${"⭐".repeat(Math.max(1, Math.min(5, r.rating)))}</td>
+      <td>${escapeHtml(r.category ? String(r.category).replaceAll("_", " ") : "—")}</td>
+      <td>${escapeHtml((r.comment ?? "—").slice(0, 220))}</td>
+      <td>${escapeHtml(r.guestName ?? "Guest")}</td>
+      <td>${formatDateTime(r.createdAt)}</td>
+    </tr>`
+    )
+    .join("");
 
   await ensureDefaultRoomUnitsForBoard(
     hotel.id,
@@ -4172,6 +4205,20 @@ ${profilePropertyOnboarded}
     .room-board-yellow { border-color:#eab308; background:#fef9c3; color:#854d0e; }
     .room-board-purple { border-color:#a855f7; background:#f3e8ff; color:#6b21a8; }
   </style>
+</section>
+
+<section style="margin-top: 14px">
+  <h3>Guest feedback</h3>
+  <div class="grid-4">
+    <article class="stat"><h3>Average rating</h3><p>${feedbackCount ? `${feedbackAvg.toFixed(1)} ⭐` : "—"}</p></article>
+    <article class="stat"><h3>Total reviews</h3><p>${feedbackCount}</p></article>
+    <article class="stat"><h3>Low ratings (≤2)</h3><p>${lowFeedbackCount}</p></article>
+    <article class="stat"><h3>Latest review</h3><p>${feedbackRecent[0] ? formatDate(feedbackRecent[0].createdAt) : "—"}</p></article>
+  </div>
+  <table>
+    <thead><tr><th>Rating</th><th>Category</th><th>Comment</th><th>Guest</th><th>Date</th></tr></thead>
+    <tbody>${feedbackRows || '<tr><td colspan="5">No feedback yet.</td></tr>'}</tbody>
+  </table>
 </section>
 
 <section style="margin-top: 14px">

@@ -1,7 +1,7 @@
 import { BookingStatus, ConversationState, MessageDirection, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
-import { trySendWhatsAppText } from "../whatsapp/send";
+import { sendWhatsAppButtons, trySendWhatsAppText } from "../whatsapp/send";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
@@ -34,6 +34,7 @@ export type GuestJourneySweepResult = {
   sentCheckinDay: number;
   sentPostCheckout: number;
   sentReviewRequest: number;
+  sentReviewReminder: number;
   sentRepeatGuestPromo: number;
   skipped: number;
 };
@@ -155,16 +156,19 @@ function buildPostCheckoutBody(params: { guestFirstName: string; hotelName: stri
 function buildReviewRequestBody(params: { guestFirstName: string; hotelName: string }): string {
   const who = params.guestFirstName.trim() || "Guest";
   return [
-    `Dear ${who},`,
+    `Hi ${who}, we hope you enjoyed your stay at ${params.hotelName}.`,
     "",
-    `Thank you again for staying with ${params.hotelName}. We hope everything met your expectations.`,
-    "",
-    "If you have a moment, we would be grateful for a brief review or feedback — it helps us improve and welcome future guests. You can reply to this message, or use the channel where you booked if you prefer to leave a public review.",
-    "",
-    `With thanks,`,
-    params.hotelName
+    "We would love your feedback. How would you rate your experience?"
   ].join("\n");
 }
+
+const FEEDBACK_RATING_BUTTONS: Array<{ id: string; title: string }> = [
+  { id: "fb_rate_5", title: "⭐⭐⭐⭐⭐ Excellent" },
+  { id: "fb_rate_4", title: "⭐⭐⭐⭐ Good" },
+  { id: "fb_rate_3", title: "⭐⭐⭐ Average" },
+  { id: "fb_rate_2", title: "⭐⭐ Poor" },
+  { id: "fb_rate_1", title: "⭐ Very poor" }
+];
 
 function buildRepeatGuestPromoBody(params: { guestFirstName: string; hotelName: string }): string {
   const who = params.guestFirstName.trim() || "Guest";
@@ -232,6 +236,7 @@ async function sendJourneyMessage(params: {
   auditAction: string;
   /** Optional guest update (e.g. repeat-promo cooldown timestamp). Applied in the same transaction as the booking update. */
   guestUpdate?: { guestId: string; data: Prisma.GuestUpdateInput };
+  buttons?: Array<{ id: string; title: string }>;
 }): Promise<boolean> {
   const phone = params.booking.guest.phoneE164?.trim();
   if (!phone) return false;
@@ -244,18 +249,41 @@ async function sendJourneyMessage(params: {
     });
   }
 
-  const result = await trySendWhatsAppText({
-    to: phone,
-    body: params.body,
-    phoneNumberId: params.phoneNumberId,
-    conversationId: conversation.id
-  });
-
-  if (!result.ok) {
-    console.error(
-      `[guest-journey] send failed booking=${params.booking.id} intent=${params.aiIntent}: ${result.errorMessage.slice(0, 220)}`
-    );
-    return false;
+  if (params.buttons?.length) {
+    try {
+      await sendWhatsAppButtons({
+        to: phone,
+        body: params.body,
+        buttons: params.buttons,
+        phoneNumberId: params.phoneNumberId,
+        conversationId: conversation.id
+      });
+    } catch (err) {
+      const fallback = await trySendWhatsAppText({
+        to: phone,
+        body: `${params.body}\n\nReply with 1, 2, 3, 4, or 5 stars.`,
+        phoneNumberId: params.phoneNumberId,
+        conversationId: conversation.id
+      });
+      if (!fallback.ok) {
+        const msg = err instanceof Error ? err.message : fallback.errorMessage;
+        console.error(`[guest-journey] send failed booking=${params.booking.id} intent=${params.aiIntent}: ${msg.slice(0, 220)}`);
+        return false;
+      }
+    }
+  } else {
+    const result = await trySendWhatsAppText({
+      to: phone,
+      body: params.body,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: conversation.id
+    });
+    if (!result.ok) {
+      console.error(
+        `[guest-journey] send failed booking=${params.booking.id} intent=${params.aiIntent}: ${result.errorMessage.slice(0, 220)}`
+      );
+      return false;
+    }
   }
 
   const sentAt = new Date();
@@ -314,6 +342,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
   let sentCheckinDay = 0;
   let sentPostCheckout = 0;
   let sentReviewRequest = 0;
+  let sentReviewReminder = 0;
   let sentRepeatGuestPromo = 0;
   let skipped = 0;
 
@@ -517,9 +546,53 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         body,
         aiIntent: "REVIEW_REQUEST",
         markSent: { guestJourneyReviewRequestSentAt: new Date() },
-        auditAction: "GUEST_JOURNEY_REVIEW_REQUEST_SENT"
+        auditAction: "GUEST_JOURNEY_REVIEW_REQUEST_SENT",
+        buttons: FEEDBACK_RATING_BUTTONS
       });
       if (ok) sentReviewRequest++;
+      else skipped++;
+    }
+
+    // --- REVIEW_REQUEST_REMINDER (once, 24h after review request, only when no feedback yet) ---
+    const forReviewReminder = await prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        status: BookingStatus.CONFIRMED,
+        guestJourneyReviewRequestSentAt: { not: null },
+        guestJourneyReviewReminderSentAt: null,
+        guestJourneyPostCheckoutThankYouSentAt: { not: null },
+        feedbacks: { none: {} }
+      },
+      include: baseInclude
+    });
+
+    for (const b of forReviewReminder) {
+      scanned++;
+      const reviewSentAt = b.guestJourneyReviewRequestSentAt;
+      if (!reviewSentAt) {
+        skipped++;
+        continue;
+      }
+      const reminderAt = new Date(reviewSentAt.getTime() + 24 * 60 * 60 * 1000);
+      if (now.getTime() < reminderAt.getTime()) {
+        skipped++;
+        continue;
+      }
+      const body = `${buildReviewRequestBody({
+        guestFirstName: firstName(b.guest.fullName),
+        hotelName: hotel.displayName
+      })}\n\nJust a quick reminder — we value your feedback.`;
+      const ok = await sendJourneyMessage({
+        hotelId: hotel.id,
+        phoneNumberId,
+        booking: b,
+        body,
+        aiIntent: "REVIEW_REQUEST",
+        markSent: { guestJourneyReviewReminderSentAt: new Date() },
+        auditAction: "GUEST_JOURNEY_REVIEW_REQUEST_REMINDER_SENT",
+        buttons: FEEDBACK_RATING_BUTTONS
+      });
+      if (ok) sentReviewReminder++;
       else skipped++;
     }
 
@@ -600,6 +673,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     sentCheckinDay,
     sentPostCheckout,
     sentReviewRequest,
+    sentReviewReminder,
     sentRepeatGuestPromo,
     skipped
   };
@@ -619,6 +693,7 @@ export async function runPreArrivalReminderSweep(): Promise<{
       r.sentCheckinDay +
       r.sentPostCheckout +
       r.sentReviewRequest +
+      r.sentReviewReminder +
       r.sentRepeatGuestPromo,
     skipped: r.skipped
   };

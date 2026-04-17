@@ -1,4 +1,13 @@
-import { ChannelProvider, ConversationState as DbConversationState, FbServiceMode, MessageDirection, Prisma, UserRole } from "@prisma/client";
+import {
+  ChannelProvider,
+  ConversationState as DbConversationState,
+  FbServiceMode,
+  GuestFeedbackCategory,
+  GuestFeedbackStatus,
+  MessageDirection,
+  Prisma,
+  UserRole
+} from "@prisma/client";
 import { parseGuestMessage, validateParsedBookingInput } from "../core/parse";
 import { findAvailableRoomType, findAvailableRoomTypes } from "../core/availability";
 import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
@@ -548,6 +557,39 @@ function isGenericQuoteEditRequest(text: string): boolean {
 
 function isQuoteConfirmActionText(text: string): boolean {
   return parseQuoteReplyAction(text) === "confirm";
+}
+
+function parseGuestFeedbackRating(text: string): number | null {
+  const raw = text.trim();
+  if (/^fb_rate_[1-5]$/i.test(raw)) {
+    return parseInt(raw.slice(-1), 10);
+  }
+  const n = normalizeText(raw);
+  if (/^[1-5]$/.test(n)) return parseInt(n, 10);
+  if (n.includes("excellent") || n.includes("5 star") || n.includes("⭐⭐⭐⭐⭐")) return 5;
+  if (n.includes("good") || n.includes("4 star") || n.includes("⭐⭐⭐⭐")) return 4;
+  if (n.includes("average") || n.includes("3 star") || n.includes("⭐⭐⭐")) return 3;
+  if (n.includes("poor") || n.includes("2 star") || n.includes("⭐⭐")) return 2;
+  if (n.includes("very poor") || n.includes("1 star") || n.includes("⭐")) return 1;
+  return null;
+}
+
+function parseGuestFeedbackCategory(text: string): GuestFeedbackCategory | "OTHER_COMMENT" | null {
+  const n = normalizeText(text).replace(/\s+/g, "_");
+  if (n === "fb_cat_cleanliness" || n.includes("cleanliness")) return GuestFeedbackCategory.CLEANLINESS;
+  if (n === "fb_cat_room_comfort" || n.includes("room_comfort") || n.includes("room comfort")) {
+    return GuestFeedbackCategory.ROOM_COMFORT;
+  }
+  if (n === "fb_cat_service" || n === "service") return GuestFeedbackCategory.SERVICE;
+  if (n === "fb_cat_food_beverage" || n.includes("food") || n.includes("beverage")) return GuestFeedbackCategory.FOOD_BEVERAGE;
+  if (n === "fb_cat_facilities" || n.includes("facilities")) return GuestFeedbackCategory.FACILITIES;
+  if (n === "fb_cat_other" || n === "other") return "OTHER_COMMENT";
+  return null;
+}
+
+function isGuestFeedbackSkipComment(text: string): boolean {
+  const n = normalizeText(text);
+  return n === "fb_skip_comment" || n === "skip" || n === "no" || n === "no thanks" || n === "not now";
 }
 
 /** Parse a non-negative integer from message (e.g. "2", "0", "3 adults") for structured booking steps. */
@@ -1346,6 +1388,254 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     conversation.state === DbConversationState.CONFIRMED ||
     Boolean(persisted.checkIn && persisted.checkOut) ||
     Boolean(persisted.suggestedRoomTypeId || persisted.suggestedRoomTypeName || persisted.totalAmount);
+
+  const feedbackPendingBooking = await prisma.booking.findFirst({
+    where: {
+      hotelId: hotel.id,
+      guestId: guest.id,
+      status: "CONFIRMED",
+      guestJourneyReviewRequestSentAt: { not: null },
+      checkOut: { lte: new Date() },
+      feedbacks: { none: {} }
+    },
+    select: { id: true },
+    orderBy: { checkOut: "desc" }
+  });
+  const feedbackOpen = await prisma.guestFeedback.findFirst({
+    where: {
+      hotelId: hotel.id,
+      guestId: guest.id,
+      status: { in: [GuestFeedbackStatus.AWAITING_CATEGORY, GuestFeedbackStatus.AWAITING_COMMENT] }
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  const feedbackRating = parseGuestFeedbackRating(input.text);
+  if (feedbackPendingBooking && feedbackRating !== null) {
+    const created = await prisma.guestFeedback.create({
+      data: {
+        hotelId: hotel.id,
+        bookingId: feedbackPendingBooking.id,
+        guestId: guest.id,
+        guestName: guest.fullName ?? undefined,
+        rating: feedbackRating,
+        status: feedbackRating >= 4 ? GuestFeedbackStatus.AWAITING_COMMENT : GuestFeedbackStatus.AWAITING_CATEGORY
+      }
+    });
+    await prisma.auditLog.create({
+      data: {
+        hotelId: hotel.id,
+        action: "GUEST_FEEDBACK_RATING_RECEIVED",
+        entityType: "GuestFeedback",
+        entityId: created.id,
+        bookingId: created.bookingId,
+        metadataJson: JSON.stringify({ rating: feedbackRating })
+      }
+    });
+    if (feedbackRating >= 4) {
+      try {
+        await sendWhatsAppButtons({
+          to: normalizedPhone,
+          body: "Thank you! Would you like to share anything we did well?",
+          buttons: [
+            { id: "fb_add_comment", title: "Add a comment" },
+            { id: "fb_skip_comment", title: "Skip" }
+          ],
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      } catch {
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: "Thank you! Would you like to share anything we did well? Reply with your comment, or type SKIP.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      }
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: "Thank you! Would you like to share anything we did well?",
+          aiIntent: "GUEST_FEEDBACK_COMMENT_PROMPT",
+          aiConfidence: 0.99
+        }
+      });
+    } else {
+      try {
+        await sendWhatsAppList({
+          to: normalizedPhone,
+          body: "Thank you. What could we improve?",
+          buttonText: "Choose area",
+          sections: [
+            {
+              title: "Improvement areas",
+              rows: [
+                { id: "fb_cat_cleanliness", title: "Cleanliness" },
+                { id: "fb_cat_room_comfort", title: "Room comfort" },
+                { id: "fb_cat_service", title: "Service" },
+                { id: "fb_cat_food_beverage", title: "Food & beverage" },
+                { id: "fb_cat_facilities", title: "Facilities" },
+                { id: "fb_cat_other", title: "Other" }
+              ]
+            }
+          ],
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      } catch {
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: "Thank you. What could we improve? Reply with: Cleanliness, Room comfort, Service, Food & beverage, Facilities, or Other.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      }
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: "Thank you. What could we improve?",
+          aiIntent: "GUEST_FEEDBACK_CATEGORY_PROMPT",
+          aiConfidence: 0.99
+        }
+      });
+    }
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  if (feedbackOpen) {
+    if (feedbackOpen.status === GuestFeedbackStatus.AWAITING_CATEGORY) {
+      const picked = parseGuestFeedbackCategory(input.text);
+      if (picked) {
+        if (picked === "OTHER_COMMENT") {
+          await prisma.guestFeedback.update({
+            where: { id: feedbackOpen.id },
+            data: { category: GuestFeedbackCategory.OTHER, status: GuestFeedbackStatus.AWAITING_COMMENT }
+          });
+          const prompt = "Please share your feedback in a short message. We are listening.";
+          await sendWhatsAppText({
+            to: normalizedPhone,
+            body: prompt,
+            phoneNumberId: hotel.phoneNumberId,
+            conversationId: conversation.id
+          });
+          await prisma.message.create({
+            data: {
+              hotelId: hotel.id,
+              conversationId: conversation.id,
+              direction: MessageDirection.OUTBOUND,
+              body: prompt,
+              aiIntent: "GUEST_FEEDBACK_OTHER_COMMENT_PROMPT",
+              aiConfidence: 0.98
+            }
+          });
+        } else {
+          await prisma.guestFeedback.update({
+            where: { id: feedbackOpen.id },
+            data: { category: picked, status: GuestFeedbackStatus.COMPLETED }
+          });
+          const thanks = "Thank you for your feedback 🙏";
+          await sendWhatsAppText({
+            to: normalizedPhone,
+            body: thanks,
+            phoneNumberId: hotel.phoneNumberId,
+            conversationId: conversation.id
+          });
+          await prisma.message.create({
+            data: {
+              hotelId: hotel.id,
+              conversationId: conversation.id,
+              direction: MessageDirection.OUTBOUND,
+              body: thanks,
+              aiIntent: "GUEST_FEEDBACK_COMPLETED",
+              aiConfidence: 0.99
+            }
+          });
+        }
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+    }
+    if (feedbackOpen.status === GuestFeedbackStatus.AWAITING_COMMENT) {
+      const comment = String(input.text ?? "").trim();
+      const normalizedComment = normalizeText(comment).replace(/\s+/g, "_");
+      if (normalizedComment === "fb_add_comment" || normalizedComment === "add_a_comment") {
+        const prompt = "Please share your feedback in a short message. We are listening.";
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: prompt,
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        await prisma.message.create({
+          data: {
+            hotelId: hotel.id,
+            conversationId: conversation.id,
+            direction: MessageDirection.OUTBOUND,
+            body: prompt,
+            aiIntent: "GUEST_FEEDBACK_COMMENT_PROMPT",
+            aiConfidence: 0.98
+          }
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+      if (isGuestFeedbackSkipComment(comment)) {
+        await prisma.guestFeedback.update({
+          where: { id: feedbackOpen.id },
+          data: { status: GuestFeedbackStatus.COMPLETED }
+        });
+        const thanks = "Thank you for your feedback 🙏";
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: thanks,
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        await prisma.message.create({
+          data: {
+            hotelId: hotel.id,
+            conversationId: conversation.id,
+            direction: MessageDirection.OUTBOUND,
+            body: thanks,
+            aiIntent: "GUEST_FEEDBACK_COMPLETED",
+            aiConfidence: 0.99
+          }
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+      if (comment.length >= 2 && comment.length <= 500) {
+        await prisma.guestFeedback.update({
+          where: { id: feedbackOpen.id },
+          data: { comment, status: GuestFeedbackStatus.COMPLETED }
+        });
+        const thanks = "Thank you for your feedback 🙏";
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: thanks,
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        await prisma.message.create({
+          data: {
+            hotelId: hotel.id,
+            conversationId: conversation.id,
+            direction: MessageDirection.OUTBOUND,
+            body: thanks,
+            aiIntent: "GUEST_FEEDBACK_COMPLETED",
+            aiConfidence: 0.99
+          }
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+    }
+  }
 
   if (conversationMode === "AGENT_MODE") {
     return;

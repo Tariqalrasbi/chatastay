@@ -37,6 +37,21 @@ enum BookingStatus {
   NO_SHOW
 }
 
+enum GuestFeedbackCategory {
+  CLEANLINESS
+  ROOM_COMFORT
+  SERVICE
+  FOOD_BEVERAGE
+  FACILITIES
+  OTHER
+}
+
+enum GuestFeedbackStatus {
+  AWAITING_CATEGORY
+  AWAITING_COMMENT
+  COMPLETED
+}
+
 enum BillingCycle {
   MONTHLY
   YEARLY
@@ -313,6 +328,7 @@ model Hotel {
   housekeepingTasks     HousekeepingTask[]
   leads                Lead[]
   leadOutreachLogs     LeadOutreachLog[]
+  guestFeedbacks       GuestFeedback[]
 }
 
 /// Per-hotel daily email digest audit (hotel admin); separate from platform OwnerDailyDigestLog.
@@ -577,6 +593,7 @@ model Guest {
   notifications  Notification[]
   guestFollowUps GuestFollowUp[]
   marketingCampaignRecipients MarketingCampaignRecipient[]
+  feedbacks      GuestFeedback[]
 
   @@unique([hotelId, phoneE164])
 }
@@ -724,6 +741,8 @@ model Booking {
   guestJourneyPostCheckoutThankYouSentAt DateTime?
   /// Guest journey: REVIEW_REQUEST WhatsApp sent (once per booking).
   guestJourneyReviewRequestSentAt DateTime?
+  /// Guest journey: REVIEW_REQUEST reminder sent (once per booking; only when no rating was received).
+  guestJourneyReviewReminderSentAt DateTime?
   /// Guest journey: REPEAT_GUEST_PROMO WhatsApp sent (once per booking; guest-level cooldown also applies).
   guestJourneyRepeatPromoSentAt DateTime?
   createdAt      DateTime      @default(now())
@@ -738,6 +757,7 @@ model Booking {
   auditLogEntries AuditLog[] @relation("BookingAuditLogs")
   housekeepingTasks HousekeepingTask[]
   guestFollowUps GuestFollowUp[]
+  feedbacks      GuestFeedback[]
 
   @@unique([hotelId, referenceCode])
   @@index([hotelId, referenceCode])
@@ -761,6 +781,28 @@ model BookingStatusHistory {
 
   @@index([hotelId, bookingId])
   @@index([hotelId, createdAt])
+}
+
+/// Post-stay guest satisfaction captured via WhatsApp interactive flow.
+model GuestFeedback {
+  id         String              @id @default(cuid())
+  hotelId    String
+  hotel      Hotel               @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookingId  String
+  booking    Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  guestId    String?
+  guest      Guest?              @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  guestName  String?
+  rating     Int
+  category   GuestFeedbackCategory?
+  comment    String?
+  status     GuestFeedbackStatus @default(AWAITING_COMMENT)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  @@index([hotelId, createdAt])
+  @@index([hotelId, bookingId])
+  @@index([hotelId, rating])
 }
 
 /// Financial ledger container for a stay. Default MAIN folio per booking; structure allows split/company folios later.

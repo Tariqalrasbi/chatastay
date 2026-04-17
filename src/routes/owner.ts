@@ -880,6 +880,16 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
     prisma.syncJob.count({ where: { status: "FAILED" } }),
     prisma.paymentIntent.count({ where: { status: { in: ["PENDING", "REQUIRES_ACTION"] } } })
   ]);
+  const hotelIds = kpi.hotelRows.map((h) => h.hotelId);
+  const feedbackByHotel = hotelIds.length
+    ? await prisma.guestFeedback.groupBy({
+        by: ["hotelId"],
+        where: { hotelId: { in: hotelIds } },
+        _avg: { rating: true },
+        _count: { _all: true }
+      })
+    : [];
+  const feedbackMap = new Map(feedbackByHotel.map((x) => [x.hotelId, { avg: x._avg.rating ?? 0, count: x._count._all }]));
 
   const trialingSubs =
     kpi.subscriptionsByStatus.find((s) => s.status === "TRIALING")?.count ?? 0;
@@ -949,6 +959,11 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
   <td>${formatMoney(h.roomRevenue, h.currency)}</td>
   <td>${formatMoney(h.fbRevenue, h.currency)}</td>
   <td>${h.conversations}</td>
+  <td>${
+    (feedbackMap.get(h.hotelId)?.count ?? 0) > 0
+      ? `${(feedbackMap.get(h.hotelId)?.avg ?? 0).toFixed(1)} ⭐ <span class="muted">(${feedbackMap.get(h.hotelId)?.count ?? 0})</span>`
+      : "—"
+  }</td>
   <td>${h.campaigns} <span class="muted">(${h.campaignSentOk} sent)</span></td>
   <td>${h.openInvoiceCount > 0 ? `${formatMoney(h.openInvoiceTotal, h.currency)} (${h.openInvoiceCount})` : "—"}</td>
 </tr>`;
@@ -1009,6 +1024,23 @@ ${attentionBlock}
   <article class="stat"><h3>Platform pulse</h3><p style="font-size:15px">Sync failures: ${failedSyncJobs}</p><p class="muted" style="font-size:12px;margin:0">Pending payment intents: ${pendingPayments}</p></article>
 </div>
 
+<h3 style="margin-top:22px">Guest rating overview</h3>
+<table>
+  <thead><tr><th>Hotel</th><th>Average rating</th><th>Reviews</th></tr></thead>
+  <tbody>${
+    hotelRowsSorted
+      .map((h) => {
+        const fb = feedbackMap.get(h.hotelId);
+        return `<tr>
+    <td><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a></td>
+    <td>${fb && fb.count > 0 ? `${fb.avg.toFixed(1)} ⭐` : "—"}</td>
+    <td>${fb?.count ?? 0}</td>
+  </tr>`;
+      })
+      .join("") || `<tr><td colspan="3" class="muted">No feedback yet.</td></tr>`
+  }</tbody>
+</table>
+
 <h3 style="margin-top:22px">Subscription status (all hotels)</h3>
 <table>
   <thead><tr><th>Status</th><th>Count</th></tr></thead>
@@ -1030,8 +1062,8 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Hotel comparison</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
-  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="9" class="muted">No hotels</td></tr>`}</tbody>
+  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
+  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="10" class="muted">No hotels</td></tr>`}</tbody>
 </table>`;
 
   res.type("html").send(ownerLayout(content, true));
