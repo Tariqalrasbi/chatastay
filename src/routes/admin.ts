@@ -2171,8 +2171,10 @@ function isOptionalHousekeepingSchemaError(err: unknown): boolean {
 }
 
 function isHotelUserSchemaMismatchError(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2022") return true;
   const raw = err instanceof Error ? err.message : String(err ?? "");
   const msg = raw.toLowerCase();
+  if (msg.includes("does not exist in the current database")) return true;
   if (!msg.includes("hoteluser")) return false;
   return msg.includes("no such table") || msg.includes("no such column");
 }
@@ -3489,6 +3491,22 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
 
     res.redirect("/admin/users?created=1");
   } catch (err) {
+    if (isHotelUserSchemaMismatchError(err)) {
+      console.error(
+        "[admin] POST /users schema drift (HotelUser columns missing?):",
+        err instanceof Error ? err.message : String(err)
+      );
+      res
+        .status(503)
+        .type("html")
+        .send(
+          renderLayout(
+            '<h2>Users</h2><p class="badge alert">The database is missing required HotelUser columns (often after a deploy without migrations). Run <code>npx prisma migrate deploy</code> on the server, then restart the app. If the problem persists, contact support.</p><p><a href="/admin/users">Back to users</a></p>',
+            true
+          )
+        );
+      return;
+    }
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const target = Array.isArray(err.meta?.target) ? (err.meta?.target as string[]).join(", ") : "email or username";
       console.warn("[admin] POST /users duplicate key:", target);

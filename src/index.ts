@@ -3,6 +3,7 @@ import express from "express";
 import path from "node:path";
 import { prisma } from "./db";
 import { ensureGuestFeedbackFollowupColumnsSqlite } from "./core/sqliteGuestFeedbackSchemaRepair";
+import { ensureHotelUserAuthColumnsSqlite } from "./core/sqliteHotelUserSchemaRepair";
 import { apiRouter } from "./routes/api";
 import { adminRouter, authRouter } from "./routes/admin";
 import { housekeepingRouter } from "./routes/housekeeping";
@@ -50,6 +51,7 @@ app.use("/whatsapp/webhook", whatsappWebhookRouter);
 
 async function start(): Promise<void> {
   await prisma.$connect();
+  await ensureHotelUserAuthColumnsSqlite(prisma);
   await ensureGuestFeedbackFollowupColumnsSqlite(prisma);
 
   const server = app.listen(port, host, () => {
