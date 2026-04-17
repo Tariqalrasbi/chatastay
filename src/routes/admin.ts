@@ -1835,6 +1835,21 @@ function hotelUserIdForPrismaFk(staffId: string | undefined | null): string | un
   return s;
 }
 
+/** Real HotelUser id for folio FKs; never trust client-supplied staff ids — use session only. */
+function requireHotelStaffIdForFolioJson(req: Request, res: Response): string | null {
+  const session = getSession(req);
+  if (!session) {
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return null;
+  }
+  const id = hotelUserIdForPrismaFk(session.staffId);
+  if (!id) {
+    res.status(401).json({ ok: false, error: "A hotel staff login is required for folio actions." });
+    return null;
+  }
+  return id;
+}
+
 /** Prevent open redirects and protocol tricks in ?returnTo / form body. */
 function safeAdminReturnToPath(raw: unknown, fallback: string): string {
   const t = String(raw ?? "").trim();
@@ -8364,11 +8379,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
 
 adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
   try {
-    const session = getSession(req);
-    if (!session) {
-      res.status(401).json({ ok: false, error: "Unauthorized" });
-      return;
-    }
+    const staffId = requireHotelStaffIdForFolioJson(req, res);
+    if (staffId === null) return;
     const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
@@ -8454,7 +8466,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
       roomUnitId: unit.id,
       roomTypeId: unit.roomTypeId,
       currency: booking.currency,
-      staffId: session.staffId,
+      staffId,
       outletCategory,
       transactionType,
       menuItemId,
@@ -8513,11 +8525,8 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
 
 adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
   try {
-    const session = getSession(req);
-    if (!session) {
-      res.status(401).json({ ok: false, error: "Unauthorized" });
-      return;
-    }
+    const staffId = requireHotelStaffIdForFolioJson(req, res);
+    if (staffId === null) return;
     const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
@@ -8566,7 +8575,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson
       roomUnitId: unit.id,
       roomTypeId: unit.roomTypeId,
       currency: booking.currency,
-      staffId: session.staffId,
+      staffId,
       amount: gross,
       folioPaymentMethod: String(body.folioPaymentMethod ?? "CASH").trim().slice(0, 48) || "CASH",
       postingTarget: parsePostingTarget(String(body.postingTarget ?? "BOOKING_ACCOUNT")),
@@ -8590,11 +8599,8 @@ adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson
 
 adminRouter.post("/room-board/unit/:unitId/folio/:txnId/void", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
   try {
-    const session = getSession(req);
-    if (!session) {
-      res.status(401).json({ ok: false, error: "Unauthorized" });
-      return;
-    }
+    const staffId = requireHotelStaffIdForFolioJson(req, res);
+    if (staffId === null) return;
     const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
@@ -8644,7 +8650,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/:txnId/void", requirePermission
       hotelId: hotel.id,
       bookingId: booking.id,
       transactionId: txnId,
-      staffId: session.staffId,
+      staffId,
       reason
     });
     try {
