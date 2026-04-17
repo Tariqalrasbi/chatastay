@@ -50,6 +50,7 @@ import {
   trackDecisionEventSafe
 } from "../core/decisionAnalytics";
 import { prisma } from "../db";
+import { defaultHotelSlug } from "../config/tenancy";
 import { inventoryDayRangeExclusive } from "../core/inventoryDate";
 import { autoAssignRoomUnitForBookingTx, releaseInventoryForStayRange, reserveInventoryForBooking } from "../core/bookingService";
 import { recordBookingStatusChange } from "../core/bookingStatusHistory";
@@ -1755,6 +1756,20 @@ async function assertInventoryCanReserveTx(
   }
 }
 
+/** Synthetic platform session id is not a HotelUser row — must not be written to HotelUser FK columns. */
+function hotelUserIdForPrismaFk(staffId: string | undefined | null): string | undefined {
+  const s = typeof staffId === "string" ? staffId.trim() : "";
+  if (!s || s === "STAFF-SUPERADMIN") return undefined;
+  return s;
+}
+
+/** Prevent open redirects and protocol tricks in ?returnTo / form body. */
+function safeAdminReturnToPath(raw: unknown, fallback: string): string {
+  const t = String(raw ?? "").trim();
+  if (!t.startsWith("/") || t.startsWith("//") || t.includes("://") || /[\n\r]/.test(t)) return fallback;
+  return t;
+}
+
 async function logAudit(params: {
   hotelId: string;
   action: string;
@@ -1767,7 +1782,7 @@ async function logAudit(params: {
   await prisma.auditLog.create({
     data: {
       hotelId: params.hotelId,
-      actorUserId: actor?.staffId,
+      actorUserId: hotelUserIdForPrismaFk(actor?.staffId),
       actorEmail: actor?.staffEmail ?? process.env.ADMIN_EMAIL ?? "admin@chatastay.local",
       action: params.action,
       entityType: params.entityType,
@@ -1805,7 +1820,7 @@ async function ensureHousekeepingTaskForCleaningTx(
       status: HousekeepingTaskStatus.PENDING,
       source: params.source,
       bookingId: params.bookingId ?? undefined,
-      createdByUserId: params.createdByUserId ?? undefined,
+      createdByUserId: hotelUserIdForPrismaFk(params.createdByUserId ?? undefined),
       notes: writeHousekeepingShift(params.notes ?? undefined, deriveHousekeepingShift(new Date()))
     }
   });
@@ -3740,7 +3755,7 @@ adminRouter.post("/leads/:leadId/outreach", requirePermission("USERS", "EDIT"), 
 
 adminRouter.get("/profile", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
+    where: { slug: defaultHotelSlug },
     include: {
       subscriptions: {
         where: { status: { in: ["ACTIVE", "TRIALING", "PAST_DUE"] } },
@@ -3964,31 +3979,26 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
       const detailHref = card.unitId
         ? `/admin/room-board/unit/${encodeURIComponent(card.unitId)}/details?date=${formatDateForInput(dayStart)}`
         : `/admin/bookings/${encodeURIComponent(card.bookingId ?? "")}`;
-      const statusForm =
-        card.unitId
-          ? `<form method="post" action="/admin/room-board/unit/${encodeURIComponent(card.unitId)}/status" style="display:flex; gap:6px; align-items:center">
-            <input type="hidden" name="date" value="${formatDateForInput(dayStart)}" />
-            <input type="hidden" name="returnTo" value="/admin/profile" />
-            <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
-              <option value="AVAILABLE" ${card.status === "AVAILABLE" ? "selected" : ""}>Available</option>
-              <option value="RESERVED" ${card.status === "RESERVED" ? "selected" : ""}>Reserved</option>
-              <option value="OCCUPIED" ${card.status === "OCCUPIED" ? "selected" : ""}>Occupied</option>
-              <option value="CLEANING" ${card.status === "CLEANING" ? "selected" : ""}>Cleaning</option>
-              <option value="MAINTENANCE" ${card.status === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
-            </select>
-            <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Set</button>
-          </form>`
-          : "";
-      return `<div class="room-board-card ${colorClass}">
+      const statusForm = card.unitId
+        ? roomBoardStatusFormHtml({
+            unitId: card.unitId,
+            boardDate: dayStart,
+            status: card.status,
+            returnTo: "/admin/profile",
+            variant: "profile"
+          })
+        : "";
+      const unitDataAttr = card.unitId ? ` data-room-unit-id="${escapeHtml(card.unitId)}"` : "";
+      return `<div class="room-board-card ${colorClass}"${unitDataAttr}>
         <strong>${escapeHtml(card.unitName)}</strong>${card.unitId ? "" : ' <span class="badge pending" style="font-size:10px">no unit</span>'}
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.roomTypeName)}</div>
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.status)}</div>
         ${card.guestName ? `<div style="margin-top:6px; font-size:12px">Guest: ${escapeHtml(card.guestName)}</div>` : ""}
         ${card.checkIn && card.checkOut ? `<div class="muted" style="font-size:11px">${formatDateForInput(card.checkIn)} - ${formatDateForInput(card.checkOut)}</div>` : ""}
-        <div style="margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+        <div class="room-board-card-meta-links" style="margin-top:8px">
           <a class="inline-link" href="${detailHref}">${card.unitId ? "details" : "booking"}</a>
-          ${statusForm}
         </div>
+        ${statusForm}
       </div>`;
     })
     .join("");
@@ -4074,7 +4084,8 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   <p style="margin-top:8px"><a class="btn-link" href="/admin/room-board">Open full room board</a></p>
   <style>
     .room-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
-    .room-board-card { display:block; text-decoration:none; border-radius:10px; padding:10px; border:1px solid transparent; color:inherit; background:#fff; }
+    .room-board-card { display:block; text-decoration:none; border-radius:10px; padding:10px; border:1px solid transparent; color:inherit; background:#fff; contain:layout; min-height:0; }
+    .room-board-card-actions { margin-top:10px; padding-top:10px; border-top:1px solid rgba(15,23,42,.12); width:100%; box-sizing:border-box; }
     .room-board-card:hover { opacity:0.92; }
     .room-board-green { border-color:#22c55e; background:#dcfce7; color:#166534; }
     .room-board-blue { border-color:#3b82f6; background:#dbeafe; color:#1e40af; }
@@ -4157,7 +4168,7 @@ type RoomBoardLoadViewResult = {
 
 async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts): Promise<RoomBoardLoadViewResult | null> {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: "al-ashkhara-beach-resort" },
+    where: { slug: defaultHotelSlug },
     include: {
       roomTypes: { where: { isActive: true }, orderBy: { name: "asc" }, include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } } }
     }
@@ -4458,6 +4469,37 @@ function writeManualRoomStatusToNotes(notes: string | null | undefined, status: 
   return `${cleaned ? `${cleaned} ` : ""}[status:${status}]`.trim();
 }
 
+/** Shared markup for room status POST — keeps one card’s form scoped to that unit (avoids ambiguous flex rows). */
+function roomBoardStatusFormHtml(opts: {
+  unitId: string;
+  boardDate: Date;
+  status: RoomBoardStatus;
+  returnTo?: string | null;
+  variant: "profile" | "full" | "hk";
+}): string {
+  const hiddenReturn =
+    opts.returnTo != null && String(opts.returnTo).length > 0
+      ? `<input type="hidden" name="returnTo" value="${escapeHtml(String(opts.returnTo))}" />`
+      : "";
+  const selPad = opts.variant === "profile" ? "6px" : "4px 6px";
+  const btnPad = opts.variant === "profile" ? "6px 10px" : "4px 8px";
+  const s = opts.status;
+  return `<div class="room-board-card-actions" data-room-unit-id="${escapeHtml(opts.unitId)}">
+  <form method="post" action="/admin/room-board/unit/${encodeURIComponent(opts.unitId)}/status" class="room-board-status-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;width:100%;box-sizing:border-box;margin:0">
+    <input type="hidden" name="date" value="${formatDateForInput(opts.boardDate)}" />
+    ${hiddenReturn}
+    <select name="status" aria-label="Set room status" style="padding:${selPad};border:1px solid #d8dee6;border-radius:8px;font-size:12px;flex:1;min-width:0;max-width:100%">
+      <option value="AVAILABLE" ${s === "AVAILABLE" ? "selected" : ""}>Available</option>
+      <option value="RESERVED" ${s === "RESERVED" ? "selected" : ""}>Reserved</option>
+      <option value="OCCUPIED" ${s === "OCCUPIED" ? "selected" : ""}>Occupied</option>
+      <option value="CLEANING" ${s === "CLEANING" ? "selected" : ""}>Cleaning</option>
+      <option value="MAINTENANCE" ${s === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+    </select>
+    <button type="submit" style="padding:${btnPad};border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700;white-space:nowrap">Set</button>
+  </form>
+</div>`;
+}
+
 function getPreferredUnitSortRank(unitName: string): number {
   const normalized = unitName.trim().toUpperCase();
   const match = normalized.match(/^([NSF])(\d+)$/);
@@ -4622,14 +4664,14 @@ async function backfillMissingRoomUnitAssignmentsForDate(params: { hotelId: stri
 }
 
 adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/room-board");
     return;
   }
   const unitId = String(req.params.unitId ?? "");
   const statusInput = String(req.body.status ?? "").trim().toUpperCase();
-  const returnTo = String(req.body.returnTo ?? "").trim();
+  const returnTo = safeAdminReturnToPath(req.body.returnTo, "");
   const validStatuses: RoomBoardStatus[] = ["AVAILABLE", "RESERVED", "OCCUPIED", "CLEANING", "MAINTENANCE"];
   const status = validStatuses.includes(statusInput as RoomBoardStatus) ? (statusInput as RoomBoardStatus) : "AVAILABLE";
   const boardDate = parseDateInput(req.body.date, startOfDay(new Date()));
@@ -4673,7 +4715,7 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
           data: {
             status: HousekeepingTaskStatus.COMPLETED,
             completedAt: new Date(),
-            completedByUserId: staffId ?? null,
+            completedByUserId: hotelUserIdForPrismaFk(staffId) ?? null,
             notes: "Marked AVAILABLE from room board (bypassed HK screen)"
           }
         });
@@ -5131,22 +5173,17 @@ adminRouter.get("/hk/room-board", requireAuth, requireHousekeepingPortal, requir
   const roomCardsHtml = hkCards
     .map((c) => {
       const statusClass = getRoomBoardStatusClass(c.status);
-      const statusForm = `<form method="post" action="/admin/room-board/unit/${encodeURIComponent(c.unitId!)}/status" style="display:flex; gap:6px; align-items:center">
-      <input type="hidden" name="date" value="${formatDateForInput(boardDate)}" />
-      <input type="hidden" name="returnTo" value="${escapeHtml(hkReturn)}" />
-      <select name="status" style="padding:4px 6px; border:1px solid #d8dee6; border-radius:8px; font-size:12px">
-        <option value="AVAILABLE" ${c.status === "AVAILABLE" ? "selected" : ""}>Available</option>
-        <option value="RESERVED" ${c.status === "RESERVED" ? "selected" : ""}>Reserved</option>
-        <option value="OCCUPIED" ${c.status === "OCCUPIED" ? "selected" : ""}>Occupied</option>
-        <option value="CLEANING" ${c.status === "CLEANING" ? "selected" : ""}>Cleaning</option>
-        <option value="MAINTENANCE" ${c.status === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
-      </select>
-      <button type="submit" style="padding:4px 8px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; font-size:12px">Set</button>
-    </form>`;
-      return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:10px; border:2px solid currentColor;">
+      const statusForm = roomBoardStatusFormHtml({
+        unitId: c.unitId!,
+        boardDate,
+        status: c.status,
+        returnTo: hkReturn,
+        variant: "hk"
+      });
+      return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:10px; border:2px solid currentColor; contain:layout;" data-room-unit-id="${escapeHtml(c.unitId!)}">
   <div style="font-weight:800; font-size:1rem;">${escapeHtml(c.unitName)}</div>
   <div style="margin-top:6px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
-  <div style="margin-top:10px;">${statusForm}</div>
+  ${statusForm}
 </div>`;
     })
     .join("");
@@ -5172,6 +5209,7 @@ ${updatedNotice}
 </div>
 <style>
   .room-board-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; }
+  .room-board-card-actions { margin-top:10px; padding-top:8px; border-top:1px solid rgba(15,23,42,.12); width:100%; box-sizing:border-box; }
   .room-status-available { background:#dcfce7; color:#166534; }
   .room-status-reserved { background:#dbeafe; color:#1e40af; }
   .room-status-occupied { background:#fee2e2; color:#991b1b; }
@@ -5228,17 +5266,13 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
           : `/admin/bookings/${encodeURIComponent(c.bookingId ?? "")}`;
         const statusForm =
           c.unitId && !c.isUnassignedBooking
-            ? `<form method="post" action="/admin/room-board/unit/${encodeURIComponent(c.unitId)}/status" style="display:flex; gap:6px; align-items:center">
-      <input type="hidden" name="date" value="${formatDateForInput(boardDate)}" />
-      <select name="status" style="padding:4px 6px; border:1px solid #d8dee6; border-radius:8px; font-size:12px">
-        <option value="AVAILABLE" ${c.status === "AVAILABLE" ? "selected" : ""}>Available</option>
-        <option value="RESERVED" ${c.status === "RESERVED" ? "selected" : ""}>Reserved</option>
-        <option value="OCCUPIED" ${c.status === "OCCUPIED" ? "selected" : ""}>Occupied</option>
-        <option value="CLEANING" ${c.status === "CLEANING" ? "selected" : ""}>Cleaning</option>
-        <option value="MAINTENANCE" ${c.status === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
-      </select>
-      <button type="submit" style="padding:4px 8px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; font-size:12px">Set</button>
-    </form>`
+            ? roomBoardStatusFormHtml({
+                unitId: c.unitId,
+                boardDate,
+                status: c.status,
+                returnTo: null,
+                variant: "full"
+              })
             : "";
         const stayDetailHtml =
           c.bookingId && c.checkIn && c.checkOut
@@ -5252,17 +5286,19 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
                 bookingNights: c.bookingNights
               })
             : "";
-        return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px;">
+        const unitAttr =
+          c.unitId && !c.isUnassignedBooking ? ` data-room-unit-id="${escapeHtml(c.unitId)}"` : "";
+        return `<div class="room-board-card ${statusClass}" style="border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px; contain:layout;"${unitAttr}>
   <div style="font-weight:700; font-size:0.92rem; margin-bottom:2px;">${escapeHtml(c.unitName)}${c.isUnassignedBooking ? ' <span class="badge pending" style="font-size:10px">no unit</span>' : ""}</div>
   <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">${escapeHtml(c.name)}</div>
   <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
   ${c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
   ${stayDetailHtml}
   ${c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
-  <div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+  <div class="room-board-card-meta-links" style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
     <a class="inline-link" href="${detailUrl}">${c.isUnassignedBooking ? "booking" : "details"}</a>
-    ${statusForm}
   </div>
+  ${statusForm}
 </div>`;
       }
     )
@@ -5332,6 +5368,7 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
   }
   .room-board-date-arrow:hover { background:#e2e8f0; color:#075e54; }
   .room-board-card:hover { opacity:0.92; }
+  .room-board-card-actions { margin-top:8px; padding-top:8px; border-top:1px solid rgba(15,23,42,.12); width:100%; box-sizing:border-box; }
   .room-board-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; }
   .room-status-available { background:#dcfce7; color:#166534; border-color:#22c55e; }
   .room-status-reserved { background:#dbeafe; color:#1e40af; border-color:#3b82f6; }
