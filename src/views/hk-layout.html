@@ -229,48 +229,233 @@
     </div>
     {{extraScripts}}
     <script>
-      (function () {
-        function resetAdminOverlayState() {
-          document.body.classList.remove("rud-drawer-open");
-          document.body.classList.remove("modal-open");
-          document.body.style.removeProperty("pointer-events");
-          document.querySelectorAll(".modal-backdrop").forEach(function (el) {
+      (function (g) {
+        var blockCounts = new Map();
+        var openModals = new Set();
+        var safetyTimerIds = [];
+        var blockOverlayEl = null;
+
+        function totalBlocks() {
+          var n = 0;
+          blockCounts.forEach(function (c) {
+            n += c;
+          });
+          return n;
+        }
+
+        function syncBlockOverlay() {
+          if (totalBlocks() > 0) {
+            if (!blockOverlayEl) {
+              blockOverlayEl = g.document.createElement("div");
+              blockOverlayEl.id = "uiStateBlockOverlay";
+              blockOverlayEl.setAttribute("aria-hidden", "true");
+              blockOverlayEl.style.cssText =
+                "display:none;position:fixed;inset:0;z-index:2147483640;background:rgba(15,23,42,0.04);cursor:wait;";
+              g.document.body.appendChild(blockOverlayEl);
+            }
+            blockOverlayEl.style.display = "block";
+            blockOverlayEl.setAttribute("aria-hidden", "false");
+          } else if (blockOverlayEl) {
+            blockOverlayEl.style.display = "none";
+            blockOverlayEl.setAttribute("aria-hidden", "true");
+          }
+        }
+
+        function healStuckDom() {
+          g.document.body.classList.remove("modal-open", "rud-drawer-open");
+          g.document.body.style.removeProperty("pointer-events");
+          g.document.querySelectorAll(".modal-backdrop").forEach(function (el) {
             el.remove();
           });
-          var panel = document.getElementById("adminNotifPanel");
+        }
+
+        function resetAdminOverlayState() {
+          healStuckDom();
+          var panel = g.document.getElementById("adminNotifPanel");
           if (panel) {
             panel.hidden = true;
             panel.setAttribute("hidden", "");
           }
-          var bd = document.getElementById("folio-modal-backdrop");
+          var bd = g.document.getElementById("folio-modal-backdrop");
           if (bd) {
             bd.style.display = "none";
             bd.setAttribute("aria-hidden", "true");
           }
           ["folio-charge-modal", "folio-payment-modal"].forEach(function (id) {
-            var m = document.getElementById(id);
+            var m = g.document.getElementById(id);
             if (m) {
               m.style.display = "none";
               m.setAttribute("aria-hidden", "true");
             }
           });
         }
-        resetAdminOverlayState();
-        window.addEventListener("pageshow", function () {
-          resetAdminOverlayState();
-        });
-        document.querySelectorAll('form[action="/admin/login"], form[action="/auth/staff-login"]').forEach(function (form) {
-          form.addEventListener("submit", function () {
+
+        var UIState = {
+          block: function (reason) {
+            var k = String(reason || "default");
+            blockCounts.set(k, (blockCounts.get(k) || 0) + 1);
+            syncBlockOverlay();
+          },
+          unblock: function (reason) {
+            var k = String(reason || "default");
+            var next = (blockCounts.get(k) || 0) - 1;
+            if (next <= 0) blockCounts.delete(k);
+            else blockCounts.set(k, next);
+            syncBlockOverlay();
+          },
+          reset: function () {
+            blockCounts.clear();
+            openModals.clear();
+            safetyTimerIds.forEach(function (id) {
+              g.clearTimeout(id);
+            });
+            safetyTimerIds.length = 0;
+            if (blockOverlayEl) {
+              blockOverlayEl.style.display = "none";
+              blockOverlayEl.setAttribute("aria-hidden", "true");
+            }
             resetAdminOverlayState();
+            g.document.querySelectorAll("form").forEach(function (f) {
+              delete f.dataset.uiSubmitting;
+              delete f.dataset.uiSafetyTimerId;
+            });
+            g.document.querySelectorAll("[data-ui-state-disabled]").forEach(function (el) {
+              if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement) el.disabled = false;
+              el.removeAttribute("data-ui-state-disabled");
+            });
+          },
+          openModal: function (id) {
+            var sid = String(id || "modal");
+            openModals.add(sid);
+            g.document.body.classList.add("modal-open");
+          },
+          closeModal: function (id) {
+            var sid = String(id || "modal");
+            openModals.delete(sid);
+            if (openModals.size === 0) g.document.body.classList.remove("modal-open");
+          },
+          withTimeout: function (promise, ms) {
+            return new Promise(function (resolve, reject) {
+              var settled = false;
+              var t = g.setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                reject(new Error("Operation timed out"));
+              }, ms);
+              Promise.resolve(promise).then(
+                function (v) {
+                  if (settled) return;
+                  settled = true;
+                  g.clearTimeout(t);
+                  resolve(v);
+                },
+                function (e) {
+                  if (settled) return;
+                  settled = true;
+                  g.clearTimeout(t);
+                  reject(e);
+                }
+              );
+            });
+          },
+          withBlocking: function (fn, reason, opts) {
+            opts = opts || {};
+            var r = String(reason || "default");
+            UIState.block(r);
+            var chain = Promise.resolve().then(function () {
+              return fn();
+            });
+            if (opts.timeoutMs != null && opts.timeoutMs > 0) {
+              chain = UIState.withTimeout(chain, opts.timeoutMs);
+            }
+            return chain.finally(function () {
+              UIState.unblock(r);
+            });
+          },
+          beginSubmitGuard: function (form) {
+            if (!form) return true;
+            if (form.dataset.uiSubmitting === "1") return false;
+            form.dataset.uiSubmitting = "1";
+            return true;
+          },
+          endSubmitGuard: function (form) {
+            if (form) delete form.dataset.uiSubmitting;
+          },
+          scheduleSubmitSafety: function (form, releaseFn, ms) {
+            if (form && form.dataset.uiSafetyTimerId) {
+              var prev = Number(form.dataset.uiSafetyTimerId);
+              if (g.isFinite(prev)) {
+                g.clearTimeout(prev);
+                var pix = safetyTimerIds.indexOf(prev);
+                if (pix >= 0) safetyTimerIds.splice(pix, 1);
+              }
+              delete form.dataset.uiSafetyTimerId;
+            }
+            var delay = ms == null ? 28000 : ms;
+            var tid = g.setTimeout(function () {
+              var ix = safetyTimerIds.indexOf(tid);
+              if (ix >= 0) safetyTimerIds.splice(ix, 1);
+              if (form) delete form.dataset.uiSafetyTimerId;
+              try {
+                releaseFn();
+              } catch (e) {}
+            }, delay);
+            if (form) form.dataset.uiSafetyTimerId = String(tid);
+            safetyTimerIds.push(tid);
+            return tid;
+          }
+        };
+
+        g.UIState = UIState;
+
+        function selfHeal() {
+          UIState.reset();
+        }
+
+        if (g.document.readyState === "loading") {
+          g.document.addEventListener("DOMContentLoaded", selfHeal);
+        } else {
+          selfHeal();
+        }
+        g.window.addEventListener("pageshow", selfHeal);
+
+        g.document.querySelectorAll('form[action="/admin/login"], form[action="/auth/staff-login"]').forEach(function (form) {
+          form.addEventListener("submit", function (e) {
+            if (!UIState.beginSubmitGuard(form)) {
+              e.preventDefault();
+              return;
+            }
             var btn = form.querySelector('button[type="submit"]');
-            if (!btn) return;
-            btn.disabled = true;
-            window.setTimeout(function () {
-              btn.disabled = false;
-            }, 25000);
+            try {
+              resetAdminOverlayState();
+              if (btn) {
+                btn.disabled = true;
+                btn.setAttribute("data-ui-state-disabled", "1");
+              }
+            } catch (err) {
+              UIState.endSubmitGuard(form);
+              if (btn) {
+                btn.disabled = false;
+                btn.removeAttribute("data-ui-state-disabled");
+              }
+              e.preventDefault();
+              throw err;
+            } finally {
+              UIState.scheduleSubmitSafety(
+                form,
+                function () {
+                  UIState.endSubmitGuard(form);
+                  if (btn) {
+                    btn.disabled = false;
+                    btn.removeAttribute("data-ui-state-disabled");
+                  }
+                },
+                28000
+              );
+            }
           });
         });
-      })();
+      })(typeof window !== "undefined" ? window : this);
     </script>
   </body>
 </html>

@@ -7857,6 +7857,13 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   if (chargeForm) {
     chargeForm.addEventListener("submit", function (e) {
       e.preventDefault();
+      var US = window.UIState;
+      if (US && !US.beginSubmitGuard(chargeForm)) return;
+      var submitBtn = chargeForm.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.setAttribute("data-ui-state-disabled", "1");
+      }
       var err = document.getElementById("folio-charge-err");
       if (err) { err.style.display = "none"; err.textContent = ""; }
       var mode = (document.querySelector('input[name="folioMode"]:checked') || {}).value || "catalog";
@@ -7880,28 +7887,46 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         body.itemName = catSearch ? catSearch.value : "";
         delete body.unitPrice;
       }
-      fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/charge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      }).then(function (r) { return r.json(); }).then(function (j) {
-        if (j.ok) {
-          var msg = "Posted to guest ledger.";
-          if (j.outletNotifyWarning) msg += " " + j.outletNotifyWarning;
-          showToast(msg, !!j.outletNotifyWarning);
-          window.location.reload();
-        } else {
-          if (err) { err.textContent = j.error || "Failed"; err.style.display = "block"; }
+      function doFetch() {
+        return fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/charge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          if (j.ok) {
+            var msg = "Posted to guest ledger.";
+            if (j.outletNotifyWarning) msg += " " + j.outletNotifyWarning;
+            showToast(msg, !!j.outletNotifyWarning);
+            window.location.reload();
+          } else {
+            if (err) { err.textContent = j.error || "Failed"; err.style.display = "block"; }
+          }
+        }).catch(function () {
+          if (err) { err.textContent = "Network error"; err.style.display = "block"; }
+        });
+      }
+      function release() {
+        if (US) US.endSubmitGuard(chargeForm);
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.removeAttribute("data-ui-state-disabled");
         }
-      }).catch(function () {
-        if (err) { err.textContent = "Network error"; err.style.display = "block"; }
-      });
+      }
+      var p = US && US.withBlocking ? US.withBlocking(doFetch, "folio-charge", { timeoutMs: 60000 }) : doFetch();
+      Promise.resolve(p).catch(function () {}).finally(release);
     });
   }
   var payForm = document.getElementById("folio-payment-form");
   if (payForm) {
     payForm.addEventListener("submit", function (e) {
       e.preventDefault();
+      var US = window.UIState;
+      if (US && !US.beginSubmitGuard(payForm)) return;
+      var submitBtn = payForm.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.setAttribute("data-ui-state-disabled", "1");
+      }
       var err = document.getElementById("folio-pay-err");
       if (err) { err.style.display = "none"; }
       var pt = document.getElementById("folio-pay-post-target");
@@ -7914,20 +7939,31 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         notes: document.getElementById("folio-pay-notes") && document.getElementById("folio-pay-notes").value,
         postingTarget: pt && pt.value ? pt.value : "BOOKING_ACCOUNT"
       };
-      fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/payment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      }).then(function (r) { return r.json(); }).then(function (j) {
-        if (j.ok) {
-          showToast("Payment added — balance updated.");
-          window.location.reload();
-        } else {
-          if (err) { err.textContent = j.error || "Failed"; err.style.display = "block"; }
+      function doFetch() {
+        return fetch("/admin/room-board/unit/" + encodeURIComponent(unitId) + "/folio/payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          if (j.ok) {
+            showToast("Payment added — balance updated.");
+            window.location.reload();
+          } else {
+            if (err) { err.textContent = j.error || "Failed"; err.style.display = "block"; }
+          }
+        }).catch(function () {
+          if (err) { err.textContent = "Network error"; err.style.display = "block"; }
+        });
+      }
+      function release() {
+        if (US) US.endSubmitGuard(payForm);
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.removeAttribute("data-ui-state-disabled");
         }
-      }).catch(function () {
-        if (err) { err.textContent = "Network error"; err.style.display = "block"; }
-      });
+      }
+      var p = US && US.withBlocking ? US.withBlocking(doFetch, "folio-payment", { timeoutMs: 60000 }) : doFetch();
+      Promise.resolve(p).catch(function () {}).finally(release);
     });
   }
   function applyLedgerFilter() {
