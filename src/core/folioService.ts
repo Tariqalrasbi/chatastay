@@ -20,11 +20,16 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-/** Non-empty string user id for optional HotelUser FKs; omit field when absent (avoids Prisma/SQLite FK issues). */
-function optionalHotelUserId(staffId?: string | null): string | undefined {
-  if (staffId == null) return undefined;
-  const t = String(staffId).trim();
+/** Trimmed non-empty id for optional FK columns (never write "" or whitespace-only). */
+function nonEmptyRelationId(id?: string | null): string | undefined {
+  if (id == null) return undefined;
+  const t = String(id).trim();
   return t.length > 0 ? t : undefined;
+}
+
+/** Non-empty string user id for optional HotelUser FKs; omit field when absent (avoids Prisma/SQLite FK issues). */
+export function optionalHotelUserId(staffId?: string | null): string | undefined {
+  return nonEmptyRelationId(staffId);
 }
 
 const KNOWN_FOLIO_PAY_METHODS = new Set([
@@ -171,12 +176,13 @@ export async function ensureActiveFolio(
   }
 
   const createdBy = optionalHotelUserId(params.staffId);
+  const roomUnitFk = nonEmptyRelationId(params.roomUnitId);
   const folio = await db.folio.create({
     data: {
       hotelId: params.hotelId,
       bookingId: params.bookingId,
       guestId: params.guestId,
-      roomUnitId: params.roomUnitId ?? undefined,
+      ...(roomUnitFk ? { roomUnitId: roomUnitFk } : {}),
       folioCode: "MAIN",
       folioStatus: FolioStatus.OPEN,
       currency: params.currency,
@@ -220,6 +226,11 @@ export type PostChargeInput = {
 
 export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
   await assertBookingGuestMatchesFolio(db, input.hotelId, input.bookingId, input.guestId);
+  const roomUnitIdFk = nonEmptyRelationId(input.roomUnitId);
+  const roomTypeIdFk = nonEmptyRelationId(input.roomTypeId);
+  const outletIdFk = nonEmptyRelationId(input.outletId);
+  const outletMenuItemIdFk = nonEmptyRelationId(input.outletMenuItemId);
+  const menuItemIdFk = nonEmptyRelationId(input.menuItemId);
   const { folioId } = await ensureActiveFolio(db, {
     hotelId: input.hotelId,
     bookingId: input.bookingId,
@@ -245,16 +256,16 @@ export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
       folioId,
       bookingId: input.bookingId,
       guestId: input.guestId,
-      roomUnitId: input.roomUnitId ?? undefined,
-      roomTypeId: input.roomTypeId ?? undefined,
+      ...(roomUnitIdFk ? { roomUnitId: roomUnitIdFk } : {}),
+      ...(roomTypeIdFk ? { roomTypeId: roomTypeIdFk } : {}),
       transactionType: input.transactionType,
       ledgerKind,
       revenueCategory,
       sourceType: input.sourceType ?? FolioTxnSourceType.ADMIN_PANEL,
       outletCategory: input.outletCategory,
-      outletId: input.outletId ?? undefined,
-      outletMenuItemId: input.outletMenuItemId ?? undefined,
-      menuItemId: input.menuItemId ?? undefined,
+      ...(outletIdFk ? { outletId: outletIdFk } : {}),
+      ...(outletMenuItemIdFk ? { outletMenuItemId: outletMenuItemIdFk } : {}),
+      ...(menuItemIdFk ? { menuItemId: menuItemIdFk } : {}),
       itemCode: input.itemCode ?? undefined,
       itemName: input.itemName,
       description: input.description ?? undefined,
@@ -305,6 +316,8 @@ export type PostPaymentInput = {
 
 export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) {
   await assertBookingGuestMatchesFolio(db, input.hotelId, input.bookingId, input.guestId);
+  const roomUnitIdFk = nonEmptyRelationId(input.roomUnitId);
+  const roomTypeIdFk = nonEmptyRelationId(input.roomTypeId);
   const { folioId } = await ensureActiveFolio(db, {
     hotelId: input.hotelId,
     bookingId: input.bookingId,
@@ -327,8 +340,8 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
       folioId,
       bookingId: input.bookingId,
       guestId: input.guestId,
-      roomUnitId: input.roomUnitId ?? undefined,
-      roomTypeId: input.roomTypeId ?? undefined,
+      ...(roomUnitIdFk ? { roomUnitId: roomUnitIdFk } : {}),
+      ...(roomTypeIdFk ? { roomTypeId: roomTypeIdFk } : {}),
       transactionType: FolioTransactionType.PAYMENT,
       ledgerKind: FolioLedgerKind.PAYMENT,
       revenueCategory: FolioRevenueCategory.OTHER,
@@ -418,6 +431,25 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
 
   const refundAmt = normalizePaymentAmountForPost(round2(input.amount));
 
+  const priorRefunds = await db.folioTransaction.aggregate({
+    where: {
+      hotelId: input.hotelId,
+      bookingId: input.bookingId,
+      parentTransactionId: parent.id,
+      transactionType: FolioTransactionType.REFUND,
+      voidedAt: null,
+      isVoided: false
+    },
+    _sum: { grossAmount: true }
+  });
+  const alreadyRefunded = round2(priorRefunds._sum.grossAmount ?? 0);
+  const refundableCap = round2(parent.grossAmount);
+  if (round2(alreadyRefunded + refundAmt) > refundableCap) {
+    throw new Error("Refund amount exceeds the remaining refundable amount for this line.");
+  }
+
+  const roomUnitIdFk = nonEmptyRelationId(input.roomUnitId);
+  const roomTypeIdFk = nonEmptyRelationId(input.roomTypeId);
   const { folioId } = await ensureActiveFolio(db, {
     hotelId: input.hotelId,
     bookingId: input.bookingId,
@@ -436,8 +468,8 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
       folioId,
       bookingId: input.bookingId,
       guestId: input.guestId,
-      roomUnitId: input.roomUnitId ?? undefined,
-      roomTypeId: input.roomTypeId ?? undefined,
+      ...(roomUnitIdFk ? { roomUnitId: roomUnitIdFk } : {}),
+      ...(roomTypeIdFk ? { roomTypeId: roomTypeIdFk } : {}),
       transactionType: FolioTransactionType.REFUND,
       ledgerKind: FolioLedgerKind.REFUND,
       revenueCategory: FolioRevenueCategory.OTHER,

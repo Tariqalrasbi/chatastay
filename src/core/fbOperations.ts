@@ -10,6 +10,7 @@ import {
   FolioTxnSourceType
 } from "@prisma/client";
 import { prisma } from "../db";
+import { optionalHotelUserId } from "./folioService";
 import { bucketFolioPaymentMethod } from "./shiftCloseReport";
 
 function round2(n: number): number {
@@ -279,6 +280,8 @@ export async function recordWalkInDirectSale(params: {
       ? FolioTxnSourceType.POS_RESTAURANT
       : FolioTxnSourceType.POS_CAFE;
 
+  const walkInCreatedBy = optionalHotelUserId(params.staffId);
+
   await prisma.$transaction(async (tx) => {
     const chargeIds: string[] = [];
     for (const r of resolved) {
@@ -315,7 +318,7 @@ export async function recordWalkInDirectSale(params: {
           postedAt: new Date(),
           notes: "Quick cashier / walk-in (charge)",
           internalNote: "POS_WALK_IN_CASHIER",
-          createdByUserId: params.staffId,
+          ...(walkInCreatedBy ? { createdByUserId: walkInCreatedBy } : {}),
           isVoided: false
         }
       });
@@ -348,7 +351,7 @@ export async function recordWalkInDirectSale(params: {
         postedAt: new Date(),
         notes: notes ?? `Walk-in direct sale; lines: ${chargeIds.length}`,
         internalNote: "POS_WALK_IN_CASHIER_PAY",
-        createdByUserId: params.staffId,
+        ...(walkInCreatedBy ? { createdByUserId: walkInCreatedBy } : {}),
         isVoided: false
       }
     });

@@ -8800,11 +8800,8 @@ adminRouter.get("/api/bookings/:bookingId/folio/transactions", requirePermission
 
 adminRouter.post("/api/bookings/:bookingId/folio/refund", requirePermissionJson("BILLING", "EDIT"), async (req, res) => {
   try {
-    const session = getSession(req);
-    if (!session) {
-      res.status(401).json({ ok: false, error: "Unauthorized" });
-      return;
-    }
+    const staffId = requireHotelStaffIdForFolioJson(req, res);
+    if (staffId === null) return;
     const hotel = await prisma.hotel.findFirst({ where: { slug: "al-ashkhara-beach-resort" }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
@@ -8840,7 +8837,7 @@ adminRouter.post("/api/bookings/:bookingId/folio/refund", requirePermissionJson(
       roomUnitId: booking.roomUnitId,
       roomTypeId: booking.roomTypeId,
       currency: booking.currency,
-      staffId: session.staffId,
+      staffId,
       amount,
       parentTransactionId: parentId,
       folioPaymentMethod: String(body.folioPaymentMethod ?? "CASH"),
