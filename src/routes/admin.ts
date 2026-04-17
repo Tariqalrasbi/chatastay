@@ -3353,7 +3353,8 @@ ${created}
 </div>
 <section style="margin-top:12px">
   <h3>Create user</h3>
-  <form method="post" action="/admin/users" style="display:grid; gap:10px">
+  <p id="admin-create-user-error" class="badge alert" style="display:none; margin-bottom:8px" role="alert"></p>
+  <form id="admin-create-user-form" method="post" action="/admin/users" style="display:grid; gap:10px">
     <div class="grid-2">
       <label>Full name<br /><input type="text" name="fullName" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
       <label>Email (optional for housekeeping)<br /><input type="email" name="email" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
@@ -3374,6 +3375,41 @@ ${created}
     <div style="display:grid; gap:8px">${modulePermissionBlocks}</div>
     <button type="submit" style="padding:10px 14px; border:0; border-radius:10px; background:#0b6e6e; color:#fff; font-weight:700; width:max-content">Create user</button>
   </form>
+  <script>
+  (function () {
+    var form = document.getElementById("admin-create-user-form");
+    var errEl = document.getElementById("admin-create-user-error");
+    if (!form) return;
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
+      var fd = new FormData(form);
+      var params = new URLSearchParams();
+      fd.forEach(function (v, k) { params.append(k, v); });
+      fetch("/admin/users", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+        credentials: "same-origin"
+      })
+        .then(function (r) { return r.json().then(function (data) { return { r: r, data: data }; }); })
+        .then(function (o) {
+          if (o.r.ok && o.data && o.data.success === true) {
+            window.location.href = "/admin/users?created=1";
+            return;
+          }
+          var msg = (o.data && o.data.error) ? String(o.data.error) : "Could not create user.";
+          if (errEl) { errEl.textContent = msg; errEl.style.display = "block"; }
+          else { alert(msg); }
+        })
+        .catch(function () {
+          var msg = "Network error. Please try again.";
+          if (errEl) { errEl.textContent = msg; errEl.style.display = "block"; }
+          else { alert(msg); }
+        });
+    });
+  })();
+  </script>
 </section>
 <section style="margin-top:14px">
   <h3>Existing users</h3>
@@ -3386,82 +3422,87 @@ ${created}
 });
 
 adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
-  if (!hotel) {
-    res.redirect("/admin/users");
-    return;
-  }
-  const fullName = String(req.body.fullName ?? "").trim();
-  const emailRaw = String(req.body.email ?? "").trim().toLowerCase();
-  const email = emailRaw || null;
-  const username = String(req.body.username ?? "").trim().toLowerCase() || null;
-  const password = String(req.body.password ?? "");
-  const pin = String(req.body.pin ?? "").trim();
-  const role = String(req.body.role ?? "MANAGER");
-  if (!fullName || password.length < 8) {
-    res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>Invalid user input.</p>", true));
-    return;
-  }
-  const roleMap: Record<string, UserRole> = {
-    MANAGER: UserRole.MANAGER,
-    STAFF: UserRole.STAFF,
-    FRONTDESK: UserRole.FRONTDESK,
-    FINANCE: UserRole.FINANCE,
-    HOUSEKEEPING: UserRole.HOUSEKEEPING
+  const jsonErr = (status: number, message: string) => {
+    if (!res.headersSent) res.status(status).json({ error: message });
   };
-  if (role === "HOUSEKEEPING" && !username && !email) {
-    res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>For housekeeping, set at least a username or email.</p>", true));
-    return;
-  }
-  if (!email && !username) {
-    res
-      .status(400)
-      .type("html")
-      .send(
-        renderLayout(
-          "<h2>Users</h2><p>Set an <strong>email</strong> and/or <strong>username</strong> so this account can be saved and used for login.</p>",
-          true
-        )
-      );
-    return;
-  }
 
   try {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: "al-ashkhara-beach-resort" } });
+    if (!hotel) {
+      jsonErr(404, "Hotel not found.");
+      return;
+    }
+
+    const fullName = String(req.body.fullName ?? "").trim();
+    const emailRaw = String(req.body.email ?? "").trim().toLowerCase();
+    const email = emailRaw || null;
+    const username = String(req.body.username ?? "").trim().toLowerCase() || null;
+    const password = String(req.body.password ?? "");
+    const pin = String(req.body.pin ?? "").trim();
+    const role = String(req.body.role ?? "MANAGER");
+
+    if (!fullName) {
+      jsonErr(400, "Full name is required.");
+      return;
+    }
+    if (password.length < 8) {
+      jsonErr(400, "Password must be at least 8 characters.");
+      return;
+    }
+    if (!email && !username) {
+      jsonErr(400, "Provide at least an email or a username.");
+      return;
+    }
+
+    const roleMap: Record<string, UserRole> = {
+      MANAGER: UserRole.MANAGER,
+      STAFF: UserRole.STAFF,
+      FRONTDESK: UserRole.FRONTDESK,
+      FINANCE: UserRole.FINANCE,
+      HOUSEKEEPING: UserRole.HOUSEKEEPING
+    };
+
     const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
     const roleSafe = roleMap[role] ?? UserRole.MANAGER;
     const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
-    const createData = {
+    const passwordHash = hashPassword(password);
+
+    const createPayload = {
       hotelId: hotel.id,
       fullName,
       email,
       username,
-      passwordHash: hashPassword(password),
+      passwordHash,
       pinHash,
       role: roleSafe,
-      isActive: true
+      isActive: true,
+      passwordResetTokenHash: null as string | null,
+      passwordResetExpiresAt: null as Date | null,
+      passwordResetRequestedAt: null as Date | null
     };
+
     if (email) {
       await prisma.hotelUser.upsert({
         where: { hotelId_email: { hotelId: hotel.id, email } },
-        create: createData,
+        create: createPayload,
         update: {
           fullName,
           username,
-          passwordHash: createData.passwordHash,
+          passwordHash,
           pinHash,
-          role: createData.role,
+          role: roleSafe,
           isActive: true
         }
       });
-    } else if (username) {
+    } else {
       await prisma.hotelUser.upsert({
-        where: { hotelId_username: { hotelId: hotel.id, username } },
-        create: createData,
+        where: { hotelId_username: { hotelId: hotel.id, username: username! } },
+        create: createPayload,
         update: {
           fullName,
-          passwordHash: createData.passwordHash,
+          passwordHash,
           pinHash,
-          role: createData.role,
+          role: roleSafe,
           isActive: true
         }
       });
@@ -3477,60 +3518,37 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
         "[admin] POST /users permission file write failed:",
         permErr instanceof Error ? permErr.message : String(permErr)
       );
-      res
-        .status(500)
-        .type("html")
-        .send(
-          renderLayout(
-            '<h2>Users</h2><p class="badge alert">The user account was created, but saving permission settings failed (server could not write <code>admin-user-permissions.json</code>).</p><p>Check that the app working directory is writable, then adjust permissions for this user if needed.</p>',
-            true
-          )
-        );
+      jsonErr(
+        500,
+        "User was created but permission settings could not be saved (server file write failed)."
+      );
       return;
     }
 
-    res.redirect("/admin/users?created=1");
+    if (!res.headersSent) res.status(200).json({ success: true });
   } catch (err) {
+    if (res.headersSent) {
+      console.error("[admin] POST /users: response already sent", err);
+      return;
+    }
     if (isHotelUserSchemaMismatchError(err)) {
       console.error(
-        "[admin] POST /users schema drift (HotelUser columns missing?):",
+        "[admin] POST /users schema drift:",
         err instanceof Error ? err.message : String(err)
       );
-      res
-        .status(503)
-        .type("html")
-        .send(
-          renderLayout(
-            '<h2>Users</h2><p class="badge alert">The database is missing required HotelUser columns (often after a deploy without migrations). Run <code>npx prisma migrate deploy</code> on the server, then restart the app. If the problem persists, contact support.</p><p><a href="/admin/users">Back to users</a></p>',
-            true
-          )
-        );
+      jsonErr(
+        503,
+        "Database schema is out of date. Run prisma migrate deploy on the server and restart the app."
+      );
       return;
     }
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      const target = Array.isArray(err.meta?.target) ? (err.meta?.target as string[]).join(", ") : "email or username";
-      console.warn("[admin] POST /users duplicate key:", target);
-      res
-        .status(409)
-        .type("html")
-        .send(
-          renderLayout(
-            "<h2>Users</h2><p class=\"badge alert\">A user with this email or username already exists for this hotel. Choose a different email or username.</p>",
-            true
-          )
-        );
+      console.warn("[admin] POST /users duplicate key:", err.meta);
+      jsonErr(409, "A user with this email or username already exists for this hotel.");
       return;
     }
     console.error("[admin] POST /users failed:", err instanceof Error ? err.message : String(err));
-    res
-      .status(500)
-      .type("html")
-      .send(
-        renderLayout(
-          "<h2>Users</h2><p class=\"badge alert\">Could not create the user. Please try again. If this keeps happening, contact support.</p>",
-          true
-        )
-      );
+    jsonErr(500, "Could not create the user. Please try again.");
   }
 });
 
