@@ -446,8 +446,47 @@ function isBookingSummaryReturnText(text: string): boolean {
   );
 }
 
+type QuoteReplyAction = "cancel" | "change_details" | "confirm" | null;
+
+function parseQuoteReplyAction(text: string): QuoteReplyAction {
+  const normalized = normalizeText(text);
+  const compact = normalized.replace(/\s+/g, "_");
+
+  // 1) cancel
+  if (
+    normalized === "cancel" ||
+    normalized === "no" ||
+    normalized === "n" ||
+    compact === "quote_cancel"
+  ) {
+    return "cancel";
+  }
+
+  // 2) change details
+  if (
+    compact === "change_details" ||
+    compact === "quote_change_details" ||
+    normalized === "edit" ||
+    normalized === "change" ||
+    normalized === "edit details" ||
+    normalized === "change details"
+  ) {
+    return "change_details";
+  }
+
+  // 3) confirm
+  if (
+    /^(yes|y|confirm|confirm_booking|book|ok|okay|proceed|sure)$/i.test(text.trim()) ||
+    compact === "quote_confirm"
+  ) {
+    return "confirm";
+  }
+
+  return null;
+}
+
 function isQuoteConfirmActionText(text: string): boolean {
-  return /^(yes|y|confirm|confirm_booking|book|ok|okay|proceed|sure)$/i.test(text.trim());
+  return parseQuoteReplyAction(text) === "confirm";
 }
 
 /** Parse a non-negative integer from message (e.g. "2", "0", "3 adults") for structured booking steps. */
@@ -834,14 +873,10 @@ function toDbConversationState(state: ConversationState): DbConversationState {
 }
 
 function inferEvent(state: ConversationState, text: string, parsed: ReturnType<typeof parseGuestMessage>): ConversationEvent {
-  const normalized = text.trim().toLowerCase();
-  if (state === "awaiting_confirmation") {
-    if (/^(yes|y|confirm|confirm_booking|book|ok|okay|proceed|sure)$/i.test(normalized)) {
-      return "guest_confirmed";
-    }
-    if (/^(no|n|cancel|edit|change|change_details)$/i.test(normalized)) {
-      return "guest_cancelled";
-    }
+  if (state === "awaiting_confirmation" || state === "quoted") {
+    const action = parseQuoteReplyAction(text);
+    if (action === "confirm") return "guest_confirmed";
+    if (action === "cancel" || action === "change_details") return "guest_cancelled";
   }
   if (state === "collecting_dates" && parsed.checkIn && parsed.checkOut) {
     return "dates_collected";
@@ -1012,8 +1047,7 @@ async function buildTurnResult(params: {
   }
 
   if (params.state === "quoted" && params.event === "quote_sent") {
-    const saidYes = /^(yes|y|confirm|confirm_booking|book|ok|okay|proceed|sure)$/i.test(params.text.trim());
-    if (saidYes) {
+    if (parseQuoteReplyAction(params.text) === "confirm") {
       return {
         nextState: "awaiting_confirmation",
         conversationState: DbConversationState.QUOTED,
@@ -1021,6 +1055,24 @@ async function buildTurnResult(params: {
         updateSession: { awaitingGuestName: true }
       };
     }
+  }
+
+  if (params.state === "quoted" && params.event === "guest_cancelled") {
+    const action = parseQuoteReplyAction(params.text);
+    if (action === "cancel") {
+      return {
+        nextState: "cancelled",
+        conversationState: DbConversationState.CLOSED,
+        responseBody: "Booking cancelled. If you want, I can start a new booking anytime.",
+        updateSession: { awaitingGuestName: false }
+      };
+    }
+    return {
+      nextState: "collecting_dates",
+      conversationState: DbConversationState.QUALIFYING,
+      responseBody: "Sure. What would you like to change: dates, guests, or rooms?",
+      updateSession: { awaitingGuestName: false }
+    };
   }
 
   if (params.state === "awaiting_confirmation" && params.event === "guest_confirmed") {
