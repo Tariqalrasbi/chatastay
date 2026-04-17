@@ -208,6 +208,13 @@
         box-shadow: 0 16px 36px rgba(15, 23, 42, 0.15);
         z-index: 10020;
       }
+      /* Ensure the notification dropdown never intercepts clicks when closed (hidden attr alone can miss edge cases). */
+      #adminNotifPanel[hidden],
+      .admin-notif-panel[hidden] {
+        display: none !important;
+        visibility: hidden;
+        pointer-events: none !important;
+      }
       .admin-notif-panel-head {
         display: flex;
         justify-content: space-between;
@@ -955,5 +962,44 @@
     </script>
     <div id="adminToastStack" class="admin-toast-stack" aria-live="polite"></div>
     {{extraScripts}}
+    <script>
+      (function () {
+        function resetAdminOverlayState() {
+          document.body.classList.remove("rud-drawer-open");
+          document.body.style.removeProperty("pointer-events");
+          var panel = document.getElementById("adminNotifPanel");
+          if (panel) {
+            panel.hidden = true;
+            panel.setAttribute("hidden", "");
+          }
+          var bd = document.getElementById("folio-modal-backdrop");
+          if (bd) {
+            bd.style.display = "none";
+            bd.setAttribute("aria-hidden", "true");
+          }
+          ["folio-charge-modal", "folio-payment-modal"].forEach(function (id) {
+            var m = document.getElementById(id);
+            if (m) {
+              m.style.display = "none";
+              m.setAttribute("aria-hidden", "true");
+            }
+          });
+        }
+        resetAdminOverlayState();
+        window.addEventListener("pageshow", function () {
+          resetAdminOverlayState();
+        });
+        document.querySelectorAll('form[action="/admin/login"], form[action="/auth/staff-login"]').forEach(function (form) {
+          form.addEventListener("submit", function () {
+            var btn = form.querySelector('button[type="submit"]');
+            if (!btn) return;
+            btn.disabled = true;
+            window.setTimeout(function () {
+              btn.disabled = false;
+            }, 25000);
+          });
+        });
+      })();
+    </script>
   </body>
 </html>

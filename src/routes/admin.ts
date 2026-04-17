@@ -763,6 +763,9 @@ function getAdminNotificationScript(): string {
   var attentionList = document.getElementById("adminAttentionList");
   if (!notifBtn || !notifBadge || !notifList || !notifEmpty || !notifReadAll || !muteBtn || !panel) return;
 
+  panel.hidden = true;
+  panel.setAttribute("hidden", "");
+
   var knownIds = new Set();
   var soundMuted = localStorage.getItem("notifSoundMuted") === "true";
   var iconOn = "🔔";
