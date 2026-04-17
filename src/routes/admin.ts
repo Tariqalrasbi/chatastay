@@ -4,8 +4,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import multer from "multer";
-import type { Prisma } from "@prisma/client";
 import {
+  Prisma,
   BookingStatus,
   ChannelProvider,
   ConversationState,
@@ -3311,8 +3311,10 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
   const rows = users
     .map((user) => {
       const safeEmail = typeof user.email === "string" ? user.email : "";
+      const safeUsername = typeof user.username === "string" ? user.username : "";
+      const permKey = (safeEmail || safeUsername).toLowerCase();
       const roleKey = typeof user.role === "string" ? user.role : "MANAGER";
-      const perms = normalizePermissionMatrix(store[safeEmail.toLowerCase()] ?? defaultPermissionsForRole(roleKey));
+      const perms = normalizePermissionMatrix(store[permKey] ?? defaultPermissionsForRole(roleKey));
       const modulesSummary = permissionModules
         .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
         .map((m) => permissionModuleLabels[m])
@@ -3409,50 +3411,109 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     res.status(400).type("html").send(renderLayout("<h2>Users</h2><p>For housekeeping, set at least a username or email.</p>", true));
     return;
   }
-  const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
-  const roleSafe = roleMap[role] ?? UserRole.MANAGER;
-  const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
-  const createData = {
-    hotelId: hotel.id,
-    fullName,
-    email,
-    username,
-    passwordHash: hashPassword(password),
-    pinHash,
-    role: roleSafe,
-    isActive: true
-  };
-  if (email) {
-    await prisma.hotelUser.upsert({
-      where: { hotelId_email: { hotelId: hotel.id, email } },
-      create: createData,
-      update: {
-        fullName,
-        username,
-        passwordHash: createData.passwordHash,
-        pinHash,
-        role: createData.role,
-        isActive: true
-      }
-    });
-  } else if (username) {
-    await prisma.hotelUser.upsert({
-      where: { hotelId_username: { hotelId: hotel.id, username } },
-      create: createData,
-      update: {
-        fullName,
-        passwordHash: createData.passwordHash,
-        pinHash,
-        role: createData.role,
-        isActive: true
-      }
-    });
+  if (!email && !username) {
+    res
+      .status(400)
+      .type("html")
+      .send(
+        renderLayout(
+          "<h2>Users</h2><p>Set an <strong>email</strong> and/or <strong>username</strong> so this account can be saved and used for login.</p>",
+          true
+        )
+      );
+    return;
   }
 
-  const store = readPermissionStore();
-  if (email) store[email] = permissions;
-  writePermissionStore(store);
-  res.redirect("/admin/users?created=1");
+  try {
+    const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
+    const roleSafe = roleMap[role] ?? UserRole.MANAGER;
+    const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
+    const createData = {
+      hotelId: hotel.id,
+      fullName,
+      email,
+      username,
+      passwordHash: hashPassword(password),
+      pinHash,
+      role: roleSafe,
+      isActive: true
+    };
+    if (email) {
+      await prisma.hotelUser.upsert({
+        where: { hotelId_email: { hotelId: hotel.id, email } },
+        create: createData,
+        update: {
+          fullName,
+          username,
+          passwordHash: createData.passwordHash,
+          pinHash,
+          role: createData.role,
+          isActive: true
+        }
+      });
+    } else if (username) {
+      await prisma.hotelUser.upsert({
+        where: { hotelId_username: { hotelId: hotel.id, username } },
+        create: createData,
+        update: {
+          fullName,
+          passwordHash: createData.passwordHash,
+          pinHash,
+          role: createData.role,
+          isActive: true
+        }
+      });
+    }
+
+    try {
+      const store = readPermissionStore();
+      const permKey = email ? email.toLowerCase() : String(username).toLowerCase();
+      store[permKey] = permissions;
+      writePermissionStore(store);
+    } catch (permErr) {
+      console.error(
+        "[admin] POST /users permission file write failed:",
+        permErr instanceof Error ? permErr.message : String(permErr)
+      );
+      res
+        .status(500)
+        .type("html")
+        .send(
+          renderLayout(
+            '<h2>Users</h2><p class="badge alert">The user account was created, but saving permission settings failed (server could not write <code>admin-user-permissions.json</code>).</p><p>Check that the app working directory is writable, then adjust permissions for this user if needed.</p>',
+            true
+          )
+        );
+      return;
+    }
+
+    res.redirect("/admin/users?created=1");
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const target = Array.isArray(err.meta?.target) ? (err.meta?.target as string[]).join(", ") : "email or username";
+      console.warn("[admin] POST /users duplicate key:", target);
+      res
+        .status(409)
+        .type("html")
+        .send(
+          renderLayout(
+            "<h2>Users</h2><p class=\"badge alert\">A user with this email or username already exists for this hotel. Choose a different email or username.</p>",
+            true
+          )
+        );
+      return;
+    }
+    console.error("[admin] POST /users failed:", err instanceof Error ? err.message : String(err));
+    res
+      .status(500)
+      .type("html")
+      .send(
+        renderLayout(
+          "<h2>Users</h2><p class=\"badge alert\">Could not create the user. Please try again. If this keeps happening, contact support.</p>",
+          true
+        )
+      );
+  }
 });
 
 adminRouter.get("/dashboard", requireAuth, (_req, res) => {
