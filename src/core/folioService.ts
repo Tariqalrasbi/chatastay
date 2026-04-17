@@ -20,6 +20,13 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/** Non-empty string user id for optional HotelUser FKs; omit field when absent (avoids Prisma/SQLite FK issues). */
+function optionalHotelUserId(staffId?: string | null): string | undefined {
+  if (staffId == null) return undefined;
+  const t = String(staffId).trim();
+  return t.length > 0 ? t : undefined;
+}
+
 export type DbClient = Prisma.TransactionClient | typeof prisma;
 
 export type FolioSummaryDto = {
@@ -107,6 +114,7 @@ export async function ensureActiveFolio(
     return { folioId: existing.id, created: false };
   }
 
+  const createdBy = optionalHotelUserId(params.staffId);
   const folio = await db.folio.create({
     data: {
       hotelId: params.hotelId,
@@ -116,7 +124,7 @@ export async function ensureActiveFolio(
       folioCode: "MAIN",
       folioStatus: FolioStatus.OPEN,
       currency: params.currency,
-      createdByUserId: params.staffId ?? undefined
+      ...(createdBy ? { createdByUserId: createdBy } : {})
     }
   });
   return { folioId: folio.id, created: true };
@@ -172,6 +180,7 @@ export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
 
   const ledgerKind = mapTransactionTypeToLedgerKind(input.transactionType);
   const revenueCategory = mapOutletCategoryToRevenueCategory(input.outletCategory);
+  const chargeCreatedBy = optionalHotelUserId(input.staffId);
 
   return db.folioTransaction.create({
     data: {
@@ -209,7 +218,7 @@ export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
       notes: input.notes ?? undefined,
       staffNote: input.staffNote ?? undefined,
       internalNote: input.internalNote ?? undefined,
-      createdByUserId: input.staffId,
+      ...(chargeCreatedBy ? { createdByUserId: chargeCreatedBy } : {}),
       isVoided: false
     }
   });
@@ -242,10 +251,15 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
     guestId: input.guestId,
     roomUnitId: input.roomUnitId,
     currency: input.currency,
-    staffId: input.staffId ?? undefined
+    staffId: input.staffId
   });
 
   const gross = round2(input.amount);
+  if (!Number.isFinite(gross) || gross < 0) {
+    throw new Error("Payment amount must be a finite non-negative number.");
+  }
+
+  const paymentCreatedBy = optionalHotelUserId(input.staffId);
   const payment = await db.folioTransaction.create({
     data: {
       hotelId: input.hotelId,
@@ -274,7 +288,7 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
       chargeDate: input.chargeDate,
       postedAt: new Date(),
       notes: input.notes ?? undefined,
-      createdByUserId: input.staffId ?? undefined,
+      ...(paymentCreatedBy ? { createdByUserId: paymentCreatedBy } : {}),
       isVoided: false
     }
   });
@@ -349,6 +363,7 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
   });
 
   const gross = round2(input.amount);
+  const refundCreatedBy = optionalHotelUserId(input.staffId);
   return db.folioTransaction.create({
     data: {
       hotelId: input.hotelId,
@@ -378,7 +393,7 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
       chargeDate: input.chargeDate,
       postedAt: new Date(),
       parentTransactionId: parent.id,
-      createdByUserId: input.staffId,
+      ...(refundCreatedBy ? { createdByUserId: refundCreatedBy } : {}),
       isVoided: false
     }
   });
