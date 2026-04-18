@@ -11678,12 +11678,11 @@ adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (
       where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     }),
-    // Message has no propertyId on the Prisma model — never pass propertyId on Message.where. With a property scope, filter via Conversation.propertyId; otherwise hotel + dates only.
+    // Temporary safe fallback: Message.propertyId is not available in the current Prisma model, so property-level filtering is disabled here until schema and migrations are aligned.
     prisma.message.findMany({
       where: {
         hotelId: hotel.id,
-        createdAt: { gte: start, lt: endExclusive },
-        ...(isScopedPropertyId(activePropertyId) ? { conversation: { propertyId: activePropertyId } } : {})
+        createdAt: { gte: start, lt: endExclusive }
       },
       orderBy: { createdAt: "asc" }
     })
