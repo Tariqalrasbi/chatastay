@@ -254,6 +254,46 @@ async function main(): Promise<void> {
     where: { hotelId: hotel.id, code: "STD_EXEC" }
   });
 
+  try {
+    await prisma.booking.upsert({
+      where: { id: "WS-1009" },
+      update: {
+        hotelId: hotel.id,
+        propertyId: property.id,
+        roomTypeId: executiveRoom.id,
+        guestId: guest.id,
+        checkIn: new Date("2026-03-11T00:00:00.000Z"),
+        checkOut: new Date("2026-03-13T00:00:00.000Z"),
+        nights: 2,
+        adults: 2,
+        totalAmount: 70,
+        currency: hotel.currency,
+        status: "PENDING",
+        paymentStatus: "PENDING"
+      },
+      create: {
+        id: "WS-1009",
+        hotelId: hotel.id,
+        propertyId: property.id,
+        roomTypeId: executiveRoom.id,
+        guestId: guest.id,
+        checkIn: new Date("2026-03-11T00:00:00.000Z"),
+        checkOut: new Date("2026-03-13T00:00:00.000Z"),
+        nights: 2,
+        adults: 2,
+        totalAmount: 70,
+        currency: hotel.currency,
+        status: "PENDING",
+        paymentStatus: "PENDING"
+      }
+    });
+  } catch (err) {
+    console.warn(
+      "[seed] Sample booking skipped (migrate DB if schema is behind):",
+      err instanceof Error ? err.message : err
+    );
+  }
+
   const demoPassword = "PmsDemo2026!";
   const demoPasswordHash = await hashPassword(demoPassword);
   const demoPinHash = await hashPassword("4242");
@@ -263,30 +303,11 @@ async function main(): Promise<void> {
     username: string;
     fullName: string;
     role: UserRole;
-    pinHash: string | null;
   }> = [
-    { email: "demo.owner@pms.local", username: "demoowner", fullName: "Demo Owner", role: UserRole.OWNER, pinHash: null },
-    {
-      email: "demo.frontdesk@pms.local",
-      username: "demofrontdesk",
-      fullName: "Demo Front Desk",
-      role: UserRole.FRONTDESK,
-      pinHash: null
-    },
-    {
-      email: "demo.restaurant@pms.local",
-      username: "demorestaurant",
-      fullName: "Demo Restaurant",
-      role: UserRole.STAFF,
-      pinHash: null
-    },
-    {
-      email: "demo.hk@pms.local",
-      username: "demohk",
-      fullName: "Demo Housekeeping",
-      role: UserRole.HOUSEKEEPING,
-      pinHash: demoPinHash
-    }
+    { email: "demo.owner@pms.local", username: "demoowner", fullName: "Demo Owner", role: UserRole.OWNER },
+    { email: "demo.frontdesk@pms.local", username: "demofrontdesk", fullName: "Demo Front Desk", role: UserRole.FRONTDESK },
+    { email: "demo.restaurant@pms.local", username: "demorestaurant", fullName: "Demo Restaurant", role: UserRole.STAFF },
+    { email: "demo.hk@pms.local", username: "demohk", fullName: "Demo Housekeeping", role: UserRole.HOUSEKEEPING }
   ];
 
   for (const u of demoUsers) {
@@ -296,7 +317,7 @@ async function main(): Promise<void> {
         fullName: u.fullName,
         username: u.username,
         passwordHash: demoPasswordHash,
-        pinHash: u.pinHash,
+        pinHash: demoPinHash,
         role: u.role,
         isActive: true
       },
@@ -306,53 +327,24 @@ async function main(): Promise<void> {
         email: u.email,
         username: u.username,
         passwordHash: demoPasswordHash,
-        pinHash: u.pinHash,
+        pinHash: demoPinHash,
         role: u.role,
         isActive: true
       }
     });
   }
 
-  await prisma.booking.upsert({
-    where: { id: "WS-1009" },
-    update: {
-      hotelId: hotel.id,
-      propertyId: property.id,
-      roomTypeId: executiveRoom.id,
-      guestId: guest.id,
-      checkIn: new Date("2026-03-11T00:00:00.000Z"),
-      checkOut: new Date("2026-03-13T00:00:00.000Z"),
-      nights: 2,
-      adults: 2,
-      totalAmount: 70,
-      currency: hotel.currency,
-      status: "PENDING",
-      paymentStatus: "PENDING"
-    },
-    create: {
-      id: "WS-1009",
-      hotelId: hotel.id,
-      propertyId: property.id,
-      roomTypeId: executiveRoom.id,
-      guestId: guest.id,
-      checkIn: new Date("2026-03-11T00:00:00.000Z"),
-      checkOut: new Date("2026-03-13T00:00:00.000Z"),
-      nights: 2,
-      adults: 2,
-      totalAmount: 70,
-      currency: hotel.currency,
-      status: "PENDING",
-      paymentStatus: "PENDING"
-    }
-  });
-
   console.log(`Seed complete for ${hotel.displayName}`);
   console.log(
-    "[PMS demo] Email/password users (same password for all): " +
-      demoUsers.map((u) => `${u.email}`).join(", ") +
-      ` — password: ${demoPassword}`
+    "[PMS demo] Email login — password for all: " +
+      demoPassword +
+      " — " +
+      demoUsers.map((u) => u.email).join(", ")
   );
-  console.log("[PMS demo] Housekeeping PIN login: username demohk — PIN: 4242");
+  console.log(
+    "[PMS demo] Staff (username + PIN) — PIN for all: 4242 — usernames: " +
+      demoUsers.map((u) => u.username).join(", ")
+  );
 }
 
 main()

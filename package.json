@@ -13,6 +13,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
+    "seed": "tsx prisma/seed.ts",
     "smoke:webhook": "tsx scripts/smoke-webhook.ts",
     "test:e2e:calendar": "tsx scripts/e2e-calendar-dryrun.ts",
     "smoke:all": "npm run smoke:webhook && npm run test:e2e:calendar"

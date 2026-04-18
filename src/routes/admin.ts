@@ -3198,7 +3198,7 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
       });
       return null;
     }
-    if (!["FRONTDESK", "HOUSEKEEPING", "STAFF"].includes(String(hotelUser.role))) {
+    if (!["FRONTDESK", "HOUSEKEEPING", "STAFF", "OWNER"].includes(String(hotelUser.role))) {
       recordStaffLoginFailure(req, hotel.id, username);
       await prisma.auditLog.create({
         data: {
