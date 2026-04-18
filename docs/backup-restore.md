@@ -136,6 +136,24 @@ npm run backup:db
 
 See also `npm run migrate:deploy` in your deploy checklist.
 
+## Troubleshooting: admin pages empty but app runs
+
+1. **Inspect DB (read-only)** — confirms which SQLite file is used, row counts, and whether `DEFAULT_HOTEL_SLUG` matches a `Hotel.slug`:
+
+   ```bash
+   cd /var/www/chatastay && npm run inspect:db
+   ```
+
+2. If the script warns that **no hotel matches `DEFAULT_HOTEL_SLUG`**, set in `.env`:
+
+   ```env
+   DEFAULT_HOTEL_SLUG=<exact-slug-from-Hotel-table>
+   ```
+
+   Then `pm2 restart chatastay --update-env`.
+
+3. **Backups** only contain whatever is in the live DB today. If the DB was already empty when backups started, restore cannot recover old data; use an older backup file if you have one.
+
 ## NPM scripts reference
 
 | Script | Purpose |
@@ -144,3 +162,4 @@ See also `npm run migrate:deploy` in your deploy checklist.
 | `npm run restore:db -- <path> [--pm2-offline-restore]` | Restore live DB from backup file (optional `--restart-pm2`) |
 | `npm run backup:upload:s3` | Upload newest local backup to S3-compatible storage |
 | `npm run backup:daily` | Run the same shell logic as cron (backup + retention + optional S3) |
+| `npm run inspect:db` | Print resolved DB path, counts, hotel slugs vs `DEFAULT_HOTEL_SLUG` |
