@@ -471,6 +471,7 @@ model Property {
   guestFollowUps   GuestFollowUp[]
   convertedLeads   Lead[]
   leadOutreachLogs LeadOutreachLog[]
+  messages         Message[]
 
   @@unique([hotelId, name])
 }
@@ -673,6 +674,7 @@ model Conversation {
 
 model Message {
   propertyId        String?
+  property          Property?        @relation(fields: [propertyId], references: [id])
   id                String           @id @default(cuid())
   hotelId           String
   hotel             Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
