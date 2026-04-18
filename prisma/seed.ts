@@ -1,4 +1,5 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, UserRole } from "@prisma/client";
+import { hashPassword } from "../src/core/authSecurity";
 
 const prisma = new PrismaClient({
   datasources: {
@@ -253,6 +254,65 @@ async function main(): Promise<void> {
     where: { hotelId: hotel.id, code: "STD_EXEC" }
   });
 
+  const demoPassword = "PmsDemo2026!";
+  const demoPasswordHash = await hashPassword(demoPassword);
+  const demoPinHash = await hashPassword("4242");
+
+  const demoUsers: Array<{
+    email: string;
+    username: string;
+    fullName: string;
+    role: UserRole;
+    pinHash: string | null;
+  }> = [
+    { email: "demo.owner@pms.local", username: "demoowner", fullName: "Demo Owner", role: UserRole.OWNER, pinHash: null },
+    {
+      email: "demo.frontdesk@pms.local",
+      username: "demofrontdesk",
+      fullName: "Demo Front Desk",
+      role: UserRole.FRONTDESK,
+      pinHash: null
+    },
+    {
+      email: "demo.restaurant@pms.local",
+      username: "demorestaurant",
+      fullName: "Demo Restaurant",
+      role: UserRole.STAFF,
+      pinHash: null
+    },
+    {
+      email: "demo.hk@pms.local",
+      username: "demohk",
+      fullName: "Demo Housekeeping",
+      role: UserRole.HOUSEKEEPING,
+      pinHash: demoPinHash
+    }
+  ];
+
+  for (const u of demoUsers) {
+    await prisma.hotelUser.upsert({
+      where: { hotelId_email: { hotelId: hotel.id, email: u.email } },
+      update: {
+        fullName: u.fullName,
+        username: u.username,
+        passwordHash: demoPasswordHash,
+        pinHash: u.pinHash,
+        role: u.role,
+        isActive: true
+      },
+      create: {
+        hotelId: hotel.id,
+        fullName: u.fullName,
+        email: u.email,
+        username: u.username,
+        passwordHash: demoPasswordHash,
+        pinHash: u.pinHash,
+        role: u.role,
+        isActive: true
+      }
+    });
+  }
+
   await prisma.booking.upsert({
     where: { id: "WS-1009" },
     update: {
@@ -287,6 +347,12 @@ async function main(): Promise<void> {
   });
 
   console.log(`Seed complete for ${hotel.displayName}`);
+  console.log(
+    "[PMS demo] Email/password users (same password for all): " +
+      demoUsers.map((u) => `${u.email}`).join(", ") +
+      ` — password: ${demoPassword}`
+  );
+  console.log("[PMS demo] Housekeeping PIN login: username demohk — PIN: 4242");
 }
 
 main()

@@ -1,8 +1,15 @@
 import { NotificationStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
+import type { PmsWorkspaceId } from "./pmsWorkspace";
 
 export type NotificationCategory = "bookings" | "messages" | "housekeeping" | "rooms" | "payments" | "system" | "support";
 export type NotificationSeverity = "critical" | "high" | "normal" | "info";
+
+const WORKSPACE_IDS: PmsWorkspaceId[] = ["owner", "front_desk", "restaurant", "housekeeping"];
+
+function isPmsWorkspaceId(v: string): v is PmsWorkspaceId {
+  return (WORKSPACE_IDS as string[]).includes(v);
+}
 
 type CreateNotificationInput = {
   hotelId: string;
@@ -17,11 +24,15 @@ type CreateNotificationInput = {
   sourceType?: string;
   sourceId?: string;
   requiresAttention?: boolean;
+  /** When set, notification appears only in these workspaces (in-app feed). Omit or "all" = every workspace. */
+  audience?: PmsWorkspaceId[] | "all";
 };
 
 type ListNotificationsOptions = {
   limit?: number;
   unreadOnly?: boolean;
+  /** Active PMS workspace — filters feed client-side for role relevance. */
+  workspace?: PmsWorkspaceId;
 };
 
 type RoleRoutingInput = Omit<CreateNotificationInput, "userId" | "role"> & {
@@ -37,7 +48,15 @@ type NotificationPayload = {
   sourceType?: string;
   sourceId?: string;
   requiresAttention: boolean;
+  audience?: PmsWorkspaceId[] | "all";
 };
+
+function parseAudience(raw: unknown): PmsWorkspaceId[] | "all" | undefined {
+  if (raw === "all") return "all";
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw.filter((x): x is PmsWorkspaceId => typeof x === "string" && isPmsWorkspaceId(x));
+  return out.length ? out : undefined;
+}
 
 function parsePayload(raw: string | null): NotificationPayload | null {
   if (!raw) return null;
@@ -51,7 +70,8 @@ function parsePayload(raw: string | null): NotificationPayload | null {
       link: parsed.link,
       sourceType: parsed.sourceType,
       sourceId: parsed.sourceId,
-      requiresAttention: parsed.requiresAttention === true
+      requiresAttention: parsed.requiresAttention === true,
+      audience: parseAudience(parsed.audience)
     };
   } catch {
     return null;
@@ -66,8 +86,17 @@ function buildPayload(input: CreateNotificationInput): NotificationPayload {
     link: input.link,
     sourceType: input.sourceType,
     sourceId: input.sourceId,
-    requiresAttention: input.requiresAttention ?? (input.severity === "critical" || input.severity === "high")
+    requiresAttention: input.requiresAttention ?? (input.severity === "critical" || input.severity === "high"),
+    audience: input.audience === "all" ? "all" : input.audience?.length ? input.audience : undefined
   };
+}
+
+/** Whether a stored notification should appear in the given workspace feed. */
+export function notificationMatchesWorkspace(payload: NotificationPayload | null, workspace: PmsWorkspaceId): boolean {
+  if (!payload?.audience || payload.audience === "all") {
+    return true;
+  }
+  return payload.audience.includes(workspace);
 }
 
 export async function createNotification(input: CreateNotificationInput): Promise<void> {
@@ -136,13 +165,16 @@ export async function createRoleRoutedNotification(input: RoleRoutingInput): Pro
 }
 
 export async function listUserNotifications(userId: string, opts: ListNotificationsOptions = {}) {
+  const want = Math.max(1, Math.min(opts.limit ?? 20, 100));
+  const take = opts.workspace ? Math.min(200, want * 8) : want;
+
   const rows = await prisma.notification.findMany({
     where: { hotelUserId: userId, ...(opts.unreadOnly ? { readAt: null } : {}) },
     orderBy: { createdAt: "desc" },
-    take: Math.max(1, Math.min(opts.limit ?? 20, 100))
+    take
   });
 
-  return rows.map((row) => {
+  const mapped = rows.map((row) => {
     const payload = parsePayload(row.payloadJson);
     return {
       id: row.id,
@@ -156,15 +188,36 @@ export async function listUserNotifications(userId: string, opts: ListNotificati
       sourceId: payload?.sourceId,
       requiresAttention: payload?.requiresAttention ?? false,
       readAt: row.readAt,
-      createdAt: row.createdAt
+      createdAt: row.createdAt,
+      _payload: payload
     };
   });
+
+  const filtered = opts.workspace
+    ? mapped.filter((row) => notificationMatchesWorkspace(row._payload, opts.workspace!))
+    : mapped;
+
+  return filtered.slice(0, want).map(({ _payload: _p, ...rest }) => rest);
 }
 
-export async function getUnreadCount(userId: string): Promise<number> {
-  return prisma.notification.count({
-    where: { hotelUserId: userId, readAt: null }
+export async function getUnreadCount(userId: string, opts: { workspace?: PmsWorkspaceId } = {}): Promise<number> {
+  if (!opts.workspace) {
+    return prisma.notification.count({
+      where: { hotelUserId: userId, readAt: null }
+    });
+  }
+
+  const rows = await prisma.notification.findMany({
+    where: { hotelUserId: userId, readAt: null },
+    orderBy: { createdAt: "desc" },
+    select: { payloadJson: true },
+    take: 400
   });
+  let n = 0;
+  for (const row of rows) {
+    if (notificationMatchesWorkspace(parsePayload(row.payloadJson), opts.workspace!)) n += 1;
+  }
+  return n;
 }
 
 export async function markNotificationRead(notificationId: string, userId: string): Promise<boolean> {

@@ -333,7 +333,8 @@ export async function createConfirmedBookingAtomic(params: {
     link: `/admin/bookings/${encodeURIComponent(bookingId)}`,
     sourceType: "BOOKING_CONFIRMED",
     sourceId: bookingId,
-    requiresAttention: true
+    requiresAttention: true,
+    audience: ["front_desk", "owner"]
   }).catch(() => undefined);
 
   await trackDecisionEventSafe({

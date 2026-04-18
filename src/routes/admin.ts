@@ -47,6 +47,14 @@ import {
   markNotificationRead
 } from "../core/notifications";
 import {
+  inferDefaultWorkspace,
+  listAccessibleWorkspaces,
+  parseWorkspaceFromBody,
+  workspaceHomeUrl,
+  type PermissionMatrixLike,
+  type PmsWorkspaceId
+} from "../core/pmsWorkspace";
+import {
   loadDecisionAnalyticsCrossPropertySummary,
   loadDecisionAnalyticsSummary,
   trackDecisionEventSafe
@@ -237,6 +245,8 @@ type AdminSession = {
   role: string;
   permissions: PermissionMatrix;
   activePropertyId?: string | null;
+  /** Active PMS workspace for nav + notification feed (not used for dedicated HK portal sessions). */
+  activeWorkspace?: PmsWorkspaceId;
 };
 
 const activeSessions = new Map<string, AdminSession>();
@@ -372,7 +382,7 @@ function buildNoPermissions(): PermissionMatrix {
 }
 
 function defaultPermissionsForRole(role: string): PermissionMatrix {
-  if (role === "MANAGER") return buildFullPermissions();
+  if (role === "MANAGER" || role === "OWNER") return buildFullPermissions();
   if (role === "HOUSEKEEPING") {
     const p = buildNoPermissions();
     p.HOUSEKEEPING = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
@@ -451,18 +461,24 @@ function effectivePermissionsForHotelUser(email: string, role: UserRole): Permis
   return normalizePermissionMatrix(store[email.toLowerCase()] ?? defaultPermissionsForRole(role));
 }
 
-function issueAdminSession(res: Response, params: { staffId: string; email: string; role: string; permissions: PermissionMatrix }): void {
+function issueAdminSession(res: Response, params: { staffId: string; email: string; role: string; permissions: PermissionMatrix }): string {
   const token = crypto.randomUUID();
+  const activeWorkspace: PmsWorkspaceId =
+    params.role === "HOUSEKEEPING"
+      ? "housekeeping"
+      : inferDefaultWorkspace(params.role, params.permissions as PermissionMatrixLike);
   activeSessions.set(token, {
     staffId: params.staffId,
     email: params.email,
     role: params.role,
-    permissions: params.permissions
+    permissions: params.permissions,
+    activeWorkspace
   });
   res.setHeader(
     "Set-Cookie",
     `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`
   );
+  return token;
 }
 
 function hashResetToken(token: string): string {
@@ -965,14 +981,26 @@ function getAdminNotificationScript(): string {
 function renderLayout(content: string, authenticated: boolean): string {
   const layout = readView("layout.html");
   const sess = authenticated ? auditActorContext.getStore()?.session : undefined;
+  const permLike = (sess?.permissions ?? undefined) as PermissionMatrixLike | undefined;
   const uiErrorContextAttrs = sess
     ? ` data-ui-user-id="${escapeHtml(sess.staffId)}" data-ui-role="${escapeHtml(String(sess.role))}" data-ui-hotel-slug="${escapeHtml(platformHotelSlug)}"${
         sess.activePropertyId ? ` data-ui-property-id="${escapeHtml(String(sess.activePropertyId))}"` : ""
-      }`
+      }${sess.activeWorkspace ? ` data-ui-workspace="${escapeHtml(String(sess.activeWorkspace))}"` : ""}`
     : "";
-  const perm = authenticated ? auditActorContext.getStore()?.session?.permissions : undefined;
-  const role = authenticated ? auditActorContext.getStore()?.session?.role : undefined;
-  const isFrontdesk = role === "FRONTDESK";
+  const perm = authenticated ? sess?.permissions : undefined;
+  const role = authenticated ? sess?.role : undefined;
+  const workspaces =
+    sess && permLike ? listAccessibleWorkspaces(String(role), permLike) : ([] as PmsWorkspaceId[]);
+  const activeWs: PmsWorkspaceId | undefined =
+    sess && permLike
+      ? sess.activeWorkspace && workspaces.includes(sess.activeWorkspace)
+        ? sess.activeWorkspace
+        : inferDefaultWorkspace(String(role), permLike)
+      : undefined;
+  const useFrontDeskChrome = activeWs === "front_desk";
+  const useOwnerChrome = activeWs === "owner";
+  const useRestaurantChrome = activeWs === "restaurant";
+  const useHousekeepingManagerChrome = activeWs === "housekeeping" && role !== "HOUSEKEEPING";
   const canNavHousekeeping =
     !perm ||
     hasPermission(perm, "HOUSEKEEPING", "VIEW") ||
@@ -980,112 +1008,225 @@ function renderLayout(content: string, authenticated: boolean): string {
   const canNavOutlet =
     !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "ROOMS", "VIEW");
   const canNavFb =
-    !isFrontdesk && (!perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW"));
+    !useFrontDeskChrome && (!perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW"));
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
+  const moduleSwitcher =
+    workspaces.length > 1
+      ? '<a class="top-level-link" data-top-group="modules" href="/admin/workspaces">Workspaces</a>'
+      : "";
   const navHtml = authenticated
-    ? isFrontdesk
+    ? useOwnerChrome
       ? [
-          '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
-          '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
-          '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
-          ...(canNavComms
-            ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
-            : [])
-        ].join("")
-      : [
-          '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
-          '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
-          '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
-          ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B</a>'] : []),
-          ...(canNavComms
-            ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
+          '<a class="top-level-link" data-top-group="dashboard" href="/admin/module/owner">Owner overview</a>',
+          ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
+            ? ['<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>']
             : []),
-          '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>',
-          '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>'
-        ].join("")
-    : '<a href="/admin/login">Login</a>';
-  const logoutHtml = authenticated
-    ? '<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>'
-    : "";
-  const sectionTabsHtml = authenticated
-    ? isFrontdesk
-      ? [
-          '<div class="section-tabs" data-section="dashboard">',
-          '<a href="/admin/profile">Overview</a>',
-          "</div>",
-          '<div class="section-tabs" data-section="reservations">',
-          '<a href="/admin/bookings">Bookings</a>',
-          '<a href="/admin/calendar">Calendar</a>',
-          '<a href="/admin/inventory">Availability</a>',
-          '<a href="/admin/rooms">Rates</a>',
-          '<a href="/admin/offers">Offers</a>',
-          "</div>",
-          '<div class="section-tabs" data-section="rooms">',
-          '<a href="/admin/room-board">Room board</a>',
-          ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
-          '<a href="/admin/handover-sheet">Handover</a>',
-          '<a href="/admin/front-desk/check-in">Check-in</a>',
-          '<a href="/admin/front-desk/check-out">Check-out</a>',
-          '<a href="/admin/shifts">Shifts</a>',
-          '<a href="/admin/shift-close">Shift close</a>',
-          '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
-          "</div>",
-          '<div class="section-tabs" data-section="comms">',
-          '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
-          '<a href="/admin/campaigns">Campaigns</a>',
-          "</div>"
-        ].join("")
-      : [
-          '<div class="section-tabs" data-section="dashboard">',
-          '<a href="/admin/profile">Overview</a>',
-          "</div>",
-          '<div class="section-tabs" data-section="reservations">',
-          '<a href="/admin/bookings">Bookings</a>',
-          '<a href="/admin/calendar">Calendar</a>',
-          '<a href="/admin/inventory">Availability</a>',
-          '<a href="/admin/rooms">Rates</a>',
-          '<a href="/admin/offers">Offers</a>',
-          "</div>",
-          '<div class="section-tabs" data-section="rooms">',
-          '<a href="/admin/room-board">Room board</a>',
-          ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
-          '<a href="/admin/handover-sheet">Handover</a>',
-          '<a href="/admin/front-desk/check-in">Check-in</a>',
-          '<a href="/admin/front-desk/check-out">Check-out</a>',
-          '<a href="/admin/shifts">Shifts</a>',
-          '<a href="/admin/shift-close">Shift close</a>',
-          '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
-          "</div>",
-          '<div class="section-tabs" data-section="fb">',
-          '<a href="/admin/fb/menu">F&amp;B master</a>',
-          ...(canNavOutlet
+          ...(perm && hasPermission(perm, "ROOMS", "VIEW")
+            ? ['<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>']
+            : []),
+          '<a class="top-level-link" data-top-group="insights" href="/admin/management-kpi">Performance</a>',
+          ...(perm && hasPermission(perm, "BILLING", "VIEW")
+            ? ['<a class="top-level-link" data-top-group="account" href="/admin/billing">Billing</a>']
+            : []),
+          '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>',
+          moduleSwitcher
+        ]
+          .filter(Boolean)
+          .join("")
+      : useRestaurantChrome
+        ? [
+            '<a class="top-level-link" data-top-group="fb" href="/admin/module/restaurant">Restaurant</a>',
+            ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B master</a>'] : []),
+            ...(canNavOutlet
+              ? [
+                  '<a class="top-level-link" data-top-group="fb" href="/admin/outlet-dashboard">Outlet board</a>',
+                  '<a class="top-level-link" data-top-group="fb" href="/admin/outlet-orders">Orders</a>'
+                ]
+              : []),
+            '<a class="top-level-link" data-top-group="fb" href="/admin/restaurant-ops">Service guide</a>',
+            moduleSwitcher
+          ].join("")
+        : useHousekeepingManagerChrome
+          ? [
+              '<a class="top-level-link" data-top-group="rooms" href="/admin/module/housekeeping">Housekeeping</a>',
+              '<a class="top-level-link" data-top-group="rooms" href="/admin/housekeeping">Cleaning queue</a>',
+              '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Room board</a>',
+              ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
+                ? ['<a class="top-level-link" data-top-group="reservations" href="/admin/handover-sheet">Handover</a>']
+                : []),
+              moduleSwitcher
+            ].join("")
+          : useFrontDeskChrome
             ? [
-                '<a href="/admin/outlet-dashboard">Outlet board</a>',
-                '<a href="/admin/outlet-orders">Outlet orders</a>',
-                '<a href="/admin/restaurant-ops">Restaurant operations guide</a>'
+                '<a class="top-level-link" data-top-group="dashboard" href="/admin/module/front-desk">Front desk</a>',
+                '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
+                '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
+                ...(canNavComms
+                  ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
+                  : []),
+                moduleSwitcher
+              ].join("")
+            : [
+                '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
+                '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
+                '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
+                ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B</a>'] : []),
+                ...(canNavComms
+                  ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
+                  : []),
+                '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>',
+                '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>',
+                moduleSwitcher
               ]
-            : []),
-          "</div>",
-          '<div class="section-tabs" data-section="comms">',
-          '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
-          '<a href="/admin/campaigns">Campaigns</a>',
-          "</div>",
-          '<div class="section-tabs" data-section="account">',
-          '<a href="/admin/setup">Settings</a>',
-          '<a href="/admin/users">Users &amp; permissions</a>',
-          '<a href="/admin/subscription">Subscription</a>',
-          '<a href="/admin/billing">Billing</a>',
-          '<a href="/admin/integrations">Integrations</a>',
-          "</div>",
-          '<div class="section-tabs" data-section="insights">',
-          '<a href="/admin/reports-center">Reports</a>',
-          '<a href="/admin/management-kpi">KPI dashboard</a>',
-          '<a href="/admin/daily-digest">Daily digest</a>',
-          '<a href="/admin/ai-analytics">AI analytics</a>',
-          '<a href="/admin/booking-funnel">Booking funnel</a>',
-          '<a href="/admin/routing-health">Routing health</a>',
+                .filter(Boolean)
+                .join("")
+    : '<a href="/admin/login">Login</a>';
+  const moduleSwitchHtml =
+    authenticated && workspaces.length > 1
+      ? '<a href="/admin/workspaces" style="margin-right:10px;font-size:12px;font-weight:700;color:#0f172a;text-decoration:none;border:1px solid #d8dee6;padding:6px 10px;border-radius:8px;background:#fff">Workspaces</a>'
+      : "";
+  const logoutHtml = authenticated
+    ? `${moduleSwitchHtml}<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
+    : "";
+  const fdTabs = [
+    '<div class="section-tabs" data-section="dashboard">',
+    '<a href="/admin/module/front-desk">Today</a>',
+    '<a href="/admin/profile">Profile</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="reservations">',
+    '<a href="/admin/bookings">Bookings</a>',
+    '<a href="/admin/calendar">Calendar</a>',
+    '<a href="/admin/inventory">Availability</a>',
+    '<a href="/admin/rooms">Rates</a>',
+    '<a href="/admin/offers">Offers</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="rooms">',
+    '<a href="/admin/room-board">Room board</a>',
+    ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
+    '<a href="/admin/handover-sheet">Handover</a>',
+    '<a href="/admin/front-desk/check-in">Check-in</a>',
+    '<a href="/admin/front-desk/check-out">Check-out</a>',
+    '<a href="/admin/shifts">Shifts</a>',
+    '<a href="/admin/shift-close">Shift close</a>',
+    '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
+    "</div>",
+    '<div class="section-tabs" data-section="comms">',
+    '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
+    '<a href="/admin/campaigns">Campaigns</a>',
+    "</div>"
+  ].join("");
+  const ownerTabs = [
+    '<div class="section-tabs" data-section="dashboard">',
+    '<a href="/admin/module/owner">Overview</a>',
+    '<a href="/admin/profile">Property profile</a>',
+    "</div>",
+    ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
+      ? [
+          '<div class="section-tabs" data-section="reservations">',
+          '<a href="/admin/bookings">Bookings</a>',
+          '<a href="/admin/calendar">Calendar</a>',
           "</div>"
-        ].join("")
+        ]
+      : []),
+    '<div class="section-tabs" data-section="insights">',
+    '<a href="/admin/management-kpi">KPI dashboard</a>',
+    '<a href="/admin/reports-center">Reports</a>',
+    '<a href="/admin/daily-digest">Daily digest</a>',
+    '<a href="/admin/booking-funnel">Booking funnel</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="account">',
+    '<a href="/admin/setup">Settings</a>',
+    ...(perm && hasPermission(perm, "USERS", "VIEW") ? ['<a href="/admin/users">Users</a>'] : []),
+    ...(perm && hasPermission(perm, "BILLING", "VIEW")
+      ? ['<a href="/admin/billing">Billing</a>', '<a href="/admin/subscription">Subscription</a>']
+      : []),
+    '<a href="/admin/integrations">Integrations</a>',
+    "</div>"
+  ].join("");
+  const restaurantTabs = [
+    '<div class="section-tabs" data-section="fb">',
+    '<a href="/admin/module/restaurant">Today</a>',
+    '<a href="/admin/fb/menu">F&amp;B master</a>',
+    ...(canNavOutlet
+      ? [
+          '<a href="/admin/outlet-dashboard">Outlet board</a>',
+          '<a href="/admin/outlet-orders">Outlet orders</a>',
+          '<a href="/admin/restaurant-ops">Operations guide</a>'
+        ]
+      : []),
+    "</div>"
+  ].join("");
+  const hkManagerTabs = [
+    '<div class="section-tabs" data-section="rooms">',
+    '<a href="/admin/module/housekeeping">Overview</a>',
+    '<a href="/admin/housekeeping">Cleaning queue</a>',
+    '<a href="/admin/room-board">Room board</a>',
+    "</div>",
+    ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
+      ? ['<div class="section-tabs" data-section="reservations">', '<a href="/admin/handover-sheet">Handover</a>', "</div>"]
+      : [])
+  ].join("");
+  const fullTabs = [
+    '<div class="section-tabs" data-section="dashboard">',
+    '<a href="/admin/profile">Overview</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="reservations">',
+    '<a href="/admin/bookings">Bookings</a>',
+    '<a href="/admin/calendar">Calendar</a>',
+    '<a href="/admin/inventory">Availability</a>',
+    '<a href="/admin/rooms">Rates</a>',
+    '<a href="/admin/offers">Offers</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="rooms">',
+    '<a href="/admin/room-board">Room board</a>',
+    ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
+    '<a href="/admin/handover-sheet">Handover</a>',
+    '<a href="/admin/front-desk/check-in">Check-in</a>',
+    '<a href="/admin/front-desk/check-out">Check-out</a>',
+    '<a href="/admin/shifts">Shifts</a>',
+    '<a href="/admin/shift-close">Shift close</a>',
+    '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
+    "</div>",
+    '<div class="section-tabs" data-section="fb">',
+    '<a href="/admin/fb/menu">F&amp;B master</a>',
+    ...(canNavOutlet
+      ? [
+          '<a href="/admin/outlet-dashboard">Outlet board</a>',
+          '<a href="/admin/outlet-orders">Outlet orders</a>',
+          '<a href="/admin/restaurant-ops">Restaurant operations guide</a>'
+        ]
+      : []),
+    "</div>",
+    '<div class="section-tabs" data-section="comms">',
+    '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
+    '<a href="/admin/campaigns">Campaigns</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="account">',
+    '<a href="/admin/setup">Settings</a>',
+    '<a href="/admin/users">Users &amp; permissions</a>',
+    '<a href="/admin/subscription">Subscription</a>',
+    '<a href="/admin/billing">Billing</a>',
+    '<a href="/admin/integrations">Integrations</a>',
+    "</div>",
+    '<div class="section-tabs" data-section="insights">',
+    '<a href="/admin/reports-center">Reports</a>',
+    '<a href="/admin/management-kpi">KPI dashboard</a>',
+    '<a href="/admin/daily-digest">Daily digest</a>',
+    '<a href="/admin/ai-analytics">AI analytics</a>',
+    '<a href="/admin/booking-funnel">Booking funnel</a>',
+    '<a href="/admin/routing-health">Routing health</a>',
+    "</div>"
+  ].join("");
+  const sectionTabsHtml = authenticated
+    ? useOwnerChrome
+      ? ownerTabs
+      : useRestaurantChrome
+        ? restaurantTabs
+        : useHousekeepingManagerChrome
+          ? hkManagerTabs
+          : useFrontDeskChrome
+            ? fdTabs
+            : fullTabs
     : "";
   const langSwitcherHtml = '<a href="?lang=en" data-lang-link="en">EN</a><a href="?lang=ar" data-lang-link="ar">AR</a>';
 
@@ -1208,6 +1349,24 @@ function renderHkLayout(params: { title: string; content: string; active: "tasks
     .replace("{{content}}", params.content)
     .replace("{{extraScripts}}", getAdminNotificationScript());
 }
+
+const pmsWorkspacePageStyles = `<style>
+.pms-hero { margin:0 0 20px; padding:18px 20px; border-radius:14px; background:linear-gradient(120deg,#0f766e,#0f172a); color:#fff; }
+.pms-hero h1 { margin:0 0 6px; font-size:22px; font-weight:800; letter-spacing:-0.02em; }
+.pms-hero p { margin:0; opacity:.92; font-size:14px; max-width:760px; line-height:1.55; }
+.pms-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(248px,1fr)); gap:14px; margin-top:8px; }
+.pms-card { background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:16px 16px 14px; box-shadow:0 10px 28px rgba(15,23,42,.05); }
+.pms-card h3 { margin:0 0 8px; font-size:15px; font-weight:800; color:#0f172a; }
+.pms-card p { margin:0 0 12px; color:#5f6b7a; font-size:13px; line-height:1.45; min-height:2.8em; }
+.pms-card a { display:inline-flex; align-items:center; gap:6px; font-weight:700; color:#0f766e; text-decoration:none; font-size:14px; }
+.pms-card a:hover { text-decoration:underline; }
+.pms-picker { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:14px; max-width:980px; }
+.pms-picker form { margin:0; }
+.pms-picker button { width:100%; text-align:left; border:1px solid #e2e8f0; border-radius:12px; padding:16px; background:#fff; cursor:pointer; font:inherit; box-shadow:0 8px 22px rgba(15,23,42,.05); transition:transform .12s ease,border-color .12s ease; }
+.pms-picker button:hover { border-color:#0f766e; transform:translateY(-1px); }
+.pms-picker .t { font-weight:800; color:#0f172a; display:block; margin-bottom:4px; font-size:15px; }
+.pms-picker .d { font-size:13px; color:#5f6b7a; line-height:1.4; }
+</style>`;
 
 function renderPage(pageFile: string, authenticated: boolean): string {
   const content = readView(pageFile);
@@ -2158,7 +2317,8 @@ async function notifyHousekeepingStaff(opts: {
       link: opts.link ?? "/admin/housekeeping",
       sourceType: opts.type,
       sourceId: undefined,
-      requiresAttention: (opts.severity ?? "high") !== "info"
+      requiresAttention: (opts.severity ?? "high") !== "info",
+      audience: ["housekeeping"]
     });
   }
 }
@@ -2284,11 +2444,39 @@ function requireHousekeepingPortal(req: Request, res: Response, next: NextFuncti
   next();
 }
 
-function pickPostLoginRedirect(role: string): string {
-  if (role === "HOUSEKEEPING") return "/admin/hk";
-  if (role === "FRONTDESK") return "/admin/room-board";
-  if (role === "MANAGER" || role === "OWNER" || role === "ADMIN") return "/admin/profile";
-  return "/admin/dashboard";
+function requirePmsModule(workspace: PmsWorkspaceId) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const session = getSession(req);
+    if (!session) {
+      res.redirect("/admin/login");
+      return;
+    }
+    const acc = listAccessibleWorkspaces(session.role, session.permissions as PermissionMatrixLike);
+    if (!acc.includes(workspace)) {
+      res
+        .status(403)
+        .type("html")
+        .send(
+          renderLayout(
+            '<h2>Module unavailable</h2><p>This workspace is not enabled for your account.</p><p><a class="inline-link" href="/admin/workspaces">Back to workspaces</a></p>',
+            true
+          )
+        );
+      return;
+    }
+    next();
+  };
+}
+
+function pickPostLoginRedirect(role: string, permissions: PermissionMatrix): string {
+  const acc = listAccessibleWorkspaces(role, permissions as PermissionMatrixLike);
+  if (acc.length > 1) {
+    return "/admin/workspaces";
+  }
+  if (acc.length === 1) {
+    return workspaceHomeUrl(acc[0], role);
+  }
+  return "/admin/profile";
 }
 
 function hasPermission(
@@ -2412,6 +2600,17 @@ adminRouter.use((req, _res, next) => {
   );
 });
 
+adminRouter.use((req, _res, next) => {
+  const session = getSession(req);
+  if (session) {
+    const acc = listAccessibleWorkspaces(session.role, session.permissions as PermissionMatrixLike);
+    if (!session.activeWorkspace || !acc.includes(session.activeWorkspace)) {
+      session.activeWorkspace = inferDefaultWorkspace(session.role, session.permissions as PermissionMatrixLike);
+    }
+  }
+  next();
+});
+
 /** Housekeeping staff: dedicated portal under /admin/hk (no full admin chrome). */
 adminRouter.use((req, res, next) => {
   const session = getSession(req);
@@ -2431,18 +2630,150 @@ adminRouter.use((req, res, next) => {
   next();
 });
 
+adminRouter.get("/workspaces", requireAuth, (req, res) => {
+  const session = getSession(req)!;
+  if (session.role === "HOUSEKEEPING") {
+    res.redirect("/admin/hk");
+    return;
+  }
+  const acc = listAccessibleWorkspaces(session.role, session.permissions as PermissionMatrixLike);
+  if (acc.length <= 1) {
+    res.redirect(acc.length === 1 ? workspaceHomeUrl(acc[0], session.role) : "/admin/profile");
+    return;
+  }
+  const labels: Record<PmsWorkspaceId, { title: string; desc: string }> = {
+    owner: { title: "Owner", desc: "Occupancy, revenue, risk, and portfolio health." },
+    front_desk: { title: "Front desk", desc: "Arrivals, departures, room board, folios, and reception." },
+    restaurant: { title: "Restaurant / outlet", desc: "Food service, outlet board, and room charges." },
+    housekeeping: { title: "Housekeeping", desc: "Cleaning queue, room readiness, and task execution." }
+  };
+  const cards = acc
+    .map((w) => {
+      const meta = labels[w];
+      return `<form method="post" action="/admin/workspaces">
+  <input type="hidden" name="workspace" value="${escapeHtml(w)}" />
+  <button type="submit"><span class="t">${escapeHtml(meta.title)}</span><span class="d">${escapeHtml(meta.desc)}</span></button>
+</form>`;
+    })
+    .join("");
+  const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero">
+  <h1>Choose workspace</h1>
+  <p>Select the operational module that matches what you are doing right now. You can switch any time from the sidebar.</p>
+</div>
+<div class="pms-picker">${cards}</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/workspaces", requireAuth, (req, res) => {
+  const session = getSession(req)!;
+  if (session.role === "HOUSEKEEPING") {
+    res.redirect("/admin/hk");
+    return;
+  }
+  const nextWs = parseWorkspaceFromBody(String((req.body as { workspace?: string })?.workspace ?? ""));
+  const acc = listAccessibleWorkspaces(session.role, session.permissions as PermissionMatrixLike);
+  if (!nextWs || !acc.includes(nextWs)) {
+    res
+      .status(403)
+      .type("html")
+      .send(
+        renderLayout(
+          '<h2>Workspace not available</h2><p>Your account does not include that module.</p><p><a class="inline-link" href="/admin/workspaces">Back</a></p>',
+          true
+        )
+      );
+    return;
+  }
+  session.activeWorkspace = nextWs;
+  res.redirect(workspaceHomeUrl(nextWs, session.role));
+});
+
+adminRouter.get("/module/owner", requireAuth, requirePmsModule("owner"), (_req, res) => {
+  const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero">
+  <h1>Owner workspace</h1>
+  <p>Strategic view: performance, commercial exposure, and cross-property signals — without day-to-day reception clutter.</p>
+</div>
+<div class="pms-grid">
+  <div class="pms-card"><h3>KPI dashboard</h3><p>Occupancy, pace, and revenue snapshots across the estate.</p><a href="/admin/management-kpi">Open KPIs →</a></div>
+  <div class="pms-card"><h3>Reports center</h3><p>Detailed operational and commercial reporting.</p><a href="/admin/reports-center">Open reports →</a></div>
+  <div class="pms-card"><h3>Billing & subscription</h3><p>Plan, invoices, and payment health.</p><a href="/admin/billing">Review billing →</a></div>
+  <div class="pms-card"><h3>Daily digest</h3><p>Automated morning briefing for leadership.</p><a href="/admin/daily-digest">View digest →</a></div>
+  <div class="pms-card"><h3>Booking funnel</h3><p>Demand and conversion diagnostics.</p><a href="/admin/booking-funnel">Inspect funnel →</a></div>
+  <div class="pms-card"><h3>Reservations (read)</h3><p>Jump into live booking file when you need detail.</p><a href="/admin/bookings">View bookings →</a></div>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"), (_req, res) => {
+  const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero">
+  <h1>Front desk workspace</h1>
+  <p>Reception operations: arrivals, departures, room readiness, folios, and guest issues — tuned for speed and clarity.</p>
+</div>
+<div class="pms-grid">
+  <div class="pms-card"><h3>Room board</h3><p>Live room state, assignments, and housekeeping linkage.</p><a href="/admin/room-board">Open room board →</a></div>
+  <div class="pms-card"><h3>Bookings</h3><p>Confirmations, changes, and in-house reservations.</p><a href="/admin/bookings">Open bookings →</a></div>
+  <div class="pms-card"><h3>Check-in</h3><p>Walk-ins and scheduled arrivals.</p><a href="/admin/front-desk/check-in">Start check-in →</a></div>
+  <div class="pms-card"><h3>Check-out</h3><p>Departures, folio settlement, and task triggers.</p><a href="/admin/front-desk/check-out">Start check-out →</a></div>
+  <div class="pms-card"><h3>Handover</h3><p>Shift continuity and reception notes.</p><a href="/admin/handover-sheet">Open handover →</a></div>
+  <div class="pms-card"><h3>Shifts</h3><p>Cashiering and shift discipline.</p><a href="/admin/shifts">Manage shifts →</a></div>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"), (_req, res) => {
+  const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero">
+  <h1>Restaurant workspace</h1>
+  <p>Food &amp; beverage execution: menus, outlet flow, and guest folio context — without owner or reception noise.</p>
+</div>
+<div class="pms-grid">
+  <div class="pms-card"><h3>F&amp;B master</h3><p>Menus, pricing, and catalogue control.</p><a href="/admin/fb/menu">Open F&amp;B master →</a></div>
+  <div class="pms-card"><h3>Outlet board</h3><p>Kitchen and service orchestration.</p><a href="/admin/outlet-dashboard">Open outlet board →</a></div>
+  <div class="pms-card"><h3>Outlet orders</h3><p>Active tickets and fulfilment.</p><a href="/admin/outlet-orders">View orders →</a></div>
+  <div class="pms-card"><h3>Service playbook</h3><p>Operational standards for restaurant shifts.</p><a href="/admin/restaurant-ops">Open guide →</a></div>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/module/housekeeping", requireAuth, requirePmsModule("housekeeping"), (req, res) => {
+  const session = getSession(req)!;
+  if (session.role === "HOUSEKEEPING") {
+    res.redirect("/admin/hk");
+    return;
+  }
+  const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero">
+  <h1>Housekeeping workspace</h1>
+  <p>Cleaning queue, assignments, and room readiness — connected to the front desk room board.</p>
+</div>
+<div class="pms-grid">
+  <div class="pms-card"><h3>Cleaning queue</h3><p>Desktop task board with assignment controls.</p><a href="/admin/housekeeping">Open queue →</a></div>
+  <div class="pms-card"><h3>Room board</h3><p>See room status alongside arrivals.</p><a href="/admin/room-board">Open room board →</a></div>
+  <div class="pms-card"><h3>Mobile portal</h3><p>Cleaner-focused, touch-friendly tasks.</p><a href="/admin/hk">Open HK portal →</a></div>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
 adminRouter.get("/", (req, res) => {
   if (!isAuthenticated(req)) {
     res.redirect("/admin/login");
     return;
   }
-  res.redirect("/admin/profile");
+  const s = getSession(req)!;
+  res.redirect(pickPostLoginRedirect(s.role, s.permissions));
 });
 
 adminRouter.get("/login", (req, res) => {
   if (isAuthenticated(req)) {
     const s = getSession(req);
-    res.redirect(pickPostLoginRedirect(s?.role ?? ""));
+    if (s) {
+      res.redirect(pickPostLoginRedirect(s.role, s.permissions));
+    } else {
+      res.redirect("/admin/profile");
+    }
     return;
   }
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
@@ -2931,7 +3262,8 @@ adminRouter.post("/login", async (req, res) => {
   try {
     const role = await authenticateEmailLogin(req, res);
     if (role) {
-      res.redirect(pickPostLoginRedirect(role));
+      const s = getSession(req);
+      res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/profile");
       return;
     }
     res.status(401).type("html").send(renderPage("login.html", false));
@@ -3084,7 +3416,8 @@ authRouter.post("/staff-login", async (req, res) => {
       res.status(401).json({ ok: false, error: "invalid_credentials" });
       return;
     }
-    const redirectTo = pickPostLoginRedirect(role);
+    const s = getSession(req);
+    const redirectTo = s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/login";
     const accept = String(req.headers.accept ?? "").toLowerCase();
     if (accept.includes("text/html")) {
       res.redirect(redirectTo);
@@ -3114,7 +3447,8 @@ authRouter.post("/email-login", async (req, res) => {
       res.status(401).json({ ok: false, error: "invalid_credentials" });
       return;
     }
-    const redirectTo = pickPostLoginRedirect(role);
+    const s = getSession(req);
+    const redirectTo = s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/login";
     const accept = String(req.headers.accept ?? "").toLowerCase();
     if (accept.includes("text/html")) {
       res.redirect(redirectTo);
@@ -3140,9 +3474,17 @@ authRouter.get("/notifications", async (req, res) => {
   }
   const limitRaw = Number(req.query.limit ?? 10);
   const unreadOnly = String(req.query.unreadOnly ?? "").trim() === "1";
+  const permLike = session.permissions as PermissionMatrixLike;
+  const ws =
+    session.role === "HOUSEKEEPING"
+      ? ("housekeeping" as PmsWorkspaceId)
+      : session.activeWorkspace && listAccessibleWorkspaces(session.role, permLike).includes(session.activeWorkspace)
+        ? session.activeWorkspace
+        : inferDefaultWorkspace(session.role, permLike);
   const notifications = await listUserNotifications(session.staffId, {
     limit: Number.isFinite(limitRaw) ? limitRaw : 10,
-    unreadOnly
+    unreadOnly,
+    workspace: ws
   });
   res.json({ ok: true, notifications });
 });
@@ -3153,7 +3495,14 @@ authRouter.get("/notifications/unread-count", async (req, res) => {
     res.status(401).json({ ok: false, error: "unauthorized" });
     return;
   }
-  const unreadCount = await getUnreadCount(session.staffId);
+  const permLike = session.permissions as PermissionMatrixLike;
+  const ws =
+    session.role === "HOUSEKEEPING"
+      ? ("housekeeping" as PmsWorkspaceId)
+      : session.activeWorkspace && listAccessibleWorkspaces(session.role, permLike).includes(session.activeWorkspace)
+        ? session.activeWorkspace
+        : inferDefaultWorkspace(session.role, permLike);
+  const unreadCount = await getUnreadCount(session.staffId, { workspace: ws });
   res.json({ ok: true, unreadCount });
 });
 
@@ -5117,7 +5466,8 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
         link: "/admin/room-board",
         sourceType: "ROOM_BOARD_UNIT_STATUS",
         sourceId: unit.id,
-        requiresAttention: true
+        requiresAttention: true,
+        audience: ["front_desk", "owner", "housekeeping"]
       }).catch(() => undefined);
     }
   }
@@ -8645,6 +8995,18 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
       chargeTime: chargeDate,
       folioTransactionId: txn.id
     });
+    await createRoleRoutedNotification({
+      hotelId: hotel.id,
+      roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER, UserRole.STAFF],
+      title: "Guest folio charge posted",
+      body: `${itemName} (${qty}×) — ${displayBookingReference(booking)} on room folio.`,
+      category: "payments",
+      severity: "normal",
+      link: `/admin/room-board?date=${encodeURIComponent(dateKey)}`,
+      sourceType: "FOLIO_CHARGE",
+      sourceId: txn.id,
+      audience: ["front_desk", "owner", "restaurant"]
+    }).catch(() => undefined);
     res.json({ ok: true, id: txn.id, outletNotifyWarning: outletNotifyWarning ?? undefined });
   } catch (e) {
     res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed to post charge" });

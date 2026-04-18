@@ -1,0 +1,11 @@
+{
+  "demo.restaurant@pms.local": {
+    "OUTLET": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": false,
+      "MANAGE": false
+    }
+  }
+}

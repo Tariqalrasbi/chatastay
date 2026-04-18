@@ -585,7 +585,8 @@ housekeepingRouter.post("/room/:roomId/claim", requireHousekeepingEdit, async (r
       link: "/hk",
       sourceType: "HK_STATUS_UPDATE",
       sourceId: roomId,
-      requiresAttention: true
+      requiresAttention: true,
+      audience: ["housekeeping"]
     }).catch(() => undefined);
   }
   res.redirect("/hk");
@@ -661,7 +662,8 @@ housekeepingRouter.post("/room/:roomId/status", requireHousekeepingEdit, async (
       link: "/admin/room-board",
       sourceType: "HK_STATUS_UPDATE",
       sourceId: roomId,
-      requiresAttention: true
+      requiresAttention: true,
+      audience: ["front_desk", "owner"]
     }).catch(() => undefined);
   }
   res.redirect("/hk");
