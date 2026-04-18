@@ -18,7 +18,7 @@ import {
   type GuestJourneySendWindowReason
 } from "../core/guestMessagingSchedule";
 import { parseLightGuestMemory } from "../core/lightGuestMemory";
-import { sendWhatsAppButtons, trySendWhatsAppText } from "../whatsapp/send";
+import { sendWhatsAppButtons, sendWhatsAppList, trySendWhatsAppText } from "../whatsapp/send";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
@@ -137,21 +137,31 @@ function buildPostCheckoutBody(params: { guestFirstName: string; hotelName: stri
 }
 
 function buildReviewRequestBody(params: { guestFirstName: string; hotelName: string }): string {
-  const who = params.guestFirstName.trim() || "Guest";
+  const who = params.guestFirstName.trim() || "there";
   return [
-    `Hi ${who}, we hope you enjoyed your stay at ${params.hotelName}.`,
+    `Hi ${who},`,
+    `Thank you for staying with us at ${params.hotelName}.`,
     "",
-    "We would love your feedback. How would you rate your experience?"
+    "When you have a moment, how would you rate your stay overall? One tap below is enough."
   ].join("\n");
 }
 
-const FEEDBACK_RATING_BUTTONS: Array<{ id: string; title: string }> = [
-  { id: "fb_rate_5", title: "⭐⭐⭐⭐⭐ Excellent" },
-  { id: "fb_rate_4", title: "⭐⭐⭐⭐ Good" },
-  { id: "fb_rate_3", title: "⭐⭐⭐ Average" },
-  { id: "fb_rate_2", title: "⭐⭐ Poor" },
-  { id: "fb_rate_1", title: "⭐ Very poor" }
-];
+/** WhatsApp allows max 3 reply buttons — use a list so all five ratings are one tap each (mobile-friendly). */
+const FEEDBACK_RATING_LIST = {
+  buttonText: "Rate my stay",
+  sections: [
+    {
+      title: "Your overall stay",
+      rows: [
+        { id: "fb_rate_5", title: "Excellent — 5 stars", description: "Exceeded expectations" },
+        { id: "fb_rate_4", title: "Very good — 4 stars", description: "Happy overall" },
+        { id: "fb_rate_3", title: "It was okay — 3 stars", description: "Mixed experience" },
+        { id: "fb_rate_2", title: "Disappointed — 2 stars", description: "Below expectations" },
+        { id: "fb_rate_1", title: "Very poor — 1 star", description: "Needs urgent care" }
+      ]
+    }
+  ]
+};
 
 function buildRepeatGuestPromoBody(params: { guestFirstName: string; hotelName: string }): string {
   const who = params.guestFirstName.trim() || "Guest";
@@ -237,6 +247,11 @@ async function sendJourneyMessage(params: {
   /** Optional guest update (e.g. repeat-promo cooldown timestamp). Applied in the same transaction as the booking update. */
   guestUpdate?: { guestId: string; data: Prisma.GuestUpdateInput };
   buttons?: Array<{ id: string; title: string }>;
+  /** Prefer over `buttons` when more than three choices (e.g. five-star scale). */
+  feedbackRatingList?: {
+    buttonText: string;
+    sections: Array<{ title: string; rows: Array<{ id: string; title: string; description?: string }> }>;
+  };
 }): Promise<boolean> {
   const phone = params.booking.guest.phoneE164?.trim();
   if (!phone) return false;
@@ -249,7 +264,37 @@ async function sendJourneyMessage(params: {
     });
   }
 
-  if (params.buttons?.length) {
+  if (params.feedbackRatingList) {
+    try {
+      await sendWhatsAppList({
+        to: phone,
+        body: params.body,
+        buttonText: params.feedbackRatingList.buttonText,
+        sections: params.feedbackRatingList.sections.map((s) => ({
+          title: s.title,
+          rows: s.rows.map((r) => ({
+            id: r.id,
+            title: r.title,
+            ...(r.description ? { description: r.description } : {})
+          }))
+        })),
+        phoneNumberId: params.phoneNumberId,
+        conversationId: conversation.id
+      });
+    } catch (err) {
+      const fallback = await trySendWhatsAppText({
+        to: phone,
+        body: `${params.body}\n\nReply 1 to 5 (5 = excellent, 1 = very poor).`,
+        phoneNumberId: params.phoneNumberId,
+        conversationId: conversation.id
+      });
+      if (!fallback.ok) {
+        const msg = err instanceof Error ? err.message : fallback.errorMessage;
+        console.error(`[guest-journey] send failed booking=${params.booking.id} intent=${params.aiIntent}: ${msg.slice(0, 220)}`);
+        return false;
+      }
+    }
+  } else if (params.buttons?.length) {
     try {
       await sendWhatsAppButtons({
         to: phone,
@@ -617,7 +662,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         aiIntent: "REVIEW_REQUEST",
         markSent: { guestJourneyReviewRequestSentAt: new Date() },
         auditAction: "GUEST_JOURNEY_REVIEW_REQUEST_SENT",
-        buttons: FEEDBACK_RATING_BUTTONS
+        feedbackRatingList: FEEDBACK_RATING_LIST
       });
       if (ok) sentReviewRequest++;
       else skipped++;
@@ -680,7 +725,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       const body = `${buildReviewRequestBody({
         guestFirstName: firstName(b.guest.fullName),
         hotelName: hotel.displayName
-      })}\n\nJust a quick reminder — we value your feedback.`;
+      })}\n\nA gentle nudge — your view still matters to us.`;
       const ok = await sendJourneyMessage({
         hotelId: hotel.id,
         phoneNumberId,
@@ -689,7 +734,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         aiIntent: "REVIEW_REQUEST",
         markSent: { guestJourneyReviewReminderSentAt: new Date() },
         auditAction: "GUEST_JOURNEY_REVIEW_REQUEST_REMINDER_SENT",
-        buttons: FEEDBACK_RATING_BUTTONS
+        feedbackRatingList: FEEDBACK_RATING_LIST
       });
       if (ok) sentReviewReminder++;
       else skipped++;

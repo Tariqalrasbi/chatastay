@@ -16,6 +16,14 @@ function isSqliteFileDatasource(): boolean {
 export async function ensureHotelUserAuthColumnsSqlite(prisma: PrismaClient): Promise<void> {
   if (!isSqliteFileDatasource()) return;
 
+  const existing = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'HotelUser' LIMIT 1`
+  );
+  if (!Array.isArray(existing) || existing.length === 0) {
+    console.info("[chatastay] HotelUser table not present yet; skipping SQLite HotelUser auth column repair.");
+    return;
+  }
+
   const alters = [
     `ALTER TABLE "HotelUser" ADD COLUMN "passwordResetTokenHash" TEXT`,
     `ALTER TABLE "HotelUser" ADD COLUMN "passwordResetExpiresAt" DATETIME`,

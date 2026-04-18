@@ -16,6 +16,14 @@ function isSqliteFileDatasource(): boolean {
 export async function ensureGuestFeedbackFollowupColumnsSqlite(prisma: PrismaClient): Promise<void> {
   if (!isSqliteFileDatasource()) return;
 
+  const existing = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'GuestFeedback' LIMIT 1`
+  );
+  if (!Array.isArray(existing) || existing.length === 0) {
+    console.info("[chatastay] GuestFeedback table not present yet; skipping SQLite GuestFeedback repair.");
+    return;
+  }
+
   const alters = [
     `ALTER TABLE "GuestFeedback" ADD COLUMN "lowRatingAlertedAt" DATETIME`,
     `ALTER TABLE "GuestFeedback" ADD COLUMN "managerFollowUpRequestedAt" DATETIME`,

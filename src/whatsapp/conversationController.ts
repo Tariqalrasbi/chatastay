@@ -577,7 +577,7 @@ function parseGuestFeedbackRating(text: string): number | null {
 function parseGuestFeedbackCategory(text: string): GuestFeedbackCategory | "OTHER_COMMENT" | null {
   const n = normalizeText(text).replace(/\s+/g, "_");
   if (n === "fb_cat_cleanliness" || n.includes("cleanliness")) return GuestFeedbackCategory.CLEANLINESS;
-  if (n === "fb_cat_room_comfort" || n.includes("room_comfort") || n.includes("room comfort")) {
+  if (n === "fb_cat_room_comfort" || n.includes("room_comfort") || n.includes("room comfort") || n.includes("room_and_comfort")) {
     return GuestFeedbackCategory.ROOM_COMFORT;
   }
   if (n === "fb_cat_service" || n === "service") return GuestFeedbackCategory.SERVICE;
@@ -1443,6 +1443,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     orderBy: { createdAt: "desc" }
   });
   const partnerCfg = loadPartnerSetupConfig(hotel.id);
+  const feedbackGuestHi = (guest.fullName ?? "").trim().split(/\s+/)[0] || "there";
 
   const feedbackRating = parseGuestFeedbackRating(input.text);
   if (feedbackPendingBooking && feedbackRating !== null) {
@@ -1495,13 +1496,19 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }).catch(() => undefined);
     }
     if (feedbackRating >= 4) {
+      const happyFollowUpBody = [
+        `Thanks, ${feedbackGuestHi} — we're glad your stay landed well.`,
+        "",
+        "If you have a spare moment, a Google review helps other guests discover us.",
+        "You can also send one short line here about what we did best — only if you'd like to."
+      ].join("\n");
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
-          body: "Thank you for your feedback 😊 Would you be willing to share your experience on Google? It helps us a lot.",
+          body: happyFollowUpBody,
           buttons: [
-            { id: "fb_google_review", title: "Leave a review" },
-            { id: "fb_google_skip", title: "Skip" }
+            { id: "fb_google_review", title: "Review on Google" },
+            { id: "fb_google_skip", title: "Maybe later" }
           ],
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
@@ -1509,7 +1516,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Thank you for your feedback 😊 Would you be willing to share your experience on Google? Reply REVIEW or SKIP.",
+          body: `${happyFollowUpBody}\n\nReply REVIEW or LATER.`,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1519,19 +1526,24 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: "Thank you! Would you like to share anything we did well?",
+          body: happyFollowUpBody,
           aiIntent: "GUEST_FEEDBACK_COMMENT_PROMPT",
           aiConfidence: 0.99
         }
       });
     } else {
+      const recoveryOpenBody = [
+        `Thank you, ${feedbackGuestHi}. We're sorry this stay didn't meet what you expected.`,
+        "",
+        "May a manager reach out personally to see how we can make it right?"
+      ].join("\n");
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
-          body: "Thank you for your feedback. We are sorry your experience was not ideal.\n\nWould you like a manager to contact you to resolve this?",
+          body: recoveryOpenBody,
           buttons: [
             { id: "fb_mgr_yes", title: "Yes, contact me" },
-            { id: "fb_mgr_no", title: "No, thanks" }
+            { id: "fb_mgr_no", title: "No thanks" }
           ],
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
@@ -1539,7 +1551,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Would you like a manager to contact you to resolve this? Reply YES CONTACT ME or NO THANKS.",
+          body: `${recoveryOpenBody}\n\nReply YES or NO.`,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1547,18 +1559,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppList({
           to: normalizedPhone,
-          body: "Thank you. What could we improve?",
-          buttonText: "Choose area",
+          body: "Where should we focus first? One tap is enough.",
+          buttonText: "Pick focus area",
           sections: [
             {
-              title: "Improvement areas",
+              title: "Your feedback",
               rows: [
                 { id: "fb_cat_cleanliness", title: "Cleanliness" },
-                { id: "fb_cat_room_comfort", title: "Room comfort" },
+                { id: "fb_cat_room_comfort", title: "Room and comfort" },
                 { id: "fb_cat_service", title: "Service" },
-                { id: "fb_cat_food_beverage", title: "Food & beverage" },
+                { id: "fb_cat_food_beverage", title: "Food & drinks" },
                 { id: "fb_cat_facilities", title: "Facilities" },
-                { id: "fb_cat_other", title: "Other" }
+                { id: "fb_cat_other", title: "Something else" }
               ]
             }
           ],
@@ -1568,7 +1580,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Thank you. What could we improve? Reply with: Cleanliness, Room comfort, Service, Food & beverage, Facilities, or Other.",
+          body: "Where should we focus? Reply: Cleanliness, Room comfort, Service, Food & beverage, Facilities, or Other.",
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1578,18 +1590,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: "Thank you for your feedback. We are sorry your experience was not ideal.",
+          body: `${recoveryOpenBody}\n\n(List) Where should we focus first?`,
           aiIntent: "GUEST_FEEDBACK_RECOVERY_PROMPT",
-          aiConfidence: 0.99
-        }
-      });
-      await prisma.message.create({
-        data: {
-          hotelId: hotel.id,
-          conversationId: conversation.id,
-          direction: MessageDirection.OUTBOUND,
-          body: "Thank you. What could we improve?",
-          aiIntent: "GUEST_FEEDBACK_CATEGORY_PROMPT",
           aiConfidence: 0.99
         }
       });
@@ -1622,7 +1624,14 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         }
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Thank you. Our manager will contact you shortly.",
+          body: "Thank you — a manager will reach out shortly.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+      } else {
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body: "Understood. We appreciate you sharing this — it helps us improve.",
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1638,7 +1647,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             where: { id: feedbackOpen.id },
             data: { category: GuestFeedbackCategory.OTHER, status: GuestFeedbackStatus.AWAITING_COMMENT }
           });
-          const prompt = "Please share your feedback in a short message. We are listening.";
+          const prompt = "A few words in your own voice help us most — whenever you're ready.";
           await sendWhatsAppText({
             to: normalizedPhone,
             body: prompt,
@@ -1660,7 +1669,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             where: { id: feedbackOpen.id },
             data: { category: picked, status: GuestFeedbackStatus.COMPLETED }
           });
-          const thanks = "Thank you for your feedback 🙏";
+          const thanks = "Thank you — we've noted this and will put it to use.";
           await sendWhatsAppText({
             to: normalizedPhone,
             body: thanks,
@@ -1697,8 +1706,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         await sendWhatsAppText({
           to: normalizedPhone,
           body: reviewLink
-            ? `Thank you so much 🙏 You can leave your review here:\n${reviewLink}`
-            : "Thank you so much 🙏 Please leave your review on Google when convenient.",
+            ? `With gratitude — here's your link:\n${reviewLink}`
+            : "With gratitude — whenever it suits you, we'd love your words on Google.",
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1712,7 +1721,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         });
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Thank you for your feedback 🙏",
+          body: "Thank you — that means a lot to our team.",
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -1720,7 +1729,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         return;
       }
       if (normalizedComment === "fb_add_comment" || normalizedComment === "add_a_comment") {
-        const prompt = "Please share your feedback in a short message. We are listening.";
+        const prompt = "Take your time — a short note here is perfect.";
         await sendWhatsAppText({
           to: normalizedPhone,
           body: prompt,
@@ -1745,7 +1754,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           where: { id: feedbackOpen.id },
           data: { status: GuestFeedbackStatus.COMPLETED }
         });
-        const thanks = "Thank you for your feedback 🙏";
+        const thanks = "Thank you — we're grateful you took the time.";
         await sendWhatsAppText({
           to: normalizedPhone,
           body: thanks,
@@ -1770,7 +1779,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           where: { id: feedbackOpen.id },
           data: { comment, status: GuestFeedbackStatus.COMPLETED }
         });
-        const thanks = "Thank you for your feedback 🙏";
+        const thanks = "Received — thank you. We'll read this carefully.";
         await sendWhatsAppText({
           to: normalizedPhone,
           body: thanks,

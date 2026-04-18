@@ -4,6 +4,7 @@ import path from "node:path";
 import { prisma } from "./db";
 import { ensureGuestFeedbackFollowupColumnsSqlite } from "./core/sqliteGuestFeedbackSchemaRepair";
 import { ensureHotelUserAuthColumnsSqlite } from "./core/sqliteHotelUserSchemaRepair";
+import { localSqliteBackgroundSchedulersEnabled } from "./core/sqliteLocalDevSchemaGate";
 import { apiRouter } from "./routes/api";
 import { adminRouter, authRouter } from "./routes/admin";
 import { housekeepingRouter } from "./routes/housekeeping";
@@ -60,11 +61,18 @@ async function start(): Promise<void> {
     console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
     console.log(`(Keep this terminal open while you use the app.)`);
     logWhatsAppStartupHints();
-    startPreArrivalReminderScheduler();
-    startOwnerDailyDigestScheduler();
-    startHotelDailyDigestScheduler();
-    startGuestAutoFollowupScheduler();
-    startAutoOptimizationScheduler();
+    void localSqliteBackgroundSchedulersEnabled(prisma)
+      .then((runSchedulers) => {
+        if (!runSchedulers) return;
+        startPreArrivalReminderScheduler();
+        startOwnerDailyDigestScheduler();
+        startHotelDailyDigestScheduler();
+        startGuestAutoFollowupScheduler();
+        startAutoOptimizationScheduler();
+      })
+      .catch((err: unknown) =>
+        console.error("[chatastay] Scheduler gate failed:", err instanceof Error ? err.message : String(err))
+      );
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
