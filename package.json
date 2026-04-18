@@ -10,6 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "migrate:deploy": "node scripts/migrate-deploy.cjs",
+    "backup:db": "node scripts/backup-sqlite.cjs",
+    "restore:db": "node scripts/restore-sqlite.cjs",
     "start:with-migrate": "node scripts/migrate-deploy.cjs && prisma generate && node dist/index.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

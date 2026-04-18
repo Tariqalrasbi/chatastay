@@ -7,6 +7,13 @@ dist/
 
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+
+# Timestamped DB snapshots from npm run backup:db
+backups/sqlite/*.db
+backups/sqlite/*.db-wal
+backups/sqlite/*.db-shm
 
 .DS_Store
 npm-debug.log*
