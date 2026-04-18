@@ -32,4 +32,5 @@ export async function ensureHotelUserAuthColumnsSqlite(prisma: PrismaClient): Pr
       throw e;
     }
   }
+  console.info("[chatastay] SQLite HotelUser: password-reset/login columns checked (safe ALTERs; run prisma migrate deploy for migration history).");
 }

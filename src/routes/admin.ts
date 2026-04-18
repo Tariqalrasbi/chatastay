@@ -3476,6 +3476,7 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
     const passwordHash = hashPassword(password);
 
+    // Do not set password-reset columns here: omit optional fields so INSERT stays minimal; DB columns come from migrate / startup repair.
     const createPayload = {
       hotelId: hotel.id,
       fullName,
@@ -3484,10 +3485,7 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
       passwordHash,
       pinHash,
       role: roleSafe,
-      isActive: true,
-      passwordResetTokenHash: null as string | null,
-      passwordResetExpiresAt: null as Date | null,
-      passwordResetRequestedAt: null as Date | null
+      isActive: true
     };
 
     if (email) {
@@ -11299,8 +11297,9 @@ adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (
       where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     }),
+    // Message has no propertyId in DB/schema; scope by hotel + date only (property filter via Conversation if needed later).
     prisma.message.findMany({
-      where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
+      where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     })
   ]);
