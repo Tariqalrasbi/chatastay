@@ -9,7 +9,7 @@ import { prisma } from "../db";
 import { loadManagementKpis } from "./managementKpiDashboard";
 import { loadPlatformAlerts, type PlatformAlertsResult } from "./ownerPlatformAlerts";
 import { sendOwnerDigestEmail, isOwnerDigestSmtpConfigured } from "./ownerDigestMail";
-import { wallClockLocalToUtc, formatYmdInHotelZone } from "../jobs/preArrivalReminderJob";
+import { wallClockLocalToUtc, formatYmdInHotelZone } from "./guestMessagingSchedule";
 
 export type HotelDigestRunResult = {
   ok: boolean;

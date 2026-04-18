@@ -21,6 +21,10 @@ export type LightGuestMemory = {
   repeatGuest?: boolean;
   hadComplaint?: boolean;
   lastWelcomeMenuAt?: string | null;
+  /** When true, suppress non-essential automated WhatsApp (post-stay, promos); stored in JSON without migration. */
+  messagingDoNotDisturb?: boolean;
+  /** When true, suppress promotional / return-stay automation; operational messages may still send. */
+  messagingMarketingOptOut?: boolean;
 };
 
 function spendingLevelFromTotal(total: number, nights: number): SpendingLevel {
@@ -61,7 +65,9 @@ export function parseLightGuestMemory(raw: string | null | undefined): LightGues
       lastStayCheckOut: typeof o.lastStayCheckOut === "string" ? o.lastStayCheckOut : null,
       repeatGuest: typeof o.repeatGuest === "boolean" ? o.repeatGuest : undefined,
       hadComplaint: typeof o.hadComplaint === "boolean" ? o.hadComplaint : undefined,
-      lastWelcomeMenuAt: typeof o.lastWelcomeMenuAt === "string" ? o.lastWelcomeMenuAt : null
+      lastWelcomeMenuAt: typeof o.lastWelcomeMenuAt === "string" ? o.lastWelcomeMenuAt : null,
+      messagingDoNotDisturb: typeof o.messagingDoNotDisturb === "boolean" ? o.messagingDoNotDisturb : undefined,
+      messagingMarketingOptOut: typeof o.messagingMarketingOptOut === "boolean" ? o.messagingMarketingOptOut : undefined
     };
   } catch {
     return { v: MEMORY_VERSION, updatedAt: new Date().toISOString() };

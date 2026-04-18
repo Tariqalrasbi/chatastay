@@ -35,6 +35,7 @@ export type CampaignGuestRow = {
   id: string;
   phoneE164: string;
   fullName: string | null;
+  lightGuestMemoryJson?: string | null;
 };
 
 function daysToMs(d: number): number {
@@ -233,6 +234,7 @@ export async function resolveCampaignAudience(
       id: true,
       phoneE164: true,
       fullName: true,
+      lightGuestMemoryJson: true,
       isVip: true,
       nationality: true,
       locale: true,
@@ -275,7 +277,7 @@ export async function resolveCampaignAudience(
     const phone = g.phoneE164?.trim();
     if (!phone || phone.length < 8) continue;
 
-    out.push({ id: g.id, phoneE164: phone, fullName: g.fullName });
+    out.push({ id: g.id, phoneE164: phone, fullName: g.fullName, lightGuestMemoryJson: g.lightGuestMemoryJson });
   }
 
   return { guests: out, count: out.length };

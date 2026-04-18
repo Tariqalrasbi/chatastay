@@ -1,7 +1,12 @@
 import { BookingStatus, ConversationState, MessageDirection, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
-import { getSafeSendTime, hotelTimezoneOrUtc } from "./preArrivalReminderJob";
+import {
+  evaluateLifecycleMarketingEligibility,
+  getLifecycleSendWindow,
+  inferGuestMessageSegment
+} from "../core/guestMessagingLifecycle";
+import { getSafeSendTime, hotelTimezoneOrUtc } from "../core/guestMessagingSchedule";
 import { trySendWhatsAppText } from "../whatsapp/send";
 import { parseLightGuestMemory } from "../core/lightGuestMemory";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
@@ -190,7 +195,8 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
       OR: [{ checkIn: { gt: now } }, { checkOut: { lt: now } }]
     },
     include: {
-      conversation: { select: { id: true } }
+      conversation: { select: { id: true } },
+      guest: { include: { segmentTags: { select: { tag: true } } } }
     },
     take: 400
   });
@@ -201,11 +207,21 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
     const factor = loadPartnerSetupConfig(b.hotelId).optimizationSettings.followupDelayFactor;
     const checkInMs = b.checkIn.getTime();
     const checkOutMs = b.checkOut.getTime();
+    const mem = parseLightGuestMemory(b.guest.lightGuestMemoryJson ?? null);
+    const segment = inferGuestMessageSegment({
+      isVip: b.guest.isVip,
+      segmentTags: b.guest.segmentTags.map((t) => t.tag),
+      children: b.children,
+      adults: b.adults,
+      nights: b.nights,
+      checkIn: b.checkIn,
+      memory: { repeatGuest: mem.repeatGuest, spendingLevel: mem.spendingLevel }
+    });
     if (checkInMs > now.getTime()) {
       const hoursBefore = envHoursToMs("AUTO_FOLLOWUP_PRE_ARRIVAL_HOURS", 36);
       const adjustedHoursBefore = withFollowupFactor(hoursBefore, factor);
       const rawPre = new Date(checkInMs - adjustedHoursBefore);
-      const scheduledFor = getSafeSendTime(rawPre, tz).adjustedUtc;
+      const scheduledFor = getLifecycleSendWindow(rawPre, tz, segment).adjustedUtc;
       await enqueueFollowUp({
         hotelId: b.hotelId,
         propertyId: b.propertyId,
@@ -215,14 +231,15 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
         type: "PRE_ARRIVAL_ENGAGEMENT",
         dedupeKey: `pre_arrival:${b.id}`,
         scheduledFor,
-        payload: {}
+        payload: { segment }
       });
     }
     if (checkOutMs < now.getTime()) {
+      if (mem.messagingDoNotDisturb) continue;
       const postStayDelay = envHoursToMs("AUTO_FOLLOWUP_POST_STAY_HOURS", 24);
       const adjustedPostStayDelay = withFollowupFactor(postStayDelay, factor);
       const rawPost = new Date(checkOutMs + adjustedPostStayDelay);
-      const scheduledFor = getSafeSendTime(rawPost, tz).adjustedUtc;
+      const scheduledFor = getLifecycleSendWindow(rawPost, tz, segment).adjustedUtc;
       await enqueueFollowUp({
         hotelId: b.hotelId,
         propertyId: b.propertyId,
@@ -232,7 +249,7 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
         type: "POST_STAY_FOLLOWUP",
         dedupeKey: `post_stay:${b.id}`,
         scheduledFor,
-        payload: {}
+        payload: { segment }
       });
     }
   }
@@ -252,11 +269,21 @@ async function seedReEngagement(now: Date): Promise<void> {
       }
     },
     include: {
+      segmentTags: { select: { tag: true } },
       bookings: {
         where: { status: BookingStatus.CONFIRMED },
         orderBy: { checkOut: "desc" },
         take: 1,
-        select: { id: true, checkOut: true, hotelId: true, propertyId: true }
+        select: {
+          id: true,
+          checkOut: true,
+          checkIn: true,
+          hotelId: true,
+          propertyId: true,
+          adults: true,
+          children: true,
+          nights: true
+        }
       }
     },
     take: 200
@@ -264,6 +291,8 @@ async function seedReEngagement(now: Date): Promise<void> {
   for (const g of guests) {
     const last = g.bookings[0];
     if (!last) continue;
+    const mem = parseLightGuestMemory(g.lightGuestMemoryJson ?? null);
+    if (mem.messagingDoNotDisturb || mem.messagingMarketingOptOut) continue;
     const upcoming = await prisma.booking.findFirst({
       where: { guestId: g.id, hotelId: g.hotelId, status: BookingStatus.CONFIRMED, checkIn: { gt: now } },
       select: { id: true }
@@ -273,7 +302,16 @@ async function seedReEngagement(now: Date): Promise<void> {
     const adjustedReengageMs = withFollowupFactor(reengageAfterMs, factor);
     const tz = tzByHotelId.get(g.hotelId) ?? "UTC";
     const rawRe = new Date(last.checkOut.getTime() + adjustedReengageMs);
-    const scheduledFor = getSafeSendTime(rawRe, tz).adjustedUtc;
+    const segment = inferGuestMessageSegment({
+      isVip: g.isVip,
+      segmentTags: g.segmentTags.map((t) => t.tag),
+      children: last.children,
+      adults: last.adults,
+      nights: last.nights,
+      checkIn: last.checkIn,
+      memory: { repeatGuest: mem.repeatGuest, spendingLevel: mem.spendingLevel }
+    });
+    const scheduledFor = getLifecycleSendWindow(rawRe, tz, segment).adjustedUtc;
     await enqueueFollowUp({
       hotelId: g.hotelId,
       propertyId: last.propertyId ?? null,
@@ -282,7 +320,7 @@ async function seedReEngagement(now: Date): Promise<void> {
       type: "RE_ENGAGEMENT",
       dedupeKey: `reengage:${g.id}:${last.checkOut.toISOString().slice(0, 10)}`,
       scheduledFor,
-      payload: {}
+      payload: { segment }
     });
   }
 }
@@ -321,6 +359,26 @@ async function shouldSuppressSend(fu: {
   type: string;
   createdAt: Date;
 }): Promise<boolean> {
+  const guestRow = await prisma.guest.findUnique({
+    where: { id: fu.guestId },
+    select: { lightGuestMemoryJson: true }
+  });
+  const mem = parseLightGuestMemory(guestRow?.lightGuestMemoryJson ?? null);
+  if (fu.type === "POST_STAY_FOLLOWUP") {
+    const ev = evaluateLifecycleMarketingEligibility("POST_STAY_FOLLOWUP", {
+      messagingDoNotDisturb: mem.messagingDoNotDisturb,
+      messagingMarketingOptOut: mem.messagingMarketingOptOut
+    });
+    if (!ev.send) return true;
+  }
+  if (fu.type === "RE_ENGAGEMENT") {
+    const ev = evaluateLifecycleMarketingEligibility("RE_ENGAGEMENT", {
+      messagingDoNotDisturb: mem.messagingDoNotDisturb,
+      messagingMarketingOptOut: mem.messagingMarketingOptOut
+    });
+    if (!ev.send) return true;
+  }
+
   // Never interrupt active back-and-forth: skip if inbound in last 45 minutes.
   const activeSince = new Date(Date.now() - 45 * 60 * 1000);
   const latestInbound = await prisma.message.findFirst({
@@ -334,6 +392,21 @@ async function shouldSuppressSend(fu: {
     select: { id: true }
   });
   if (latestInbound) return true;
+
+  if (fu.type === "POST_STAY_FOLLOWUP" || fu.type === "RE_ENGAGEMENT") {
+    const longSince = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const guestInbound48h = await prisma.message.findFirst({
+      where: {
+        hotelId: fu.hotelId,
+        direction: MessageDirection.INBOUND,
+        conversation: { guestId: fu.guestId },
+        createdAt: { gte: longSince }
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true }
+    });
+    if (guestInbound48h) return true;
+  }
 
   if (fu.type === "BOOKING_RECOVERY") {
     const session = await prisma.conversationSession.findFirst({

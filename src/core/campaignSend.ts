@@ -1,6 +1,7 @@
 import { ConversationState, MessageDirection } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "./partnerSetup";
+import { parseLightGuestMemory } from "./lightGuestMemory";
 import { trySendWhatsAppText } from "../whatsapp/send";
 import type { CampaignGuestRow } from "./campaignAudience";
 
@@ -91,6 +92,28 @@ export async function sendMarketingCampaignWhatsApp(params: {
           errorDetail: "Invalid or missing phone"
         }
       });
+      continue;
+    }
+
+    const prefs = parseLightGuestMemory(g.lightGuestMemoryJson ?? null);
+    if (prefs.messagingDoNotDisturb || prefs.messagingMarketingOptOut) {
+      await prisma.marketingCampaignRecipient.create({
+        data: {
+          campaignId: params.campaignId,
+          guestId: g.id,
+          outcome: prefs.messagingDoNotDisturb ? "SKIPPED_DO_NOT_DISTURB" : "SKIPPED_MARKETING_OPT_OUT",
+          errorDetail: null
+        }
+      });
+      console.info(
+        "[marketing-campaign]",
+        JSON.stringify({
+          campaignId: params.campaignId,
+          guestId: g.id,
+          suppressed: true,
+          reason: prefs.messagingDoNotDisturb ? "do_not_disturb" : "marketing_opt_out"
+        })
+      );
       continue;
     }
 
