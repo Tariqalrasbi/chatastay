@@ -840,6 +840,32 @@ function whatsAppMealPlanToPricingCode(code: WhatsAppMealPlanCode | null | undef
   return "NONE";
 }
 
+/** Session `totalAmount` / availability offer totals are room stay only; meal surcharge is computed separately. */
+function computeWhatsAppStayTotalsFromRoomSubtotal(params: {
+  roomStaySubtotal: number | null | undefined;
+  mealPlan: MealPlanCode;
+  adults: number;
+  children: number;
+  nights: number;
+}): { roomTotal: number; mealPart: number; stayTotal: number } {
+  const roomTotal = Number((Math.max(0, params.roomStaySubtotal ?? 0)).toFixed(2));
+  const mealPart = computeMealPlanSurchargeForStay({
+    mealPlan: params.mealPlan,
+    adults: params.adults,
+    children: params.children,
+    nights: params.nights
+  });
+  const stayTotal = Number((roomTotal + mealPart).toFixed(2));
+  return { roomTotal, mealPart, stayTotal };
+}
+
+function formatWhatsAppPrebookFolioEstimateLine(currency: string, estimatedTotal: number): string | null {
+  if (!Number.isFinite(estimatedTotal) || estimatedTotal <= 0) return null;
+  return `Estimated pre-booked F&B (folio): ~${estimatedTotal.toFixed(
+    2
+  )} ${currency} — not included in booking total below`;
+}
+
 async function sendFoodFlowOutbounds(params: {
   to: string;
   phoneNumberId?: string;
@@ -2045,14 +2071,14 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       const children = persisted.childCount ?? 0;
       const nights = persisted.nights ?? 1;
       const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-      const mealPart = computeMealPlanSurchargeForStay({
+      const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+        roomStaySubtotal: persisted.totalAmount,
         mealPlan: mp,
         adults,
         children,
         nights
       });
-      const roomTotal = persisted.totalAmount ?? 0;
-      const stayTotal = Number((roomTotal + mealPart).toFixed(2));
+      const prebookLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, nextPrebook.estimatedTotal);
       const quoteBody = [
         "Here is your quote:",
         `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
@@ -2060,12 +2086,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         `Check-out: ${persisted.checkOut}`,
         `Guests: ${persisted.guestCount} (${adults} adults, ${children} children)`,
         `Nights: ${nights}`,
-        `Room total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
-        mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
-        nextPrebook.estimatedTotal > 0
-          ? `Pre-booked F&B (posted to folio): ~${nextPrebook.estimatedTotal.toFixed(2)} ${hotel.currency}`
-          : null,
-        `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
+        `Room stay total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
+        mealPart > 0 ? `Meal plan surcharge: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
+        prebookLine,
+        `Booking total (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
         "",
         `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
           {
@@ -3316,10 +3340,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
     const children = persisted.childCount ?? 0;
     const nights = persisted.nights ?? 1;
-    const roomTotal = persisted.totalAmount ?? 0;
     const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-    const mealPart = computeMealPlanSurchargeForStay({ mealPlan: mp, adults, children, nights });
-    const stayTotal = Number((roomTotal + mealPart).toFixed(2));
+    const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+      roomStaySubtotal: persisted.totalAmount,
+      mealPlan: mp,
+      adults,
+      children,
+      nights
+    });
+    const prebookLine = formatWhatsAppPrebookFolioEstimateLine(
+      hotel.currency,
+      persisted.pendingPrebookOrder?.estimatedTotal ?? 0
+    );
     const quoteBody = [
       "Here is your quote:",
       `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
@@ -3327,9 +3359,10 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       `Check-out: ${persisted.checkOut}`,
       `Guests: ${persisted.guestCount ?? adults + children} (${adults} adults, ${children} children)`,
       `Nights: ${nights}`,
-      `Room total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
-      mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
-      `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
+      `Room stay total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
+      mealPart > 0 ? `Meal plan surcharge: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
+      prebookLine,
+      `Booking total (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
       "",
       `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
         {
@@ -3345,7 +3378,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           messageVariant: optimization.upsellMessageVariant
         }
       )}`
-    ].join("\n");
+    ]
+      .filter((x): x is string => typeof x === "string" && x.length > 0)
+      .join("\n");
     try {
       await sendWhatsAppButtons({
         to: normalizedPhone,
@@ -4666,9 +4701,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         const children = persisted.childCount ?? 0;
         const nights = persisted.nights ?? 1;
         const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-        const mealPart = computeMealPlanSurchargeForStay({ mealPlan: mp, adults, children, nights });
-        const roomTotal = persisted.totalAmount ?? 0;
-        const stayTotal = Number((roomTotal + mealPart).toFixed(2));
+        const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+          roomStaySubtotal: persisted.totalAmount,
+          mealPlan: mp,
+          adults,
+          children,
+          nights
+        });
         const quoteBody = [
           "Here is your quote:",
           `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
@@ -4676,9 +4715,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           `Check-out: ${persisted.checkOut}`,
           `Guests: ${persisted.guestCount} (${adults} adults, ${children} children)`,
           `Nights: ${nights}`,
-          `Room total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
-          mealPart > 0 ? `Meal plan: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
-          `Total stay (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
+          `Room stay total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
+          mealPart > 0 ? `Meal plan surcharge: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
+          `Booking total (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
           "",
           `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
             {
@@ -5089,14 +5128,14 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     });
 
     const mpCode = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
+    const roomStayTotal = booking.totalAmount;
     const mealPart = computeMealPlanSurchargeForStay({
       mealPlan: mpCode,
       adults: adultsForBooking,
       children: childrenForBooking,
       nights: booking.nights
     });
-    const roomTotal = booking.totalAmount;
-    const combinedStayTotal = Number((roomTotal + mealPart).toFixed(2));
+    const combinedStayTotal = Number((roomStayTotal + mealPart).toFixed(2));
     await prisma.booking.update({
       where: { id: booking.bookingId },
       data: {
@@ -5127,7 +5166,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           notes,
           lines: po.lines.map((l) => ({ menuItemId: l.menuItemId, qty: l.qty }))
         });
-        prebookSummaryLine = `Pre-booked F&B (folio): ~${po.estimatedTotal.toFixed(2)} ${hotel.currency}`;
+        prebookSummaryLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, po.estimatedTotal);
       } catch (err) {
         console.error("Pre-book F&B on confirm failed:", err instanceof Error ? err.message : String(err));
         prebookSummaryLine =
@@ -5143,11 +5182,12 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       `Check-out: ${checkOut.toISOString().slice(0, 10)}`,
       `Guests: ${guests}`,
       `Nights: ${booking.nights}`,
+      `Room stay total: ${roomStayTotal.toFixed(2)} ${hotel.currency}`,
       mealPart > 0
-        ? `Meal plan: ${mpCode} (+${mealPart.toFixed(2)} ${hotel.currency})`
+        ? `Meal plan surcharge (${mpCode}): +${mealPart.toFixed(2)} ${hotel.currency}`
         : "Meal plan: none",
       prebookSummaryLine,
-      `Room + meal plan total: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
+      `Booking total (room + meal plan): ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
       `Booking ID: ${booking.bookingId}`
     ]
       .filter((x): x is string => typeof x === "string" && x.length > 0)
@@ -5192,7 +5232,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         suggestedRoomTypeName: booking.roomTypeName,
         suggestedPropertyId: booking.propertyId,
         nights: booking.nights,
-        totalAmount: combinedStayTotal,
+        totalAmount: roomStayTotal,
         bookingMealPlanCode: undefined,
         pendingPrebookOrder: null,
         fbCartDraft: null,
