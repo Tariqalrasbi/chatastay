@@ -3,7 +3,7 @@
     <h1 class="login-card-title">Sign in to ChatAStay</h1>
     <p class="muted login-card-sub">Al Ashkhara Beach Resort — one portal for management and operations.</p>
 
-    <div class="login-segment" role="tablist" aria-label="Sign-in method">
+    <div class="login-segment" role="tablist" aria-label="Choose account type">
       <button
         type="button"
         class="login-segment-btn is-active"
@@ -14,7 +14,7 @@
         tabindex="0"
         data-login-mode="management"
       >
-        Management
+        Admin &amp; Management
       </button>
       <button
         type="button"
@@ -26,11 +26,13 @@
         tabindex="-1"
         data-login-mode="staff"
       >
-        Staff
+        Hotel Staff
       </button>
     </div>
 
-    <p class="login-mode-hint" id="loginModeHint">For owners, admins, and supervisors — email and password.</p>
+    <p class="login-mode-hint" id="loginModeHint" aria-live="polite">
+      Access dashboards, reports, and full hotel controls
+    </p>
 
     <div id="loginPanelMgmt" class="login-panel" role="tabpanel" aria-labelledby="loginTabMgmt">
       <form method="post" action="/admin/login" id="loginFormMgmt">
@@ -55,7 +57,9 @@
             required
             autocomplete="current-password"
           />
-          <button class="login-btn login-btn--primary" type="submit">Sign in</button>
+          <button class="login-btn login-btn--primary" type="submit" id="loginBtnMgmt">
+            Continue to Dashboard
+          </button>
           <p class="login-forgot muted"><a class="inline-link" href="/admin/forgot-password">Forgot password?</a></p>
         </fieldset>
       </form>
@@ -64,9 +68,9 @@
     <div id="loginPanelStaff" class="login-panel" role="tabpanel" aria-labelledby="loginTabStaff" hidden>
       <form method="post" action="/auth/staff-login" id="loginFormStaff">
         <fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>
-          <label class="login-label" for="loginStaffUser">Username</label>
+          <label class="login-label" for="loginStaffUser">Staff ID or Username</label>
           <input class="login-input" id="loginStaffUser" type="text" name="username" required autocomplete="username" />
-          <label class="login-label" for="loginStaffPin">PIN</label>
+          <label class="login-label" for="loginStaffPin">4-digit PIN</label>
           <input
             class="login-input"
             id="loginStaffPin"
@@ -77,13 +81,14 @@
             inputmode="numeric"
             minlength="4"
             maxlength="12"
+            placeholder="••••"
           />
-          <button class="login-btn login-btn--staff" type="submit">Staff sign in</button>
+          <button class="login-btn login-btn--staff" type="submit" id="loginBtnStaff">Access Workspace</button>
         </fieldset>
       </form>
     </div>
+    {{LOGIN_DEMO_SECTION}}
   </div>
-  {{LOGIN_DEMO_SECTION}}
 </div>
 
 <style>
@@ -112,41 +117,55 @@
   }
   .login-segment {
     display: flex;
-    gap: 4px;
-    padding: 4px;
+    gap: 8px;
+    padding: 0;
     border-radius: 12px;
-    background: #f1f5f9;
-    margin-bottom: 10px;
+    background: transparent;
+    margin-bottom: 8px;
   }
   .login-segment-btn {
     flex: 1;
-    border: 0;
-    background: transparent;
+    border: 1px solid #cbd5e1;
+    background: #fff;
     padding: 10px 12px;
-    border-radius: 9px;
+    border-radius: 10px;
     font-weight: 700;
-    font-size: 14px;
+    font-size: 13px;
     cursor: pointer;
-    color: #64748b;
-    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+    color: #475569;
+    transition:
+      background 0.22s ease,
+      color 0.22s ease,
+      border-color 0.22s ease,
+      box-shadow 0.22s ease,
+      transform 0.18s ease;
   }
   .login-segment-btn:hover {
-    color: #334155;
+    color: #0f172a;
+    border-color: #94a3b8;
+    background: #f8fafc;
   }
   .login-segment-btn.is-active {
-    background: #fff;
-    color: #0f172a;
-    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+    background: #0f766e;
+    color: #fff;
+    border-color: #0f766e;
+    box-shadow: 0 4px 14px rgba(15, 118, 110, 0.28);
+  }
+  .login-segment-btn.is-active:hover {
+    color: #fff;
+    border-color: #0d9488;
+    background: #0d9488;
   }
   .login-segment-btn:focus-visible {
     outline: 2px solid #0f766e;
     outline-offset: 2px;
   }
   .login-mode-hint {
-    margin: 0 0 16px;
+    margin: 0 0 18px;
     font-size: 13px;
-    line-height: 1.45;
+    line-height: 1.5;
     color: #64748b;
+    min-height: 2.75em;
   }
   .login-panel[hidden] {
     display: none !important;
@@ -187,37 +206,50 @@
     font-size: 15px;
     cursor: pointer;
     margin-top: 4px;
+    transition: opacity 0.2s ease, filter 0.15s ease, transform 0.12s ease;
+  }
+  .login-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.72;
   }
   .login-btn--primary {
     background: #25d366;
     color: #083d2d;
   }
-  .login-btn--primary:hover {
+  .login-btn--primary:hover:not(:disabled) {
     filter: brightness(0.97);
   }
   .login-btn--staff {
     background: #0b6e6e;
     color: #fff;
   }
-  .login-btn--staff:hover {
+  .login-btn--staff:hover:not(:disabled) {
     filter: brightness(1.05);
+  }
+  .login-btn.is-loading {
+    position: relative;
   }
   .login-forgot {
     margin: 14px 0 0;
     font-size: 13px;
   }
   .login-demo-details {
-    margin-top: 18px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #e2e8f0;
     font-size: 13px;
-    max-width: 440px;
-    margin-left: auto;
-    margin-right: auto;
   }
   .login-demo-details summary {
     cursor: pointer;
     color: #64748b;
     font-weight: 600;
     list-style-position: outside;
+    user-select: none;
+  }
+  .login-demo-details summary:focus-visible {
+    outline: 2px solid #0f766e;
+    outline-offset: 2px;
+    border-radius: 4px;
   }
   .login-demo-details .login-demo-body {
     margin-top: 10px;
@@ -242,19 +274,29 @@
     var fsMgmt = document.getElementById("loginFieldsetMgmt");
     var fsStaff = document.getElementById("loginFieldsetStaff");
     var hint = document.getElementById("loginModeHint");
+    var formMgmt = document.getElementById("loginFormMgmt");
+    var formStaff = document.getElementById("loginFormStaff");
+    var btnMgmt = document.getElementById("loginBtnMgmt");
+    var btnStaff = document.getElementById("loginBtnStaff");
     if (!tabMgmt || !tabStaff || !panelMgmt || !panelStaff || !fsMgmt || !fsStaff || !hint) return;
 
-    var HINT_MGMT = "For owners, admins, and supervisors — email and password.";
-    var HINT_STAFF = "For operational staff — hotel username and PIN (not your email password).";
+    var HINT_MGMT = "Access dashboards, reports, and full hotel controls";
+    var HINT_STAFF = "Quick access for front desk, housekeeping, and operations";
+    var LABEL_MGMT_LOADING = "Signing in…";
+    var LABEL_STAFF_LOADING = "Opening workspace…";
+    var LABEL_MGMT_DEFAULT = "Continue to Dashboard";
+    var LABEL_STAFF_DEFAULT = "Access Workspace";
 
     function focusMode(mode) {
-      if (mode === "staff") {
-        var u = document.getElementById("loginStaffUser");
-        if (u) u.focus();
-      } else {
-        var e = document.getElementById("loginEmail");
-        if (e) e.focus();
-      }
+      requestAnimationFrame(function () {
+        if (mode === "staff") {
+          var u = document.getElementById("loginStaffUser");
+          if (u && !u.disabled) u.focus({ preventScroll: true });
+        } else {
+          var e = document.getElementById("loginEmail");
+          if (e && !e.disabled) e.focus({ preventScroll: true });
+        }
+      });
     }
 
     function setMode(mode) {
@@ -275,6 +317,32 @@
       } catch (e) {}
       focusMode(mode);
     }
+
+    function wireSubmitLoading(form, button, loadingLabel, defaultLabel) {
+      if (!form || !button) return;
+      form.addEventListener("submit", function () {
+        if (button.disabled) return;
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+        button.classList.add("is-loading");
+        button.textContent = loadingLabel;
+        var fs = form.querySelector("fieldset");
+        if (fs) fs.setAttribute("aria-busy", "true");
+      });
+      window.addEventListener("pageshow", function (ev) {
+        if (ev.persisted) {
+          button.disabled = false;
+          button.removeAttribute("aria-busy");
+          button.classList.remove("is-loading");
+          button.textContent = defaultLabel;
+          var fs2 = form.querySelector("fieldset");
+          if (fs2) fs2.removeAttribute("aria-busy");
+        }
+      });
+    }
+
+    wireSubmitLoading(formMgmt, btnMgmt, LABEL_MGMT_LOADING, LABEL_MGMT_DEFAULT);
+    wireSubmitLoading(formStaff, btnStaff, LABEL_STAFF_LOADING, LABEL_STAFF_DEFAULT);
 
     var initial = "management";
     try {

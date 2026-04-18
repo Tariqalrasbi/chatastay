@@ -683,7 +683,7 @@ function loginDemoSectionHtml(): string {
     return "";
   }
   return `<details class="login-demo-details">
-  <summary>Developer &amp; demo accounts</summary>
+  <summary>Demo access</summary>
   <div class="login-demo-body">
     <p><strong>Platform admin</strong>: <code>admin@chatastay.local</code> / <code>admin123</code></p>
     <p><strong>PMS demo</strong> (run <code>npm run seed</code> from project root): <code>demo.owner@pms.local</code>, <code>demo.frontdesk@pms.local</code>, <code>demo.restaurant@pms.local</code>, <code>demo.hk@pms.local</code> — password <code>PmsDemo2026!</code></p>
