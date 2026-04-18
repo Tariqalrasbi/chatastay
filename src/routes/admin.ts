@@ -11659,9 +11659,13 @@ adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (
       where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } },
       orderBy: { createdAt: "asc" }
     }),
-    // Message has no propertyId in DB/schema; scope by hotel + date only (property filter via Conversation if needed later).
+    // Message has no propertyId on the Prisma model — never pass propertyId on Message.where. With a property scope, filter via Conversation.propertyId; otherwise hotel + dates only.
     prisma.message.findMany({
-      where: { hotelId: hotel.id, createdAt: { gte: start, lt: endExclusive } },
+      where: {
+        hotelId: hotel.id,
+        createdAt: { gte: start, lt: endExclusive },
+        ...(isScopedPropertyId(activePropertyId) ? { conversation: { propertyId: activePropertyId } } : {})
+      },
       orderBy: { createdAt: "asc" }
     })
   ]);
