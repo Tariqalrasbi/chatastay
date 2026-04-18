@@ -1,2 +1,0 @@
--- SQLite stores `Booking`.`source` as TEXT; new ChannelProvider value WHATSAPP is enforced by the Prisma client.
--- No ALTER TABLE required for this enum extension.

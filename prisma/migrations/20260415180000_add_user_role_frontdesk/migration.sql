@@ -1,2 +1,0 @@
--- Prisma enum UserRole gains FRONTDESK; SQLite stores enum as TEXT on HotelUser.role.
--- No table rewrite required; new value is accepted at insert/update time.
