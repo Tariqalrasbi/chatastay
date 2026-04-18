@@ -1,6 +1,7 @@
 import { BookingStatus, ConversationState, MessageDirection, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
+import { getSafeSendTime, hotelTimezoneOrUtc } from "./preArrivalReminderJob";
 import { trySendWhatsAppText } from "../whatsapp/send";
 import { parseLightGuestMemory } from "../core/lightGuestMemory";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
@@ -193,14 +194,18 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
     },
     take: 400
   });
+  const hotelRows = await prisma.hotel.findMany({ select: { id: true, timezone: true } });
+  const tzByHotelId = new Map(hotelRows.map((h) => [h.id, hotelTimezoneOrUtc(h.timezone)]));
   for (const b of bookings) {
+    const tz = tzByHotelId.get(b.hotelId) ?? "UTC";
     const factor = loadPartnerSetupConfig(b.hotelId).optimizationSettings.followupDelayFactor;
     const checkInMs = b.checkIn.getTime();
     const checkOutMs = b.checkOut.getTime();
     if (checkInMs > now.getTime()) {
       const hoursBefore = envHoursToMs("AUTO_FOLLOWUP_PRE_ARRIVAL_HOURS", 36);
       const adjustedHoursBefore = withFollowupFactor(hoursBefore, factor);
-      const scheduledFor = new Date(checkInMs - adjustedHoursBefore);
+      const rawPre = new Date(checkInMs - adjustedHoursBefore);
+      const scheduledFor = getSafeSendTime(rawPre, tz).adjustedUtc;
       await enqueueFollowUp({
         hotelId: b.hotelId,
         propertyId: b.propertyId,
@@ -216,7 +221,8 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
     if (checkOutMs < now.getTime()) {
       const postStayDelay = envHoursToMs("AUTO_FOLLOWUP_POST_STAY_HOURS", 24);
       const adjustedPostStayDelay = withFollowupFactor(postStayDelay, factor);
-      const scheduledFor = new Date(checkOutMs + adjustedPostStayDelay);
+      const rawPost = new Date(checkOutMs + adjustedPostStayDelay);
+      const scheduledFor = getSafeSendTime(rawPost, tz).adjustedUtc;
       await enqueueFollowUp({
         hotelId: b.hotelId,
         propertyId: b.propertyId,
@@ -234,6 +240,8 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
 
 async function seedReEngagement(now: Date): Promise<void> {
   const reengageAfterMs = envDaysToMs("AUTO_FOLLOWUP_REENGAGE_DAYS", 60);
+  const hotelRows = await prisma.hotel.findMany({ select: { id: true, timezone: true } });
+  const tzByHotelId = new Map(hotelRows.map((h) => [h.id, hotelTimezoneOrUtc(h.timezone)]));
   const guests = await prisma.guest.findMany({
     where: {
       bookings: {
@@ -263,6 +271,9 @@ async function seedReEngagement(now: Date): Promise<void> {
     if (upcoming) continue;
     const factor = loadPartnerSetupConfig(g.hotelId).optimizationSettings.followupDelayFactor;
     const adjustedReengageMs = withFollowupFactor(reengageAfterMs, factor);
+    const tz = tzByHotelId.get(g.hotelId) ?? "UTC";
+    const rawRe = new Date(last.checkOut.getTime() + adjustedReengageMs);
+    const scheduledFor = getSafeSendTime(rawRe, tz).adjustedUtc;
     await enqueueFollowUp({
       hotelId: g.hotelId,
       propertyId: last.propertyId ?? null,
@@ -270,7 +281,7 @@ async function seedReEngagement(now: Date): Promise<void> {
       bookingId: null,
       type: "RE_ENGAGEMENT",
       dedupeKey: `reengage:${g.id}:${last.checkOut.toISOString().slice(0, 10)}`,
-      scheduledFor: new Date(last.checkOut.getTime() + adjustedReengageMs),
+      scheduledFor,
       payload: {}
     });
   }
@@ -370,7 +381,7 @@ export async function runGuestAutoFollowupSweep(): Promise<{ scheduled: number; 
     where: { status: "PENDING", scheduledFor: { lte: now } },
     include: {
       guest: { select: { id: true, fullName: true, phoneE164: true, lightGuestMemoryJson: true } },
-      hotel: { select: { id: true, displayName: true } }
+      hotel: { select: { id: true, displayName: true, timezone: true } }
     },
     orderBy: { scheduledFor: "asc" },
     take: 200
@@ -379,6 +390,13 @@ export async function runGuestAutoFollowupSweep(): Promise<{ scheduled: number; 
   let sent = 0;
   let skipped = 0;
   for (const fu of due) {
+    const tz = hotelTimezoneOrUtc(fu.hotel.timezone);
+    const sendNotBefore = getSafeSendTime(fu.scheduledFor, tz).adjustedUtc;
+    if (now.getTime() < sendNotBefore.getTime()) {
+      skipped++;
+      continue;
+    }
+
     const suppress = await shouldSuppressSend(fu);
     if (suppress) {
       await prisma.guestFollowUp.update({

@@ -5,6 +5,72 @@ import { sendWhatsAppButtons, trySendWhatsAppText } from "../whatsapp/send";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
+/** Quiet hours start (24h clock, inclusive), default 22 = 10 PM hotel local. */
+const QUIET_HOURS_START = Math.min(23, Math.max(0, parseInt(process.env.QUIET_HOURS_START ?? "22", 10) || 22));
+/** Quiet hours end (24h clock, exclusive until this hour), default 8 = 8 AM hotel local. */
+const QUIET_HOURS_END = Math.min(23, Math.max(0, parseInt(process.env.QUIET_HOURS_END ?? "8", 10) || 8));
+/** Default civil hour when shifting sends out of quiet hours, default 9 = 9 AM. */
+const DEFAULT_SEND_HOUR = Math.min(22, Math.max(0, parseInt(process.env.DEFAULT_SEND_HOUR ?? "9", 10) || 9));
+
+export type GuestJourneySendWindowReason = "none" | "early_morning" | "late_night";
+
+export function hotelTimezoneOrUtc(hotelTimezone: string | null | undefined): string {
+  const t = (hotelTimezone ?? "").trim();
+  return t || "UTC";
+}
+
+function ymdAddCalendarDays(ymd: string, deltaDays: number): string {
+  const [y, mo, d] = ymd.split("-").map((x) => parseInt(x, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return ymd;
+  const u = new Date(Date.UTC(y, mo - 1, d + deltaDays));
+  return `${u.getUTCFullYear()}-${String(u.getUTCMonth() + 1).padStart(2, "0")}-${String(u.getUTCDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Shift a desired send instant into an allowed daytime window in `timeZone` (hotel local).
+ * Quiet: [QUIET_HOURS_START, 24) ∪ [0, QUIET_HOURS_END) — no sends overnight.
+ * - If local time falls before QUIET_HOURS_END → same calendar day at DEFAULT_SEND_HOUR:00.
+ * - If at or after QUIET_HOURS_START → next calendar day at DEFAULT_SEND_HOUR:00.
+ * `desiredSendUtc` is typically checkout wall + offsets (e.g. +24h for thank-you).
+ */
+export function getSafeSendTime(desiredSendUtc: Date, timeZone: string): {
+  originalUtc: Date;
+  adjustedUtc: Date;
+  reason: GuestJourneySendWindowReason;
+} {
+  const tz = hotelTimezoneOrUtc(timeZone);
+  const originalUtc = desiredSendUtc;
+  if (Number.isNaN(originalUtc.getTime())) {
+    return { originalUtc, adjustedUtc: originalUtc, reason: "none" };
+  }
+
+  const quietStartMin = QUIET_HOURS_START * 60;
+  const quietEndMin = QUIET_HOURS_END * 60;
+  const { ymd, minOfDay } = readWallClockInZone(originalUtc, tz);
+  const inQuiet = minOfDay >= quietStartMin || minOfDay < quietEndMin;
+
+  if (!inQuiet) {
+    return { originalUtc, adjustedUtc: originalUtc, reason: "none" };
+  }
+
+  const hm = `${String(DEFAULT_SEND_HOUR).padStart(2, "0")}:00`;
+
+  if (minOfDay < quietEndMin) {
+    const adjustedUtc = wallClockLocalToUtc(ymd, hm, tz);
+    if (Number.isNaN(adjustedUtc.getTime())) {
+      return { originalUtc, adjustedUtc: originalUtc, reason: "none" };
+    }
+    return { originalUtc, adjustedUtc, reason: "early_morning" };
+  }
+
+  const nextYmd = ymdAddCalendarDays(ymd, 1);
+  const adjustedUtc = wallClockLocalToUtc(nextYmd, hm, tz);
+  if (Number.isNaN(adjustedUtc.getTime())) {
+    return { originalUtc, adjustedUtc: originalUtc, reason: "none" };
+  }
+  return { originalUtc, adjustedUtc, reason: "late_night" };
+}
+
 function envHoursToMs(envKey: string, defaultHours: number): number {
   const h = parseInt(process.env[envKey] ?? String(defaultHours), 10);
   const hours = Number.isFinite(h) && h >= 0 ? h : defaultHours;
@@ -56,7 +122,7 @@ export function wallClockLocalToUtc(ymd: string, hm: string, timeZone: string): 
   return new Date(NaN);
 }
 
-function readWallClockInZone(d: Date, timeZone: string): { ymd: string; minOfDay: number } {
+export function readWallClockInZone(d: Date, timeZone: string): { ymd: string; minOfDay: number } {
   const f = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
@@ -333,6 +399,11 @@ async function sendJourneyMessage(params: {
 /**
  * Automated guest journey WhatsApp: 24h pre-arrival, same-day check-in, post-checkout thank-you,
  * review request (after thank-you + delay), repeat-guest promo (eligible guests only, guest-level cooldown).
+ *
+ * Post-stay timing: thank-you is **earliest** at scheduled checkout (property local wall) **+ 24h**, then
+ * shifted into **quiet-safe** daytime (see `getSafeSendTime`, env `QUIET_HOURS_*` / `DEFAULT_SEND_HOUR`).
+ * Same window logic applies to review, reminder, and repeat-promo sends.
+ *
  * Each type sends at most once per booking (tracked on Booking; repeat promo also uses Guest.journeyLastRepeatPromoAt).
  * Failed WhatsApp sends do not mark sent (retry next sweep).
  */
@@ -362,7 +433,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     const phoneNumberId = partner.whatsappPhoneNumberId?.trim() || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
     if (!phoneNumberId) continue;
 
-    const tz = hotel.timezone || "Asia/Muscat";
+    const tz = hotelTimezoneOrUtc(hotel.timezone);
     const todayYmd = formatYmdInHotelZone(now, tz);
 
     const baseInclude = {
@@ -485,9 +556,23 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         skipped++;
         continue;
       }
-      if (now.getTime() < scheduledDeparture.getTime()) {
+
+      const thankYouBaseUtc = new Date(scheduledDeparture.getTime() + TWENTY_FOUR_HOURS_MS);
+      const thankYouWindow = getSafeSendTime(thankYouBaseUtc, tz);
+      if (now.getTime() < thankYouWindow.adjustedUtc.getTime()) {
         skipped++;
         continue;
+      }
+      if (thankYouWindow.reason !== "none") {
+        console.info(
+          "[guest-journey] POST_CHECKOUT_THANK_YOU send-window",
+          JSON.stringify({
+            bookingId: b.id,
+            originalSendTime: thankYouWindow.originalUtc.toISOString(),
+            adjustedSendTime: thankYouWindow.adjustedUtc.toISOString(),
+            reason: thankYouWindow.reason
+          })
+        );
       }
 
       const body = buildPostCheckoutBody({
@@ -528,10 +613,22 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         skipped++;
         continue;
       }
-      const reviewEarliest = new Date(scheduledDeparture.getTime() + reviewDelayMs);
-      if (now.getTime() < reviewEarliest.getTime()) {
+      const reviewDesiredUtc = new Date(scheduledDeparture.getTime() + reviewDelayMs);
+      const reviewWindow = getSafeSendTime(reviewDesiredUtc, tz);
+      if (now.getTime() < reviewWindow.adjustedUtc.getTime()) {
         skipped++;
         continue;
+      }
+      if (reviewWindow.reason !== "none") {
+        console.info(
+          "[guest-journey] REVIEW_REQUEST send-window",
+          JSON.stringify({
+            bookingId: b.id,
+            originalSendTime: reviewWindow.originalUtc.toISOString(),
+            adjustedSendTime: reviewWindow.adjustedUtc.toISOString(),
+            reason: reviewWindow.reason
+          })
+        );
       }
 
       const body = buildReviewRequestBody({
@@ -573,10 +670,22 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         skipped++;
         continue;
       }
-      const reminderAt = new Date(reviewSentAt.getTime() + 24 * 60 * 60 * 1000);
-      if (now.getTime() < reminderAt.getTime()) {
+      const reminderDesiredUtc = new Date(reviewSentAt.getTime() + 24 * 60 * 60 * 1000);
+      const reminderWindow = getSafeSendTime(reminderDesiredUtc, tz);
+      if (now.getTime() < reminderWindow.adjustedUtc.getTime()) {
         skipped++;
         continue;
+      }
+      if (reminderWindow.reason !== "none") {
+        console.info(
+          "[guest-journey] REVIEW_REQUEST_REMINDER send-window",
+          JSON.stringify({
+            bookingId: b.id,
+            originalSendTime: reminderWindow.originalUtc.toISOString(),
+            adjustedSendTime: reminderWindow.adjustedUtc.toISOString(),
+            reason: reminderWindow.reason
+          })
+        );
       }
       const body = `${buildReviewRequestBody({
         guestFirstName: firstName(b.guest.fullName),
@@ -621,10 +730,22 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         skipped++;
         continue;
       }
-      const promoEarliest = new Date(scheduledDeparture.getTime() + repeatPromoDelayMs);
-      if (now.getTime() < promoEarliest.getTime()) {
+      const promoDesiredUtc = new Date(scheduledDeparture.getTime() + repeatPromoDelayMs);
+      const promoWindow = getSafeSendTime(promoDesiredUtc, tz);
+      if (now.getTime() < promoWindow.adjustedUtc.getTime()) {
         skipped++;
         continue;
+      }
+      if (promoWindow.reason !== "none") {
+        console.info(
+          "[guest-journey] REPEAT_GUEST_PROMO send-window",
+          JSON.stringify({
+            bookingId: b.id,
+            originalSendTime: promoWindow.originalUtc.toISOString(),
+            adjustedSendTime: promoWindow.adjustedUtc.toISOString(),
+            reason: promoWindow.reason
+          })
+        );
       }
 
       const lastPromo = b.guest.journeyLastRepeatPromoAt;
