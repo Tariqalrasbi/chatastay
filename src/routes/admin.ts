@@ -677,6 +677,25 @@ function readView(name: string): string {
   return fs.readFileSync(path.join(viewsDir, name), "utf8");
 }
 
+/** Demo / local credentials — omitted when NODE_ENV is production. */
+function loginDemoSectionHtml(): string {
+  if (process.env.NODE_ENV === "production") {
+    return "";
+  }
+  return `<details class="login-demo-details">
+  <summary>Developer &amp; demo accounts</summary>
+  <div class="login-demo-body">
+    <p><strong>Platform admin</strong>: <code>admin@chatastay.local</code> / <code>admin123</code></p>
+    <p><strong>PMS demo</strong> (run <code>npm run seed</code> from project root): <code>demo.owner@pms.local</code>, <code>demo.frontdesk@pms.local</code>, <code>demo.restaurant@pms.local</code>, <code>demo.hk@pms.local</code> — password <code>PmsDemo2026!</code></p>
+    <p><strong>Staff PIN demo</strong>: usernames <code>demoowner</code>, <code>demofrontdesk</code>, <code>demorestaurant</code>, <code>demohk</code> — PIN <code>4242</code></p>
+  </div>
+</details>`;
+}
+
+function loginPageHtml(): string {
+  return readView("login.html").replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
+}
+
 /** Client-side polling for conversation activity (no WebSockets in this stack). */
 function getAdminLiveScript(): string {
   return `<script>
@@ -2786,7 +2805,7 @@ adminRouter.get("/login", (req, res) => {
     req.query.onboard === "1" ? '<p class="badge ok">Property onboarding complete. You can sign in now.</p>' : "";
   const onboardLink =
     '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
-  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + onboardNotice + readView("login.html") + onboardLink;
+  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + onboardNotice + loginPageHtml() + onboardLink;
   res.type("html").send(renderLayout(content, false));
 });
 
@@ -3266,7 +3285,7 @@ adminRouter.post("/login", async (req, res) => {
       res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/profile");
       return;
     }
-    res.status(401).type("html").send(renderPage("login.html", false));
+    res.status(401).type("html").send(renderLayout(loginPageHtml(), false));
   } catch (err) {
     console.error("[Auth] /admin/login unexpected error:", err instanceof Error ? err.message : err);
     res.redirect("/admin/login?auth=error");

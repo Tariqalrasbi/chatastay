@@ -1,80 +1,308 @@
-<h2>Admin Login</h2>
-<p class="muted">Sign in to manage Al Ashkhara Beach Resort bookings from WhatsApp.</p>
+<div class="login-card-shell">
+  <div class="login-card">
+    <h1 class="login-card-title">Sign in to ChatAStay</h1>
+    <p class="muted login-card-sub">Al Ashkhara Beach Resort — one portal for management and operations.</p>
 
-<form method="post" action="/admin/login" style="max-width: 420px">
-  <h3 style="margin:0 0 8px;font-size:16px">Email login</h3>
-  <label for="email">Email</label><br />
-  <input
-    id="email"
-    type="text"
-    name="email"
-    required
-    autocomplete="username"
-    inputmode="email"
-    placeholder="you@hotel.com"
-    style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px"
-  />
+    <div class="login-segment" role="tablist" aria-label="Sign-in method">
+      <button
+        type="button"
+        class="login-segment-btn is-active"
+        id="loginTabMgmt"
+        role="tab"
+        aria-selected="true"
+        aria-controls="loginPanelMgmt"
+        tabindex="0"
+        data-login-mode="management"
+      >
+        Management
+      </button>
+      <button
+        type="button"
+        class="login-segment-btn"
+        id="loginTabStaff"
+        role="tab"
+        aria-selected="false"
+        aria-controls="loginPanelStaff"
+        tabindex="-1"
+        data-login-mode="staff"
+      >
+        Staff
+      </button>
+    </div>
 
-  <label for="password">Password</label><br />
-  <input
-    id="password"
-    type="password"
-    name="password"
-    required
-    style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px"
-  />
+    <p class="login-mode-hint" id="loginModeHint">For owners, admins, and supervisors — email and password.</p>
 
-  <button
-    type="submit"
-    style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700"
-  >
-    Sign In
-  </button>
-  <p class="muted" style="margin-top: 12px"><a href="/admin/forgot-password">Forgot Password?</a></p>
-</form>
+    <div id="loginPanelMgmt" class="login-panel" role="tabpanel" aria-labelledby="loginTabMgmt">
+      <form method="post" action="/admin/login" id="loginFormMgmt">
+        <fieldset class="login-fieldset" id="loginFieldsetMgmt">
+          <label class="login-label" for="loginEmail">Email</label>
+          <input
+            class="login-input"
+            id="loginEmail"
+            type="text"
+            name="email"
+            required
+            autocomplete="username"
+            inputmode="email"
+            placeholder="you@hotel.com"
+          />
+          <label class="login-label" for="loginPassword">Password</label>
+          <input
+            class="login-input"
+            id="loginPassword"
+            type="password"
+            name="password"
+            required
+            autocomplete="current-password"
+          />
+          <button class="login-btn login-btn--primary" type="submit">Sign in</button>
+          <p class="login-forgot muted"><a class="inline-link" href="/admin/forgot-password">Forgot password?</a></p>
+        </fieldset>
+      </form>
+    </div>
 
-<form method="post" action="/auth/staff-login" style="max-width: 420px; margin-top: 18px">
-  <h3 style="margin:0 0 8px;font-size:16px">Staff login (username + PIN)</h3>
-  <label for="staffUsername">Username</label><br />
-  <input
-    id="staffUsername"
-    type="text"
-    name="username"
-    required
-    style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px"
-  />
+    <div id="loginPanelStaff" class="login-panel" role="tabpanel" aria-labelledby="loginTabStaff" hidden>
+      <form method="post" action="/auth/staff-login" id="loginFormStaff">
+        <fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>
+          <label class="login-label" for="loginStaffUser">Username</label>
+          <input class="login-input" id="loginStaffUser" type="text" name="username" required autocomplete="username" />
+          <label class="login-label" for="loginStaffPin">PIN</label>
+          <input
+            class="login-input"
+            id="loginStaffPin"
+            type="password"
+            name="pin"
+            required
+            autocomplete="current-password"
+            inputmode="numeric"
+            minlength="4"
+            maxlength="12"
+          />
+          <button class="login-btn login-btn--staff" type="submit">Staff sign in</button>
+        </fieldset>
+      </form>
+    </div>
+  </div>
+  {{LOGIN_DEMO_SECTION}}
+</div>
 
-  <label for="staffPin">PIN</label><br />
-  <input
-    id="staffPin"
-    type="password"
-    name="pin"
-    minlength="4"
-    maxlength="12"
-    required
-    style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px"
-  />
+<style>
+  .login-card-shell {
+    max-width: 440px;
+    margin: 0 auto;
+  }
+  .login-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 28px 24px 24px;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.07);
+  }
+  .login-card-title {
+    margin: 0 0 8px;
+    font-size: 1.35rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: #0f172a;
+  }
+  .login-card-sub {
+    margin: 0 0 20px;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .login-segment {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 12px;
+    background: #f1f5f9;
+    margin-bottom: 10px;
+  }
+  .login-segment-btn {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    padding: 10px 12px;
+    border-radius: 9px;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    color: #64748b;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .login-segment-btn:hover {
+    color: #334155;
+  }
+  .login-segment-btn.is-active {
+    background: #fff;
+    color: #0f172a;
+    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+  }
+  .login-segment-btn:focus-visible {
+    outline: 2px solid #0f766e;
+    outline-offset: 2px;
+  }
+  .login-mode-hint {
+    margin: 0 0 16px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #64748b;
+  }
+  .login-panel[hidden] {
+    display: none !important;
+  }
+  .login-fieldset {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+  .login-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #334155;
+    margin-bottom: 6px;
+  }
+  .login-input {
+    width: 100%;
+    padding: 11px 12px;
+    margin-bottom: 14px;
+    border: 1px solid #d8dee6;
+    border-radius: 10px;
+    font-size: 15px;
+    box-sizing: border-box;
+  }
+  .login-input:focus {
+    border-color: #0f766e;
+    outline: 0;
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+  }
+  .login-btn {
+    width: 100%;
+    padding: 12px 16px;
+    border: 0;
+    border-radius: 10px;
+    font-weight: 700;
+    font-size: 15px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+  .login-btn--primary {
+    background: #25d366;
+    color: #083d2d;
+  }
+  .login-btn--primary:hover {
+    filter: brightness(0.97);
+  }
+  .login-btn--staff {
+    background: #0b6e6e;
+    color: #fff;
+  }
+  .login-btn--staff:hover {
+    filter: brightness(1.05);
+  }
+  .login-forgot {
+    margin: 14px 0 0;
+    font-size: 13px;
+  }
+  .login-demo-details {
+    margin-top: 18px;
+    font-size: 13px;
+    max-width: 440px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .login-demo-details summary {
+    cursor: pointer;
+    color: #64748b;
+    font-weight: 600;
+    list-style-position: outside;
+  }
+  .login-demo-details .login-demo-body {
+    margin-top: 10px;
+    color: #475569;
+    line-height: 1.55;
+  }
+  .login-demo-details code {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+</style>
 
-  <button
-    type="submit"
-    style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #0b6e6e; color: #fff; font-weight: 700"
-  >
-    Staff Sign In
-  </button>
-</form>
+<script>
+  (function () {
+    var STORAGE_KEY = "chatastay_login_mode";
+    var tabMgmt = document.getElementById("loginTabMgmt");
+    var tabStaff = document.getElementById("loginTabStaff");
+    var panelMgmt = document.getElementById("loginPanelMgmt");
+    var panelStaff = document.getElementById("loginPanelStaff");
+    var fsMgmt = document.getElementById("loginFieldsetMgmt");
+    var fsStaff = document.getElementById("loginFieldsetStaff");
+    var hint = document.getElementById("loginModeHint");
+    if (!tabMgmt || !tabStaff || !panelMgmt || !panelStaff || !fsMgmt || !fsStaff || !hint) return;
 
-<p class="muted" style="margin-top: 10px">
-  <strong>Platform admin</strong>: admin@chatastay.local / admin123
-</p>
-<p class="muted" style="margin-top: 8px">
-  <strong>PMS demo accounts</strong> (create them with <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">npm run seed</code> from the project root):<br />
-  Email + password — <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demo.owner@pms.local</code>,
-  <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demo.frontdesk@pms.local</code>,
-  <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demo.restaurant@pms.local</code>,
-  <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demo.hk@pms.local</code>
-  — password <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">PmsDemo2026!</code><br />
-  Or <strong>Staff login</strong> (username + PIN) — usernames <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demoowner</code>,
-  <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demofrontdesk</code>,
-  <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demorestaurant</code>,
-  <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">demohk</code> — PIN <code style="background:#f1f5f9;padding:2px 6px;border-radius:6px">4242</code>
-</p>
+    var HINT_MGMT = "For owners, admins, and supervisors — email and password.";
+    var HINT_STAFF = "For operational staff — hotel username and PIN (not your email password).";
+
+    function focusMode(mode) {
+      if (mode === "staff") {
+        var u = document.getElementById("loginStaffUser");
+        if (u) u.focus();
+      } else {
+        var e = document.getElementById("loginEmail");
+        if (e) e.focus();
+      }
+    }
+
+    function setMode(mode) {
+      var isStaff = mode === "staff";
+      tabMgmt.classList.toggle("is-active", !isStaff);
+      tabStaff.classList.toggle("is-active", isStaff);
+      tabMgmt.setAttribute("aria-selected", isStaff ? "false" : "true");
+      tabStaff.setAttribute("aria-selected", isStaff ? "true" : "false");
+      tabMgmt.setAttribute("tabindex", isStaff ? "-1" : "0");
+      tabStaff.setAttribute("tabindex", isStaff ? "0" : "-1");
+      panelMgmt.hidden = isStaff;
+      panelStaff.hidden = !isStaff;
+      fsMgmt.disabled = isStaff;
+      fsStaff.disabled = !isStaff;
+      hint.textContent = isStaff ? HINT_STAFF : HINT_MGMT;
+      try {
+        localStorage.setItem(STORAGE_KEY, mode);
+      } catch (e) {}
+      focusMode(mode);
+    }
+
+    var initial = "management";
+    try {
+      var saved = localStorage.getItem(STORAGE_KEY);
+      if (saved === "staff") initial = "staff";
+    } catch (e) {}
+    setMode(initial);
+
+    tabMgmt.addEventListener("click", function () {
+      setMode("management");
+    });
+    tabStaff.addEventListener("click", function () {
+      setMode("staff");
+    });
+
+    tabMgmt.addEventListener("keydown", function (ev) {
+      if (ev.key === "ArrowRight" || ev.key === "ArrowDown") {
+        ev.preventDefault();
+        tabStaff.focus();
+        setMode("staff");
+      }
+    });
+    tabStaff.addEventListener("keydown", function (ev) {
+      if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") {
+        ev.preventDefault();
+        tabMgmt.focus();
+        setMode("management");
+      }
+    });
+  })();
+</script>
