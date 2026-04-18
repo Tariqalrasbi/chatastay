@@ -46,17 +46,20 @@ function main() {
     process.exit(1);
   }
 
-  if (!fs.existsSync(mainDb)) {
-    console.error("[backup-sqlite] FAILED: database file does not exist:", mainDb);
-    process.exit(1);
-  }
-
   const outDir = path.join(root, "backups", "sqlite");
   fs.mkdirSync(outDir, { recursive: true });
   const base = uniqueBaseName(outDir);
   const destMain = path.join(outDir, `${base}.db`);
   const destWal = path.join(outDir, `${base}.db-wal`);
   const destShm = path.join(outDir, `${base}.db-shm`);
+
+  console.log("[backup-sqlite] resolved live database path:", mainDb);
+  console.log("[backup-sqlite] backup destination path:", destMain);
+
+  if (!fs.existsSync(mainDb)) {
+    console.error("[backup-sqlite] FAILED: database file does not exist:", mainDb);
+    process.exit(1);
+  }
   const wal = `${mainDb}-wal`;
   const shm = `${mainDb}-shm`;
 
