@@ -55,6 +55,12 @@ async function start(): Promise<void> {
   await ensureHotelUserAuthColumnsSqlite(prisma);
   await ensureGuestFeedbackFollowupColumnsSqlite(prisma);
 
+  const g = globalThis as typeof globalThis & { __server_started__?: boolean };
+  if (g.__server_started__) {
+    return;
+  }
+  g.__server_started__ = true;
+
   const server = app.listen(port, host, () => {
     const urlHost = host === "0.0.0.0" ? "localhost" : host;
     console.log(`ChatAstay server listening on http://${urlHost}:${port}`);

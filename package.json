@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:3001": "PORT=3001 tsx watch src/index.ts",
+    "prebuild": "prisma generate",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "migrate:deploy": "prisma migrate deploy",
-    "start:with-migrate": "prisma migrate deploy && node dist/index.js",
+    "migrate:deploy": "node scripts/migrate-deploy.cjs",
+    "start:with-migrate": "node scripts/migrate-deploy.cjs && prisma generate && node dist/index.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
