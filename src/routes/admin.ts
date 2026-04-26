@@ -699,11 +699,12 @@ function loginPageHtml(): string {
 function getAdminLiveScript(): string {
   return `<script>
 (function () {
-  var POLL_MS = 8000;
+  var POLL_MS = 2500;
   var disabled = false;
   var lastSince = new Date(Date.now() - 15000).toISOString();
   var pendingBadge = 0;
   var listReloadTimer = null;
+  var audioCtx = null;
 
   function esc(s) {
     return String(s || "")
@@ -729,6 +730,33 @@ function getAdminLiveScript(): string {
       el.classList.add("admin-toast-out");
       window.setTimeout(function () { el.remove(); }, 400);
     }, 9000);
+  }
+  function ensureAudioUnlocked() {
+    if (audioCtx) return audioCtx;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended" && audioCtx.resume) audioCtx.resume().catch(function () {});
+    } catch (e) {}
+    return audioCtx;
+  }
+  function beepLiveAlert() {
+    if (localStorage.getItem("notifSoundMuted") === "true") return;
+    try {
+      var ctx = ensureAudioUnlocked();
+      if (!ctx) return;
+      var o = ctx.createOscillator();
+      var g = ctx.createGain();
+      o.type = "triangle";
+      o.frequency.setValueAtTime(740, ctx.currentTime);
+      o.frequency.setValueAtTime(980, ctx.currentTime + 0.12);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.06, ctx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.34);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start();
+      o.stop(ctx.currentTime + 0.36);
+    } catch (e) {}
   }
   function updateBadge(delta) {
     var badge = document.getElementById("adminConvLiveBadge");
@@ -789,6 +817,7 @@ function getAdminLiveScript(): string {
   function handleEvents(events) {
     if (!events || !events.length) return;
     updateBadge(events.length);
+    beepLiveAlert();
     events.forEach(function (ev) {
       var t = ev.title || "Conversation";
       var b = ev.preview || "";
@@ -832,6 +861,9 @@ function getAdminLiveScript(): string {
       if (badge) badge.hidden = true;
     });
   }
+  ["pointerdown", "keydown", "touchstart", "click"].forEach(function (ev) {
+    window.addEventListener(ev, ensureAudioUnlocked, { once: true, passive: true });
+  });
   window.setInterval(function () {
     pollActivity();
     pollDetailCatchUp();
@@ -845,7 +877,7 @@ function getAdminLiveScript(): string {
 function getAdminNotificationScript(): string {
   return `<script>
 (function () {
-  var POLL_MS = 9000;
+  var POLL_MS = 3000;
   var notifBtn = document.getElementById("adminNotifBell");
   var notifBadge = document.getElementById("adminNotifBadge");
   var notifList = document.getElementById("adminNotifList");
@@ -862,6 +894,7 @@ function getAdminNotificationScript(): string {
 
   var knownIds = new Set();
   var soundMuted = localStorage.getItem("notifSoundMuted") === "true";
+  var audioCtx = null;
   var iconOn = "🔔";
   var iconOff = "🔕";
   muteBtn.textContent = soundMuted ? iconOff : iconOn;
@@ -879,11 +912,19 @@ function getAdminNotificationScript(): string {
   function shouldBeep(sev) {
     return sev === "critical" || sev === "high";
   }
+  function ensureAudioUnlocked() {
+    if (audioCtx) return audioCtx;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended" && audioCtx.resume) audioCtx.resume().catch(function () {});
+    } catch (e) {}
+    return audioCtx;
+  }
   function beep() {
     if (soundMuted) return;
-    if (document.visibilityState !== "visible") return;
     try {
-      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var ctx = ensureAudioUnlocked();
+      if (!ctx) return;
       var o = ctx.createOscillator();
       var g = ctx.createGain();
       o.type = "sine";
@@ -984,6 +1025,10 @@ function getAdminNotificationScript(): string {
     localStorage.setItem("notifSoundMuted", soundMuted ? "true" : "false");
     muteBtn.textContent = soundMuted ? iconOff : iconOn;
     muteBtn.title = soundMuted ? "Enable alert sound" : "Mute alert sound";
+    if (!soundMuted) ensureAudioUnlocked();
+  });
+  ["pointerdown", "keydown", "touchstart", "click"].forEach(function (ev) {
+    window.addEventListener(ev, ensureAudioUnlocked, { once: true, passive: true });
   });
 
   function poll() {

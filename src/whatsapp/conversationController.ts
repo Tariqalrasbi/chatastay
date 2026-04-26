@@ -1389,7 +1389,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     title: "New guest message",
     body: `${guest.fullName ?? guest.phoneE164} sent a new message.`,
     category: "messages",
-    severity: "normal",
+    severity: "high",
     link: `/admin/conversations/${encodeURIComponent(conversation.id)}`,
     sourceType: "CONVERSATION_MESSAGE_INBOUND",
     sourceId: conversation.id,

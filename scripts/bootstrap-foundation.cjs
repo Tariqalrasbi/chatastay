@@ -142,6 +142,31 @@ async function upsertForwardInventory(prisma, hotelId, propertyId, roomType, day
 }
 
 async function upsertOutlets(prisma, hotelId) {
+  const legacyItems = [
+    { outletType: "RESTAURANT", name: "Hummus", unitPrice: 1.2, sortOrder: 10 },
+    { outletType: "RESTAURANT", name: "Fattoush salad", unitPrice: 2.8, sortOrder: 12 },
+    { outletType: "RESTAURANT", name: "Club sandwich", unitPrice: 3.9, sortOrder: 30 },
+    { outletType: "RESTAURANT", name: "Grilled hammour", unitPrice: 6.9, sortOrder: 40 },
+    { outletType: "RESTAURANT", name: "BBQ Dinner", unitPrice: 8, sortOrder: 47 },
+    { outletType: "RESTAURANT", name: "Breakfast", unitPrice: 3, sortOrder: 80 },
+    { outletType: "COFFEE_SHOP", name: "Espresso", unitPrice: 1.5, sortOrder: 100 },
+    { outletType: "COFFEE_SHOP", name: "Cappuccino", unitPrice: 2.2, sortOrder: 102 },
+    { outletType: "COFFEE_SHOP", name: "Latte", unitPrice: 2.2, sortOrder: 103 },
+    { outletType: "COFFEE_SHOP", name: "Fresh orange juice", unitPrice: 2, sortOrder: 110 },
+    { outletType: "COFFEE_SHOP", name: "Soft drink (can)", unitPrice: 0.8, sortOrder: 115 }
+  ];
+  const existingLegacy = await prisma.menuItem.findMany({
+    where: { hotelId },
+    select: { name: true, outletType: true }
+  });
+  const legacyKeys = new Set(existingLegacy.map((i) => `${i.outletType}::${i.name.toLowerCase()}`));
+  const legacyToCreate = legacyItems.filter((i) => !legacyKeys.has(`${i.outletType}::${i.name.toLowerCase()}`));
+  if (legacyToCreate.length) {
+    await prisma.menuItem.createMany({
+      data: legacyToCreate.map((i) => ({ hotelId, currency: "OMR", isActive: true, ...i }))
+    });
+  }
+
   const outlets = [
     {
       code: "REST",

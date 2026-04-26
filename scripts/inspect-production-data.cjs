@@ -90,6 +90,7 @@ async function main() {
     await count("FolioTransaction", () => prisma.folioTransaction.count());
     await count("Outlet", () => prisma.outlet.count());
     await count("OutletMenuItem", () => prisma.outletMenuItem.count());
+    await count("MenuItem", () => prisma.menuItem.count());
     await count("Inventory", () => prisma.inventory.count());
 
     if (hotelMatch) {
@@ -99,6 +100,7 @@ async function main() {
       await count("  … RoomUnit (this hotel)", () => prisma.roomUnit.count({ where: { hotelId: hid } }));
       await count("  … Booking (this hotel)", () => prisma.booking.count({ where: { hotelId: hid } }));
       await count("  … Outlet (this hotel)", () => prisma.outlet.count({ where: { hotelId: hid } }));
+      await count("  … MenuItem (this hotel)", () => prisma.menuItem.count({ where: { hotelId: hid } }));
 
       const properties = await prisma.property.findMany({
         where: { hotelId: hid },
