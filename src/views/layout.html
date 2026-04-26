@@ -223,6 +223,14 @@
         visibility: hidden;
         pointer-events: none !important;
       }
+      /* Failsafe: stale overlays must never leave the admin shell unclickable after login/navigation. */
+      #uiStateBlockOverlay[aria-hidden="true"],
+      #folio-modal-backdrop[aria-hidden="true"],
+      .modal-backdrop[aria-hidden="true"] {
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
       .admin-notif-panel-head {
         flex-shrink: 0;
         display: flex;
@@ -1007,9 +1015,11 @@
           if (overlayBlockTotal() > 0) {
             var el = ensureBlockOverlay();
             el.style.display = "block";
+            el.style.pointerEvents = "auto";
             el.setAttribute("aria-hidden", "false");
           } else if (blockOverlayEl) {
             blockOverlayEl.style.display = "none";
+            blockOverlayEl.style.pointerEvents = "none";
             blockOverlayEl.setAttribute("aria-hidden", "true");
           }
         }
@@ -1017,6 +1027,12 @@
         function healStuckDom() {
           g.document.body.classList.remove("modal-open", "rud-drawer-open");
           g.document.body.style.removeProperty("pointer-events");
+          var overlay = g.document.getElementById("uiStateBlockOverlay");
+          if (overlay) {
+            overlay.style.display = "none";
+            overlay.style.pointerEvents = "none";
+            overlay.setAttribute("aria-hidden", "true");
+          }
           g.document.querySelectorAll(".modal-backdrop").forEach(function (el) {
             el.remove();
           });

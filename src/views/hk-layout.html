@@ -192,6 +192,12 @@
         visibility: hidden;
         pointer-events: none !important;
       }
+      #uiStateBlockOverlay[aria-hidden="true"],
+      .modal-backdrop[aria-hidden="true"] {
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
       .admin-notif-item a { display:block; padding:9px 10px; text-decoration:none; color:var(--text); border-bottom:1px solid #eef2f7; border-left:4px solid transparent; }
       .admin-notif-item.sev-critical a { border-left-color:#dc2626; background:#fef2f2; }
       .admin-notif-item.sev-high a { border-left-color:#f59e0b; background:#fffbeb; }
@@ -308,9 +314,11 @@
           if (overlayBlockTotal() > 0) {
             var el = ensureBlockOverlay();
             el.style.display = "block";
+            el.style.pointerEvents = "auto";
             el.setAttribute("aria-hidden", "false");
           } else if (blockOverlayEl) {
             blockOverlayEl.style.display = "none";
+            blockOverlayEl.style.pointerEvents = "none";
             blockOverlayEl.setAttribute("aria-hidden", "true");
           }
         }
@@ -318,6 +326,12 @@
         function healStuckDom() {
           g.document.body.classList.remove("modal-open", "rud-drawer-open");
           g.document.body.style.removeProperty("pointer-events");
+          var overlay = g.document.getElementById("uiStateBlockOverlay");
+          if (overlay) {
+            overlay.style.display = "none";
+            overlay.style.pointerEvents = "none";
+            overlay.setAttribute("aria-hidden", "true");
+          }
           g.document.querySelectorAll(".modal-backdrop").forEach(function (el) {
             el.remove();
           });
