@@ -769,39 +769,40 @@
     </div>
     <script>
       (function () {
-        const cookieName = "chatastay_lang";
-        const query = new URLSearchParams(window.location.search);
-        const queryLang = query.get("lang");
+        var cookieName = "chatastay_lang";
+        var query = new URLSearchParams(window.location.search);
+        var queryLang = query.get("lang");
         if (queryLang === "en" || queryLang === "ar") {
-          document.cookie = `${cookieName}=${queryLang}; Path=/; Max-Age=31536000; SameSite=Lax`;
+          document.cookie = cookieName + "=" + queryLang + "; Path=/; Max-Age=31536000; SameSite=Lax";
           query.delete("lang");
-          const next = `${window.location.pathname}${query.toString() ? `?${query.toString()}` : ""}${window.location.hash}`;
+          var queryString = query.toString();
+          var next = window.location.pathname + (queryString ? "?" + queryString : "") + window.location.hash;
           window.location.replace(next);
           return;
         }
 
-        const cookieMatch = document.cookie.match(new RegExp(`(?:^|; )${cookieName}=([^;]+)`));
-        const lang = cookieMatch?.[1] === "ar" ? "ar" : "en";
+        var cookieMatch = document.cookie.match(new RegExp("(?:^|; )" + cookieName + "=([^;]+)"));
+        var lang = cookieMatch && cookieMatch[1] === "ar" ? "ar" : "en";
         document.documentElement.setAttribute("lang", lang);
         document.documentElement.setAttribute("dir", lang === "ar" ? "rtl" : "ltr");
 
-        document.querySelectorAll("[data-lang-link]").forEach((link) => {
+        document.querySelectorAll("[data-lang-link]").forEach(function (link) {
           if (link.getAttribute("data-lang-link") === lang) {
             link.classList.add("active");
           }
         });
 
-        const normalizePath = (href) => {
+        var normalizePath = function (href) {
           if (!href) return "";
           try {
-            const u = new URL(href, window.location.origin);
+            var u = new URL(href, window.location.origin);
             return u.pathname.replace(/\/+$/, "") || "/";
-          } catch {
+          } catch (e) {
             return "";
           }
         };
-        const currentPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
-        const groupByPath = (path) => {
+        var currentPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
+        var groupByPath = function (path) {
           if (path.startsWith("/admin/workspaces")) return "modules";
           if (path.startsWith("/admin/module/")) return "dashboard";
           if (path === "/admin/profile") return "dashboard";
@@ -853,8 +854,8 @@
             return "rooms";
           return "dashboard";
         };
-        const activeGroup = groupByPath(currentPath);
-        const groupLabels = {
+        var activeGroup = groupByPath(currentPath);
+        var groupLabels = {
           dashboard: "Today",
           reservations: "Reservations",
           rooms: "Stay Operations",
@@ -864,34 +865,40 @@
           account: "Admin",
           modules: "Workspaces",
         };
-        const escapeText = (value) =>
-          String(value || "")
+        var escapeText = function (value) {
+          return String(value || "")
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#39;");
+        };
 
-        document.querySelectorAll(".top-level-link").forEach((link) => {
+        document.querySelectorAll(".top-level-link").forEach(function (link) {
           if (link.getAttribute("data-top-group") === activeGroup) {
             link.classList.add("top-level-active");
           }
         });
 
-        const sections = Array.from(document.querySelectorAll(".section-tabs"));
-        let activeSectionLink = null;
-        sections.forEach((section) => {
+        var sections = Array.from(document.querySelectorAll(".section-tabs"));
+        var activeSectionLink = null;
+        sections.forEach(function (section) {
           if (section.getAttribute("data-section") === activeGroup) {
             section.classList.add("active");
-            const subLinks = Array.from(section.querySelectorAll("a"));
-            activeSectionLink = subLinks.find((subLink) => normalizePath(subLink.getAttribute("href")) === currentPath) || null;
+            var subLinks = Array.from(section.querySelectorAll("a"));
+            activeSectionLink =
+              subLinks.find(function (subLink) {
+                return normalizePath(subLink.getAttribute("href")) === currentPath;
+              }) || null;
             if (!activeSectionLink) {
-              const parentMatches = subLinks
-                .filter((subLink) => {
-                  const hrefPath = normalizePath(subLink.getAttribute("href"));
+              var parentMatches = subLinks
+                .filter(function (subLink) {
+                  var hrefPath = normalizePath(subLink.getAttribute("href"));
                   return hrefPath !== "/" && currentPath.startsWith(hrefPath + "/");
                 })
-                .sort((a, b) => normalizePath(b.getAttribute("href")).length - normalizePath(a.getAttribute("href")).length);
+                .sort(function (a, b) {
+                  return normalizePath(b.getAttribute("href")).length - normalizePath(a.getAttribute("href")).length;
+                });
               activeSectionLink = parentMatches.length > 0 ? parentMatches[0] : null;
             }
             if (activeSectionLink) {
@@ -900,39 +907,39 @@
           }
         });
 
-        const navContext = document.getElementById("adminNavContext");
+        var navContext = document.getElementById("adminNavContext");
         if (navContext) {
-          const h = document.querySelector(".panel h1, .panel h2");
-          const pageTitle = h && h.textContent ? h.textContent.trim() : "";
-          const groupLabel = groupLabels[activeGroup] || "Today";
-          const subLabel =
+          var h = document.querySelector(".panel h1, .panel h2");
+          var pageTitle = h && h.textContent ? h.textContent.trim() : "";
+          var groupLabel = groupLabels[activeGroup] || "Today";
+          var subLabel =
             activeSectionLink && activeSectionLink.textContent
               ? activeSectionLink.textContent.replace(/\s+/g, " ").trim()
               : "";
-          const parts = ["<strong>" + escapeText(groupLabel) + "</strong>"];
+          var parts = ["<strong>" + escapeText(groupLabel) + "</strong>"];
           if (subLabel && subLabel !== groupLabel) parts.push(escapeText(subLabel));
           if (pageTitle && pageTitle !== subLabel && pageTitle !== groupLabel) parts.push(escapeText(pageTitle));
           navContext.innerHTML = parts.join(" &rsaquo; ");
           navContext.hidden = parts.length <= 1 && activeGroup === "dashboard";
         }
 
-        const tables = document.querySelectorAll("table");
-        tables.forEach((table) => {
-          const headerCells = Array.from(table.querySelectorAll("thead th")).map((th) =>
-            th.textContent ? th.textContent.trim() : ""
-          );
+        var tables = document.querySelectorAll("table");
+        tables.forEach(function (table) {
+          var headerCells = Array.from(table.querySelectorAll("thead th")).map(function (th) {
+            return th.textContent ? th.textContent.trim() : "";
+          });
 
-          table.querySelectorAll("tbody tr").forEach((row) => {
-            const rowHeader = row.querySelector("th");
-            const rowHeaderText = rowHeader?.textContent?.trim() ?? "";
-            const dataCells = Array.from(row.querySelectorAll("td"));
+          table.querySelectorAll("tbody tr").forEach(function (row) {
+            var rowHeader = row.querySelector("th");
+            var rowHeaderText = rowHeader && rowHeader.textContent ? rowHeader.textContent.trim() : "";
+            var dataCells = Array.from(row.querySelectorAll("td"));
 
-            dataCells.forEach((cell, index) => {
-              if (cell.hasAttribute("data-label") || Number(cell.getAttribute("colspan") ?? "1") > 1) {
+            dataCells.forEach(function (cell, index) {
+              if (cell.hasAttribute("data-label") || Number(cell.getAttribute("colspan") || "1") > 1) {
                 return;
               }
-              const fallback = rowHeaderText || `Field ${index + 1}`;
-              const label = headerCells[index] || fallback;
+              var fallback = rowHeaderText || "Field " + (index + 1);
+              var label = headerCells[index] || fallback;
               cell.setAttribute("data-label", label);
             });
           });
