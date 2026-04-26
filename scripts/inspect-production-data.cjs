@@ -88,12 +88,45 @@ async function main() {
     await count("Message", () => prisma.message.count());
     await count("Folio", () => prisma.folio.count());
     await count("FolioTransaction", () => prisma.folioTransaction.count());
+    await count("Outlet", () => prisma.outlet.count());
+    await count("OutletMenuItem", () => prisma.outletMenuItem.count());
+    await count("Inventory", () => prisma.inventory.count());
 
     if (hotelMatch) {
       const hid = hotelMatch.id;
       await count("  … Property (this hotel)", () => prisma.property.count({ where: { hotelId: hid } }));
       await count("  … RoomType (this hotel)", () => prisma.roomType.count({ where: { hotelId: hid } }));
+      await count("  … RoomUnit (this hotel)", () => prisma.roomUnit.count({ where: { hotelId: hid } }));
       await count("  … Booking (this hotel)", () => prisma.booking.count({ where: { hotelId: hid } }));
+      await count("  … Outlet (this hotel)", () => prisma.outlet.count({ where: { hotelId: hid } }));
+
+      const properties = await prisma.property.findMany({
+        where: { hotelId: hid },
+        select: { id: true, name: true, city: true },
+        take: 5,
+        orderBy: { createdAt: "asc" }
+      });
+      const roomTypes = await prisma.roomType.findMany({
+        where: { hotelId: hid },
+        select: { id: true, code: true, name: true, totalInventory: true, baseNightlyRate: true },
+        take: 8,
+        orderBy: { name: "asc" }
+      });
+      const roomUnits = await prisma.roomUnit.findMany({
+        where: { hotelId: hid },
+        select: { name: true, roomType: { select: { code: true } } },
+        take: 20,
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }]
+      });
+
+      console.log("\n--- Foundation samples for DEFAULT_HOTEL_SLUG ---");
+      console.log("Properties:", properties.map((p) => `${p.name}${p.city ? ` (${p.city})` : ""}`).join(" | ") || "(none)");
+      console.log("Room types:", roomTypes.map((rt) => `${rt.code}:${rt.name} inv=${rt.totalInventory} rate=${rt.baseNightlyRate}`).join(" | ") || "(none)");
+      console.log("Room units:", roomUnits.map((u) => `${u.roomType.code}/${u.name}`).join(" | ") || "(none)");
+
+      if (properties.length === 0 || roomTypes.length === 0 || roomUnits.length === 0) {
+        console.log("\n*** WARNING: Found hotel but foundational PMS setup is incomplete. Run npm run bootstrap:foundation after npm run backup:db. ***");
+      }
     }
   } finally {
     await prisma.$disconnect();

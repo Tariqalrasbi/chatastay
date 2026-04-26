@@ -154,6 +154,21 @@ See also `npm run migrate:deploy` in your deploy checklist.
 
 3. **Backups** only contain whatever is in the live DB today. If the DB was already empty when backups started, restore cannot recover old data; use an older backup file if you have one.
 
+4. **If the DB is genuinely empty and no recoverable backup exists**, restore is not possible from local files. To bring the PMS back online with clean foundational records, run the idempotent bootstrap after taking a backup:
+
+   ```bash
+   cd /var/www/chatastay
+   npm run backup:db
+   BOOTSTRAP_ADMIN_EMAIL=owner@example.com \
+   BOOTSTRAP_ADMIN_PASSWORD='change-this-password' \
+   BOOTSTRAP_ADMIN_PIN=4242 \
+   npm run bootstrap:foundation
+   npm run inspect:db
+   pm2 restart chatastay --update-env
+   ```
+
+   This creates only missing foundation records: hotel, property, room types, room units, inventory, outlets/menu, SaaS plans/subscription, integrations, and optionally an owner user. It does **not** delete or overwrite bookings, guests, folios, or messages.
+
 ## NPM scripts reference
 
 | Script | Purpose |
@@ -162,4 +177,5 @@ See also `npm run migrate:deploy` in your deploy checklist.
 | `npm run restore:db -- <path> [--pm2-offline-restore]` | Restore live DB from backup file (optional `--restart-pm2`) |
 | `npm run backup:upload:s3` | Upload newest local backup to S3-compatible storage |
 | `npm run backup:daily` | Run the same shell logic as cron (backup + retention + optional S3) |
+| `npm run bootstrap:foundation` | Idempotently creates minimum hotel/property/rooms/outlets/admin foundation when DB is empty |
 | `npm run inspect:db` | Print resolved DB path, counts, hotel slugs vs `DEFAULT_HOTEL_SLUG` |

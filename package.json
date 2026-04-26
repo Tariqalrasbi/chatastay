@@ -13,6 +13,7 @@
     "backup:db": "node scripts/backup-sqlite.cjs",
     "backup:daily": "bash scripts/cron-daily-backup.sh",
     "backup:upload:s3": "node scripts/upload-latest-backup-s3.cjs",
+    "bootstrap:foundation": "node scripts/bootstrap-foundation.cjs",
     "inspect:db": "node scripts/inspect-production-data.cjs",
     "restore:db": "node scripts/restore-sqlite.cjs",
     "start:with-migrate": "node scripts/migrate-deploy.cjs && prisma generate && node dist/index.js",
