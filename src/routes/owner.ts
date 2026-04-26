@@ -439,7 +439,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
         '<a href="/owner/hotels">Hotels</a>',
         '<a href="/owner/subscriptions">Subscriptions</a>',
       '<a href="/owner/billing">Billing</a>',
-      '<a href="/owner/users">Owner Users</a>',
+      '<a href="/owner/users">Platform Users</a>',
         '<a href="/owner/health">System Health</a>',
         '<a href="/owner/routing-health">Routing Health</a>',
         '<form method="post" action="/owner/logout"><button type="submit">Logout</button></form>'
@@ -483,7 +483,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ChatAstay Owner Console</title>
+    <title>ChatAstay Platform Console</title>
     <style>
       :root {
         --brand: #0b6e6e;
@@ -657,7 +657,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <h1>ChatAstay Owner</h1>
+          <h1>ChatAstay Platform</h1>
           <p>Platform operations console</p>
         </div>
         <nav>${navHtml}</nav>
@@ -695,8 +695,8 @@ ownerRouter.get("/login", (req, res) => {
     return;
   }
   const content = `
-<h2>Owner Console Login</h2>
-<p class="muted">Sign in as ChatAstay platform owner.</p>
+<h2>Platform Console Login</h2>
+<p class="muted">Sign in as the ChatAstay platform operator.</p>
 <form method="post" action="/owner/login" style="max-width: 420px">
   <label for="email">Email</label><br />
   <input id="email" type="email" name="email" required style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
@@ -721,7 +721,7 @@ ownerRouter.post("/login", (req, res) => {
 
   if (!envOwnerMatch && matchedUser) {
     if (!matchedUser.isActive) {
-      res.status(401).type("html").send(ownerLayout("<h2>Owner Console Login</h2><p>User is disabled.</p>", false));
+      res.status(401).type("html").send(ownerLayout("<h2>Platform Console Login</h2><p>User is disabled.</p>", false));
       return;
     }
     if (matchedUser.lockedUntil && matchedUser.lockedUntil > now) {
@@ -729,7 +729,7 @@ ownerRouter.post("/login", (req, res) => {
       res
         .status(429)
         .type("html")
-        .send(ownerLayout(`<h2>Owner Console Login</h2><p>Account locked. Try again in ${minutes} minute(s).</p>`, false));
+        .send(ownerLayout(`<h2>Platform Console Login</h2><p>Account locked. Try again in ${minutes} minute(s).</p>`, false));
       return;
     }
     if (!verifyPassword(password, matchedUser.passwordHash)) {
@@ -744,13 +744,13 @@ ownerRouter.post("/login", (req, res) => {
       const msg = shouldLock
         ? "Too many failed attempts. Account locked for 15 minutes."
         : `Invalid credentials. Failed attempt ${attempts}/${ownerLockoutAttempts}.`;
-      res.status(401).type("html").send(ownerLayout(`<h2>Owner Console Login</h2><p>${msg}</p>`, false));
+      res.status(401).type("html").send(ownerLayout(`<h2>Platform Console Login</h2><p>${msg}</p>`, false));
       return;
     }
   }
 
   if (!envOwnerMatch && !matchedUser) {
-    res.status(401).type("html").send(ownerLayout("<h2>Owner Console Login</h2><p>Invalid credentials.</p>", false));
+    res.status(401).type("html").send(ownerLayout("<h2>Platform Console Login</h2><p>Invalid credentials.</p>", false));
     return;
   }
 
@@ -1083,7 +1083,7 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
   <a class="btn-link primary" href="/owner/hotels">Manage Hotels</a>
   <a class="btn-link" href="/owner/subscriptions">Manage Subscriptions</a>
   <a class="btn-link" href="/owner/billing">Billing Actions</a>
-  <a class="btn-link" href="/owner/users">Owner Users</a>
+  <a class="btn-link" href="/owner/users">Platform Users</a>
   <a class="btn-link" href="/owner/health">System Health</a>
 </div>
 
@@ -2086,8 +2086,8 @@ ownerRouter.get("/users", requireOwnerAuth, (_req, res) => {
     .join("");
 
   const content = `
-<h2>Owner Users</h2>
-<p class="muted">Manage additional owner/support users with lockout, reset and 2FA controls.</p>
+<h2>Platform Users</h2>
+<p class="muted">Manage additional platform and support users with lockout, reset and 2FA controls.</p>
 <form method="post" action="/owner/users" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
   <input type="email" name="email" required placeholder="user@chatastay.local" style="padding:8px; border:1px solid #d8dee6; border-radius:8px; min-width:220px" />
   <input type="text" name="password" required placeholder="Password" style="padding:8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px" />

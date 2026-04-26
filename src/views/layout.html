@@ -164,6 +164,27 @@
         flex: 1;
         min-width: 0;
       }
+      .nav-context {
+        margin: -4px 0 12px;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #ffffff;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .nav-context strong {
+        color: var(--text);
+        font-weight: 700;
+      }
+      .nav-context a {
+        color: var(--wa-deep);
+        font-weight: 700;
+        text-decoration: none;
+      }
+      .nav-context a:hover {
+        text-decoration: underline;
+      }
       .admin-notif-wrap {
         position: relative;
         flex: 0 0 auto;
@@ -742,6 +763,7 @@
           <h4>Attention Needed</h4>
           <ul id="adminAttentionList"></ul>
         </section>
+        <div id="adminNavContext" class="nav-context" hidden></div>
         <section class="panel">{{content}}</section>
       </main>
     </div>
@@ -780,12 +802,15 @@
         };
         const currentPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
         const groupByPath = (path) => {
+          if (path.startsWith("/admin/workspaces")) return "modules";
+          if (path.startsWith("/admin/module/")) return "dashboard";
           if (path === "/admin/profile") return "dashboard";
           if (
             path.startsWith("/admin/users") ||
             path.startsWith("/admin/subscription") ||
             path.startsWith("/admin/billing") ||
             path.startsWith("/admin/integrations") ||
+            path.startsWith("/admin/leads") ||
             path.startsWith("/admin/setup")
           )
             return "account";
@@ -794,6 +819,7 @@
             path.startsWith("/admin/management-kpi") ||
             path.startsWith("/admin/daily-digest") ||
             path.startsWith("/admin/ai-analytics") ||
+            path.startsWith("/admin/analytics") ||
             path.startsWith("/admin/booking-funnel") ||
             path.startsWith("/admin/routing-health")
           )
@@ -828,6 +854,23 @@
           return "dashboard";
         };
         const activeGroup = groupByPath(currentPath);
+        const groupLabels = {
+          dashboard: "Today",
+          reservations: "Reservations",
+          rooms: "Stay Operations",
+          comms: "Guests & Messages",
+          fb: "Food & Beverage",
+          insights: "Reports",
+          account: "Admin",
+          modules: "Workspaces",
+        };
+        const escapeText = (value) =>
+          String(value || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
 
         document.querySelectorAll(".top-level-link").forEach((link) => {
           if (link.getAttribute("data-top-group") === activeGroup) {
@@ -836,16 +879,41 @@
         });
 
         const sections = Array.from(document.querySelectorAll(".section-tabs"));
+        let activeSectionLink = null;
         sections.forEach((section) => {
           if (section.getAttribute("data-section") === activeGroup) {
             section.classList.add("active");
-            section.querySelectorAll("a").forEach((subLink) => {
-              if (normalizePath(subLink.getAttribute("href")) === currentPath) {
-                subLink.classList.add("active-link");
-              }
-            });
+            const subLinks = Array.from(section.querySelectorAll("a"));
+            activeSectionLink =
+              subLinks.find((subLink) => normalizePath(subLink.getAttribute("href")) === currentPath) ||
+              subLinks
+                .filter((subLink) => {
+                  const hrefPath = normalizePath(subLink.getAttribute("href"));
+                  return hrefPath !== "/" && currentPath.startsWith(hrefPath + "/");
+                })
+                .sort((a, b) => normalizePath(b.getAttribute("href")).length - normalizePath(a.getAttribute("href")).length)[0] ||
+              null;
+            if (activeSectionLink) {
+              activeSectionLink.classList.add("active-link");
+            }
           }
         });
+
+        const navContext = document.getElementById("adminNavContext");
+        if (navContext) {
+          const h = document.querySelector(".panel h1, .panel h2");
+          const pageTitle = h && h.textContent ? h.textContent.trim() : "";
+          const groupLabel = groupLabels[activeGroup] || "Today";
+          const subLabel =
+            activeSectionLink && activeSectionLink.textContent
+              ? activeSectionLink.textContent.replace(/\s+/g, " ").trim()
+              : "";
+          const parts = [`<strong>${escapeText(groupLabel)}</strong>`];
+          if (subLabel && subLabel !== groupLabel) parts.push(escapeText(subLabel));
+          if (pageTitle && pageTitle !== subLabel && pageTitle !== groupLabel) parts.push(escapeText(pageTitle));
+          navContext.innerHTML = parts.join(" &rsaquo; ");
+          navContext.hidden = parts.length <= 1 && activeGroup === "dashboard";
+        }
 
         const tables = document.querySelectorAll("table");
         tables.forEach((table) => {
@@ -874,12 +942,19 @@
             "ChatAstay Admin": "تشاتا ستاي - لوحة التحكم",
             "WhatsApp-first booking ops": "إدارة الحجوزات عبر واتساب",
             "Dashboard": "لوحة التحكم",
+            "Today": "اليوم",
             "Reservations": "الحجوزات",
             "Rooms": "الغرف",
+            "Stay Operations": "عمليات الإقامة",
             "F&B": "المطاعم والمشروبات",
+            "Food & Beverage": "المطاعم والمشروبات",
             "Messages": "الرسائل",
+            "Guests & Messages": "الضيوف والرسائل",
             "Insights": "الرؤى",
+            "Admin": "الإدارة",
+            "Workspaces": "مساحات العمل",
             "Overview": "نظرة عامة",
+            "Property profile": "ملف المنشأة",
             "Property overview": "نظرة عامة على العقار",
             "Hotel Profile": "ملف الفندق",
             "Room Board": "لوحة الغرف",

@@ -1073,76 +1073,76 @@ function renderLayout(content: string, authenticated: boolean): string {
   const canNavFb =
     !useFrontDeskChrome && (!perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW"));
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
-  const moduleSwitcher =
-    workspaces.length > 1
-      ? '<a class="top-level-link" data-top-group="modules" href="/admin/workspaces">Workspaces</a>'
-      : "";
+  type AdminNavGroup = "dashboard" | "reservations" | "rooms" | "comms" | "fb" | "insights" | "account" | "modules";
+  type AdminNavItem = { group: AdminNavGroup; href: string; label: string; attrs?: string };
+  type AdminSectionLink = { href: string; label: string; attrs?: string };
+  type AdminSection = { group: AdminNavGroup; links: Array<AdminSectionLink | string> };
+  const navLink = (item: AdminNavItem) =>
+    `<a class="top-level-link" data-top-group="${item.group}" href="${item.href}"${item.attrs ? ` ${item.attrs}` : ""}>${item.label}</a>`;
+  const sectionLink = (item: AdminSectionLink) =>
+    `<a href="${item.href}"${item.attrs ? ` ${item.attrs}` : ""}>${item.label}</a>`;
+  const renderNavLinks = (items: Array<AdminNavItem | false | null | undefined>) =>
+    items
+      .filter((item): item is AdminNavItem => Boolean(item))
+      .map(navLink)
+      .join("");
+  const renderSections = (sections: Array<AdminSection | false | null | undefined>) =>
+    sections
+      .filter((section): section is AdminSection => Boolean(section))
+      .map((section) =>
+        [
+          `<div class="section-tabs" data-section="${section.group}">`,
+          ...section.links.map((link) => (typeof link === "string" ? link : sectionLink(link))),
+          "</div>"
+        ].join("")
+      )
+      .join("");
+  const moduleSwitcher: AdminNavItem | false =
+    workspaces.length > 1 ? { group: "modules", href: "/admin/workspaces", label: "Workspaces" } : false;
   const navHtml = authenticated
     ? useOwnerChrome
-      ? [
-          '<a class="top-level-link" data-top-group="dashboard" href="/admin/module/owner">Owner overview</a>',
-          ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
-            ? ['<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>']
-            : []),
-          ...(perm && hasPermission(perm, "ROOMS", "VIEW")
-            ? ['<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>']
-            : []),
-          '<a class="top-level-link" data-top-group="insights" href="/admin/management-kpi">Performance</a>',
-          ...(perm && hasPermission(perm, "BILLING", "VIEW")
-            ? ['<a class="top-level-link" data-top-group="account" href="/admin/billing">Billing</a>']
-            : []),
-          '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>',
+      ? renderNavLinks([
+          { group: "dashboard", href: "/admin/module/owner", label: "Today" },
+          perm && hasPermission(perm, "BOOKINGS", "VIEW")
+            ? { group: "reservations", href: "/admin/bookings", label: "Reservations" }
+            : false,
+          perm && hasPermission(perm, "ROOMS", "VIEW")
+            ? { group: "rooms", href: "/admin/room-board", label: "Stay Operations" }
+            : false,
+          { group: "insights", href: "/admin/management-kpi", label: "Reports" },
+          { group: "account", href: "/admin/setup", label: "Admin" },
           moduleSwitcher
-        ]
-          .filter(Boolean)
-          .join("")
+        ])
       : useRestaurantChrome
-        ? [
-            '<a class="top-level-link" data-top-group="fb" href="/admin/module/restaurant">Restaurant</a>',
-            ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B master</a>'] : []),
-            ...(canNavOutlet
-              ? [
-                  '<a class="top-level-link" data-top-group="fb" href="/admin/outlet-dashboard">Outlet board</a>',
-                  '<a class="top-level-link" data-top-group="fb" href="/admin/outlet-orders">Orders</a>'
-                ]
-              : []),
-            '<a class="top-level-link" data-top-group="fb" href="/admin/restaurant-ops">Service guide</a>',
+        ? renderNavLinks([
+            { group: "dashboard", href: "/admin/module/restaurant", label: "Today" },
+            canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Food &amp; Beverage" } : false,
             moduleSwitcher
-          ].join("")
+          ])
         : useHousekeepingManagerChrome
-          ? [
-              '<a class="top-level-link" data-top-group="rooms" href="/admin/module/housekeeping">Housekeeping</a>',
-              '<a class="top-level-link" data-top-group="rooms" href="/admin/housekeeping">Cleaning queue</a>',
-              '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Room board</a>',
-              ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
-                ? ['<a class="top-level-link" data-top-group="reservations" href="/admin/handover-sheet">Handover</a>']
-                : []),
+          ? renderNavLinks([
+              { group: "dashboard", href: "/admin/module/housekeeping", label: "Today" },
+              { group: "rooms", href: "/admin/housekeeping", label: "Stay Operations" },
               moduleSwitcher
-            ].join("")
+            ])
           : useFrontDeskChrome
-            ? [
-                '<a class="top-level-link" data-top-group="dashboard" href="/admin/module/front-desk">Front desk</a>',
-                '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
-                '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
-                ...(canNavComms
-                  ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
-                  : []),
+            ? renderNavLinks([
+                { group: "dashboard", href: "/admin/module/front-desk", label: "Today" },
+                { group: "reservations", href: "/admin/bookings", label: "Reservations" },
+                { group: "rooms", href: "/admin/room-board", label: "Stay Operations" },
+                canNavComms ? { group: "comms", href: "/admin/conversations", label: "Guests &amp; Messages" } : false,
                 moduleSwitcher
-              ].join("")
-            : [
-                '<a class="top-level-link" data-top-group="dashboard" href="/admin/profile">Dashboard</a>',
-                '<a class="top-level-link" data-top-group="reservations" href="/admin/bookings">Reservations</a>',
-                '<a class="top-level-link" data-top-group="rooms" href="/admin/room-board">Rooms</a>',
-                ...(canNavFb ? ['<a class="top-level-link" data-top-group="fb" href="/admin/fb/menu">F&amp;B</a>'] : []),
-                ...(canNavComms
-                  ? ['<a class="top-level-link" data-top-group="comms" href="/admin/conversations">Messages</a>']
-                  : []),
-                '<a class="top-level-link" data-top-group="insights" href="/admin/reports-center">Insights</a>',
-                '<a class="top-level-link" data-top-group="account" href="/admin/setup">Settings</a>',
+              ])
+            : renderNavLinks([
+                { group: "dashboard", href: "/admin/profile", label: "Today" },
+                { group: "reservations", href: "/admin/bookings", label: "Reservations" },
+                { group: "rooms", href: "/admin/room-board", label: "Stay Operations" },
+                canNavComms ? { group: "comms", href: "/admin/conversations", label: "Guests &amp; Messages" } : false,
+                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Food &amp; Beverage" } : false,
+                { group: "insights", href: "/admin/reports-center", label: "Reports" },
+                { group: "account", href: "/admin/setup", label: "Admin" },
                 moduleSwitcher
-              ]
-                .filter(Boolean)
-                .join("")
+              ])
     : '<a href="/admin/login">Login</a>';
   const moduleSwitchHtml =
     authenticated && workspaces.length > 1
@@ -1151,135 +1151,114 @@ function renderLayout(content: string, authenticated: boolean): string {
   const logoutHtml = authenticated
     ? `${moduleSwitchHtml}<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
     : "";
-  const fdTabs = [
-    '<div class="section-tabs" data-section="dashboard">',
-    '<a href="/admin/module/front-desk">Today</a>',
-    '<a href="/admin/profile">Profile</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="reservations">',
-    '<a href="/admin/bookings">Bookings</a>',
-    '<a href="/admin/calendar">Calendar</a>',
-    '<a href="/admin/inventory">Availability</a>',
-    '<a href="/admin/rooms">Rates</a>',
-    '<a href="/admin/offers">Offers</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="rooms">',
-    '<a href="/admin/room-board">Room board</a>',
-    ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
-    '<a href="/admin/handover-sheet">Handover</a>',
-    '<a href="/admin/front-desk/check-in">Check-in</a>',
-    '<a href="/admin/front-desk/check-out">Check-out</a>',
-    '<a href="/admin/shifts">Shifts</a>',
-    '<a href="/admin/shift-close">Shift close</a>',
-    '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
-    "</div>",
-    '<div class="section-tabs" data-section="comms">',
-    '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
-    '<a href="/admin/campaigns">Campaigns</a>',
-    "</div>"
-  ].join("");
-  const ownerTabs = [
-    '<div class="section-tabs" data-section="dashboard">',
-    '<a href="/admin/module/owner">Overview</a>',
-    '<a href="/admin/profile">Property profile</a>',
-    "</div>",
-    ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
-      ? [
-          '<div class="section-tabs" data-section="reservations">',
-          '<a href="/admin/bookings">Bookings</a>',
-          '<a href="/admin/calendar">Calendar</a>',
-          "</div>"
-        ]
-      : []),
-    '<div class="section-tabs" data-section="insights">',
-    '<a href="/admin/management-kpi">KPI dashboard</a>',
-    '<a href="/admin/reports-center">Reports</a>',
-    '<a href="/admin/daily-digest">Daily digest</a>',
-    '<a href="/admin/booking-funnel">Booking funnel</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="account">',
-    '<a href="/admin/setup">Settings</a>',
-    ...(perm && hasPermission(perm, "USERS", "VIEW") ? ['<a href="/admin/users">Users</a>'] : []),
-    ...(perm && hasPermission(perm, "BILLING", "VIEW")
-      ? ['<a href="/admin/billing">Billing</a>', '<a href="/admin/subscription">Subscription</a>']
-      : []),
-    '<a href="/admin/integrations">Integrations</a>',
-    "</div>"
-  ].join("");
-  const restaurantTabs = [
-    '<div class="section-tabs" data-section="fb">',
-    '<a href="/admin/module/restaurant">Today</a>',
-    '<a href="/admin/fb/menu">F&amp;B master</a>',
-    ...(canNavOutlet
-      ? [
-          '<a href="/admin/outlet-dashboard">Outlet board</a>',
-          '<a href="/admin/outlet-orders">Outlet orders</a>',
-          '<a href="/admin/restaurant-ops">Operations guide</a>'
-        ]
-      : []),
-    "</div>"
-  ].join("");
-  const hkManagerTabs = [
-    '<div class="section-tabs" data-section="rooms">',
-    '<a href="/admin/module/housekeeping">Overview</a>',
-    '<a href="/admin/housekeeping">Cleaning queue</a>',
-    '<a href="/admin/room-board">Room board</a>',
-    "</div>",
-    ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
-      ? ['<div class="section-tabs" data-section="reservations">', '<a href="/admin/handover-sheet">Handover</a>', "</div>"]
-      : [])
-  ].join("");
-  const fullTabs = [
-    '<div class="section-tabs" data-section="dashboard">',
-    '<a href="/admin/profile">Overview</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="reservations">',
-    '<a href="/admin/bookings">Bookings</a>',
-    '<a href="/admin/calendar">Calendar</a>',
-    '<a href="/admin/inventory">Availability</a>',
-    '<a href="/admin/rooms">Rates</a>',
-    '<a href="/admin/offers">Offers</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="rooms">',
-    '<a href="/admin/room-board">Room board</a>',
-    ...(canNavHousekeeping ? ['<a href="/admin/housekeeping">Housekeeping</a>'] : []),
-    '<a href="/admin/handover-sheet">Handover</a>',
-    '<a href="/admin/front-desk/check-in">Check-in</a>',
-    '<a href="/admin/front-desk/check-out">Check-out</a>',
-    '<a href="/admin/shifts">Shifts</a>',
-    '<a href="/admin/shift-close">Shift close</a>',
-    '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>',
-    "</div>",
-    '<div class="section-tabs" data-section="fb">',
-    '<a href="/admin/fb/menu">F&amp;B master</a>',
-    ...(canNavOutlet
-      ? [
-          '<a href="/admin/outlet-dashboard">Outlet board</a>',
-          '<a href="/admin/outlet-orders">Outlet orders</a>',
-          '<a href="/admin/restaurant-ops">Restaurant operations guide</a>'
-        ]
-      : []),
-    "</div>",
-    '<div class="section-tabs" data-section="comms">',
-    '<a href="/admin/conversations" data-admin-conv-link>Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span></a>',
-    '<a href="/admin/campaigns">Campaigns</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="account">',
-    '<a href="/admin/setup">Settings</a>',
-    '<a href="/admin/users">Users &amp; permissions</a>',
-    '<a href="/admin/subscription">Subscription</a>',
-    '<a href="/admin/billing">Billing</a>',
-    '<a href="/admin/integrations">Integrations</a>',
-    "</div>",
-    '<div class="section-tabs" data-section="insights">',
-    '<a href="/admin/reports-center">Reports</a>',
-    '<a href="/admin/management-kpi">KPI dashboard</a>',
-    '<a href="/admin/daily-digest">Daily digest</a>',
-    '<a href="/admin/ai-analytics">AI analytics</a>',
-    '<a href="/admin/booking-funnel">Booking funnel</a>',
-    '<a href="/admin/routing-health">Routing health</a>',
-    "</div>"
-  ].join("");
+  const todayTabs: AdminSection = {
+    group: "dashboard",
+    links: [
+      { href: workspaceHomeUrl(activeWs ?? "front_desk", String(role ?? "")), label: "Today" },
+      { href: "/admin/profile", label: "Property profile" }
+    ]
+  };
+  const reservationTabs: AdminSection = {
+    group: "reservations",
+    links: [
+      { href: "/admin/bookings", label: "Bookings" },
+      { href: "/admin/calendar", label: "Calendar" },
+      { href: "/admin/inventory", label: "Availability" },
+      { href: "/admin/rooms", label: "Rates" },
+      { href: "/admin/offers", label: "Offers" }
+    ]
+  };
+  const stayOpsTabs: AdminSection = {
+    group: "rooms",
+    links: [
+      { href: "/admin/room-board", label: "Room board" },
+      canNavHousekeeping ? { href: "/admin/housekeeping", label: "Housekeeping" } : "",
+      { href: "/admin/handover-sheet", label: "Handover" },
+      { href: "/admin/front-desk/check-in", label: "Check-in" },
+      { href: "/admin/front-desk/check-out", label: "Check-out" },
+      { href: "/admin/shifts", label: "Shifts" },
+      { href: "/admin/shift-close", label: "Shift close" },
+      '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>'
+    ].filter(Boolean)
+  };
+  const guestMessageTabs: AdminSection = {
+    group: "comms",
+    links: [
+      {
+        href: "/admin/conversations",
+        label: 'Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span>',
+        attrs: "data-admin-conv-link"
+      },
+      { href: "/admin/campaigns", label: "Campaigns" }
+    ]
+  };
+  const foodBeverageTabs: AdminSection = {
+    group: "fb",
+    links: [
+      { href: "/admin/module/restaurant", label: "Today" },
+      { href: "/admin/fb/menu", label: "F&amp;B master" },
+      ...(canNavOutlet
+        ? [
+            { href: "/admin/outlet-dashboard", label: "Outlet board" },
+            { href: "/admin/outlet-orders", label: "Outlet orders" },
+            { href: "/admin/restaurant-ops", label: "Operations guide" }
+          ]
+        : [])
+    ]
+  };
+  const reportTabs: AdminSection = {
+    group: "insights",
+    links: [
+      { href: "/admin/reports-center", label: "Reports" },
+      { href: "/admin/management-kpi", label: "KPI dashboard" },
+      { href: "/admin/daily-digest", label: "Daily digest" },
+      { href: "/admin/ai-analytics", label: "AI analytics" },
+      { href: "/admin/booking-funnel", label: "Booking funnel" },
+      { href: "/admin/routing-health", label: "Routing health" }
+    ]
+  };
+  const adminTabs: AdminSection = {
+    group: "account",
+    links: [
+      { href: "/admin/setup", label: "Settings" },
+      ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Users &amp; permissions" }] : []),
+      ...(perm && hasPermission(perm, "BILLING", "VIEW")
+        ? [
+            { href: "/admin/billing", label: "Billing" },
+            { href: "/admin/subscription", label: "Subscription" }
+          ]
+        : []),
+      { href: "/admin/integrations", label: "Integrations" }
+    ]
+  };
+  const fdTabs = renderSections([todayTabs, reservationTabs, stayOpsTabs, canNavComms ? guestMessageTabs : false]);
+  const ownerTabs = renderSections([
+    todayTabs,
+    perm && hasPermission(perm, "BOOKINGS", "VIEW") ? reservationTabs : false,
+    reportTabs,
+    adminTabs
+  ]);
+  const restaurantTabs = renderSections([todayTabs, foodBeverageTabs]);
+  const hkManagerTabs = renderSections([
+    todayTabs,
+    {
+      group: "rooms",
+      links: [
+        { href: "/admin/housekeeping", label: "Cleaning queue" },
+        { href: "/admin/room-board", label: "Room board" },
+        ...(perm && hasPermission(perm, "BOOKINGS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover" }] : [])
+      ]
+    }
+  ]);
+  const fullTabs = renderSections([
+    todayTabs,
+    reservationTabs,
+    stayOpsTabs,
+    canNavComms ? guestMessageTabs : false,
+    canNavFb ? foodBeverageTabs : false,
+    reportTabs,
+    adminTabs
+  ]);
   const sectionTabsHtml = authenticated
     ? useOwnerChrome
       ? ownerTabs
@@ -2705,7 +2684,7 @@ adminRouter.get("/workspaces", requireAuth, (req, res) => {
     return;
   }
   const labels: Record<PmsWorkspaceId, { title: string; desc: string }> = {
-    owner: { title: "Owner", desc: "Occupancy, revenue, risk, and portfolio health." },
+    owner: { title: "Hotel management", desc: "Occupancy, revenue, risk, and property account health." },
     front_desk: { title: "Front desk", desc: "Arrivals, departures, room board, folios, and reception." },
     restaurant: { title: "Restaurant / outlet", desc: "Food service, outlet board, and room charges." },
     housekeeping: { title: "Housekeeping", desc: "Cleaning queue, room readiness, and task execution." }
@@ -2755,8 +2734,8 @@ adminRouter.post("/workspaces", requireAuth, (req, res) => {
 adminRouter.get("/module/owner", requireAuth, requirePmsModule("owner"), (_req, res) => {
   const content = `${pmsWorkspacePageStyles}
 <div class="pms-hero">
-  <h1>Owner workspace</h1>
-  <p>Strategic view: performance, commercial exposure, and cross-property signals — without day-to-day reception clutter.</p>
+  <h1>Hotel management workspace</h1>
+  <p>Strategic view for the hotel account: performance, commercial exposure, and property signals — without day-to-day reception clutter.</p>
 </div>
 <div class="pms-grid">
   <div class="pms-card"><h3>KPI dashboard</h3><p>Occupancy, pace, and revenue snapshots across the estate.</p><a href="/admin/management-kpi">Open KPIs →</a></div>
@@ -2790,7 +2769,7 @@ adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"
   const content = `${pmsWorkspacePageStyles}
 <div class="pms-hero">
   <h1>Restaurant workspace</h1>
-  <p>Food &amp; beverage execution: menus, outlet flow, and guest folio context — without owner or reception noise.</p>
+  <p>Food &amp; beverage execution: menus, outlet flow, and guest folio context — without management or reception noise.</p>
 </div>
 <div class="pms-grid">
   <div class="pms-card"><h3>F&amp;B master</h3><p>Menus, pricing, and catalogue control.</p><a href="/admin/fb/menu">Open F&amp;B master →</a></div>
@@ -4736,8 +4715,8 @@ ${profilePropertyOnboarded}
 <div class="actions">
   <a class="btn-link primary" href="/admin/setup">Edit profile &amp; WhatsApp</a>
   ${platformAcquisitionActions}
-  <a class="btn-link" href="/admin/room-board">Rooms</a>
-  <a class="btn-link" href="/admin/rooms">Room rates &amp; configuration</a>
+  <a class="btn-link" href="/admin/room-board">Open stay operations</a>
+  <a class="btn-link" href="/admin/rooms">Room rates &amp; setup</a>
 </div>
 
 <div class="grid-2">
@@ -4807,7 +4786,7 @@ ${profilePropertyOnboarded}
   <div class="room-board-grid">
     ${roomStatusHtml || '<p class="muted">No room types found.</p>'}
   </div>
-  <p style="margin-top:8px"><a class="btn-link" href="/admin/room-board">Open full room board</a></p>
+  <p style="margin-top:8px"><a class="btn-link" href="/admin/room-board">Open room board</a></p>
   <style>
     .room-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; align-items:stretch; }
     .room-board-card { text-decoration:none; border-radius:10px; padding:10px; border:1px solid transparent; color:inherit; background:#fff; contain:layout; min-height:0; }
@@ -4862,7 +4841,7 @@ ${profilePropertyOnboarded}
       <p><a class="stat-link" href="/admin/conversations">${conversationsThisMonth}</a></p>
     </article>
   </div>
-  <p class="muted" style="margin-top: 8px">Quick links: <a class="inline-link" href="/admin/room-board">Room board</a> · <a class="inline-link" href="/admin/calendar">Calendar</a> · <a class="inline-link" href="/admin/inventory">Inventory</a> · <a class="inline-link" href="/admin/fb/menu">Restaurant &amp; Café</a> · <a class="inline-link" href="/admin/conversations">Conversations</a></p>
+  <p class="muted" style="margin-top: 8px">Quick links: <a class="inline-link" href="/admin/room-board">Stay operations</a> · <a class="inline-link" href="/admin/calendar">Calendar</a> · <a class="inline-link" href="/admin/inventory">Availability</a> · <a class="inline-link" href="/admin/fb/menu">Food &amp; Beverage</a> · <a class="inline-link" href="/admin/conversations">Guests &amp; Messages</a></p>
 </section>`;
 
   res.type("html").send(renderLayout(content, true));
@@ -12872,7 +12851,11 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
   </form>
   <span class="muted" style="font-size:12px;margin-left:8px">Safe to run more than once — skips duplicates by name + outlet.</span>
 </section>
-<p class="muted"><a class="inline-link" href="/admin/bookings">Back to bookings</a></p>
+<p class="muted">${
+    bookingForBanner
+      ? `<a class="inline-link" href="/admin/bookings/${encodeURIComponent(bookingForBanner.id)}">Back to booking</a>`
+      : '<a class="inline-link" href="/admin/bookings">Open bookings</a>'
+  }</p>
 </div>`;
   res.type("html").send(renderLayout(content, true));
 });
@@ -13151,7 +13134,7 @@ ${err}
   <div class="actions" style="margin-top:12px">
     <button type="submit" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Post to folio</button>
     <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Cancel</a>
-    <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">Edit menu prices</a>
+    <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">Open F&amp;B menu</a>
   </div>
 </form>`;
   res.type("html").send(renderLayout(content, true));
@@ -13257,7 +13240,7 @@ adminRouter.get("/restaurant-ops", requirePermissionAny([{ module: "OUTLET", act
   <h3>Best-practice flow</h3>
   <ol style="margin:0;padding-left:20px">
     <li><strong>KOT / kitchen tickets</strong> — Open <a href="/admin/outlet-dashboard">Outlet board</a> (kanban). Move tickets NEW → PREPARING → READY → DELIVERED. This is your single source of truth for meal execution.</li>
-    <li><strong>Orders &amp; billing</strong> — In-stay charges post to the guest folio (<a href="/admin/bookings">Bookings</a> → booking → folio). Walk-ins and direct sales use the F&amp;B menu and cashier paths already in <a href="/admin/fb/menu">Restaurant &amp; Café</a>.</li>
+    <li><strong>Orders &amp; billing</strong> — In-stay charges post to the guest folio (<a href="/admin/bookings">Bookings</a> → booking → folio). Walk-ins and direct sales use the F&amp;B menu and cashier paths already in <a href="/admin/fb/menu">Food &amp; Beverage</a>.</li>
     <li><strong>Payments</strong> — Record payments against the folio or shift close (<a href="/admin/shift-close">Shift close</a>) so cash and card reconcile per shift.</li>
     <li><strong>Handover</strong> — At shift end, ensure open KOT items are either delivered or explicitly cancelled; note variances in the shift report.</li>
   </ol>
@@ -14763,7 +14746,7 @@ ${roomChangeErrBanner}
 ${noUnitWarning}
 ${groupSectionHtml}
 <div class="actions">
-  <a class="btn-link" href="/admin/bookings">Back to reports</a>
+  <a class="btn-link" href="/admin/bookings">Back to bookings</a>
   <a class="btn-link" href="/admin/calendar?start=${formatDate(booking.checkIn)}&days=14">Open calendar around stay</a>
   <a class="btn-link primary" href="/admin/inventory?start=${formatDate(booking.checkIn)}&days=7">Adjust inventory around check-in</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/select-unit">Select room unit</a>
@@ -14779,7 +14762,7 @@ ${groupSectionHtml}
   }
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/confirm">Confirmation summary</a>
   <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/fb-order">Post F&amp;B charge (restaurant / coffee)</a>
-  <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">F&amp;B menu &amp; prices</a>
+  <a class="btn-link" href="/admin/fb/menu?bookingId=${encodeURIComponent(booking.id)}">Open F&amp;B menu</a>
 </div>
 <div class="grid-2">
   <section>
