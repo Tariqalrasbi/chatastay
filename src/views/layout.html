@@ -884,15 +884,16 @@
           if (section.getAttribute("data-section") === activeGroup) {
             section.classList.add("active");
             const subLinks = Array.from(section.querySelectorAll("a"));
-            activeSectionLink =
-              subLinks.find((subLink) => normalizePath(subLink.getAttribute("href")) === currentPath) ||
-              subLinks
+            activeSectionLink = subLinks.find((subLink) => normalizePath(subLink.getAttribute("href")) === currentPath) || null;
+            if (!activeSectionLink) {
+              const parentMatches = subLinks
                 .filter((subLink) => {
                   const hrefPath = normalizePath(subLink.getAttribute("href"));
                   return hrefPath !== "/" && currentPath.startsWith(hrefPath + "/");
                 })
-                .sort((a, b) => normalizePath(b.getAttribute("href")).length - normalizePath(a.getAttribute("href")).length)[0] ||
-              null;
+                .sort((a, b) => normalizePath(b.getAttribute("href")).length - normalizePath(a.getAttribute("href")).length);
+              activeSectionLink = parentMatches.length > 0 ? parentMatches[0] : null;
+            }
             if (activeSectionLink) {
               activeSectionLink.classList.add("active-link");
             }
@@ -908,7 +909,7 @@
             activeSectionLink && activeSectionLink.textContent
               ? activeSectionLink.textContent.replace(/\s+/g, " ").trim()
               : "";
-          const parts = [`<strong>${escapeText(groupLabel)}</strong>`];
+          const parts = ["<strong>" + escapeText(groupLabel) + "</strong>"];
           if (subLabel && subLabel !== groupLabel) parts.push(escapeText(subLabel));
           if (pageTitle && pageTitle !== subLabel && pageTitle !== groupLabel) parts.push(escapeText(pageTitle));
           navContext.innerHTML = parts.join(" &rsaquo; ");
