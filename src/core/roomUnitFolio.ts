@@ -2,7 +2,8 @@ import {
   FolioOutletCategory,
   FolioPostingTarget,
   FolioTransactionType,
-  FolioTxnPaymentStatus
+  FolioTxnPaymentStatus,
+  PaymentStatus
 } from "@prisma/client";
 import { prisma } from "../db";
 import { getFbFolioForBooking } from "./fbFolio";
@@ -33,7 +34,7 @@ export function round2(n: number): number {
 export async function computeRoomUnitFolioSummary(params: {
   hotelId: string;
   currency: string;
-  booking: { id: string; totalAmount: number } | null;
+  booking: { id: string; totalAmount: number; paymentStatus?: PaymentStatus } | null;
   paymentIntentsSucceededTotal: number;
 }): Promise<RoomUnitFolioSummary> {
   const { hotelId, currency, booking, paymentIntentsSucceededTotal } = params;
@@ -73,8 +74,16 @@ export async function computeRoomUnitFolioSummary(params: {
   folioPaymentsTotal = round2(folioPaymentsTotal);
   const fnbExtrasTotal = round2(fbMenuSubtotal + folioChargesSubtotal);
   const totalCharges = round2(roomCharges + fnbExtrasTotal + folioAdjustmentsSubtotal);
-  const amountPaidBooking = round2(paymentIntentsSucceededTotal);
   const amountPaidFolio = folioPaymentsTotal;
+  let amountPaidBooking = round2(paymentIntentsSucceededTotal);
+  if (
+    booking?.paymentStatus === PaymentStatus.SUCCEEDED &&
+    amountPaidBooking === 0 &&
+    amountPaidFolio === 0 &&
+    totalCharges > 0
+  ) {
+    amountPaidBooking = totalCharges;
+  }
   const totalPaid = round2(amountPaidBooking + amountPaidFolio);
   const outstandingBalance = Math.max(0, round2(totalCharges - totalPaid));
 

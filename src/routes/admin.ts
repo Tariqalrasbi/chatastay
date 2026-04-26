@@ -6349,6 +6349,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
     await fail("Total amount must be greater than zero. Check dates, room, meal plan, extras, and adjustment.");
     return;
   }
+  const manualPaidAmount = paymentStatus === PaymentStatus.SUCCEEDED ? totalAmount : 0;
 
   const bookingChannelRaw = String(req.body.bookingChannel ?? "DIRECT").toUpperCase();
   const bookingSourceChannel: ChannelProvider =
@@ -6362,6 +6363,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
 
   try {
     const bookingId = buildBookingId();
+    const session = getSession(req);
     await prisma.$transaction(async (tx) => {
       const overlap = await tx.booking.count({
         where: {
@@ -6441,8 +6443,26 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         guestId: guest.id,
         roomUnitId: unit.id,
         currency: hotel.currency,
-        staffId: null
+        staffId: session?.staffId ?? null
       });
+
+      if (manualPaidAmount > 0) {
+        await postPaymentToFolio(tx, {
+          hotelId: hotel.id,
+          bookingId,
+          guestId: guest.id,
+          roomUnitId: unit.id,
+          roomTypeId: rt.id,
+          currency: hotel.currency,
+          staffId: session?.staffId ?? null,
+          amount: manualPaidAmount,
+          folioPaymentMethod: paymentMethod || "CASH",
+          postingTarget: parsePostingTarget("BOOKING_ACCOUNT"),
+          chargeDate: checkIn,
+          notes: "Payment recorded during manual check-in.",
+          sourceType: FolioTxnSourceType.MANUAL_FRONTDESK
+        });
+      }
 
       await reserveInventoryForBooking({
         tx,
@@ -6507,8 +6527,8 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         mealPlan,
         idCardPath: "",
         paymentMethod,
-        paymentAmount: paymentStatus === PaymentStatus.SUCCEEDED ? totalAmount : null,
-        balanceAmount: paymentStatus === PaymentStatus.SUCCEEDED ? 0 : totalAmount
+        paymentAmount: manualPaidAmount > 0 ? manualPaidAmount : null,
+        balanceAmount: manualPaidAmount > 0 ? 0 : totalAmount
       }
     });
 
@@ -7818,7 +7838,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     computeRoomUnitFolioSummary({
       hotelId: hotel.id,
       currency: cur,
-      booking: booking ? { id: booking.id, totalAmount: booking.totalAmount } : null,
+      booking: booking ? { id: booking.id, totalAmount: booking.totalAmount, paymentStatus: booking.paymentStatus } : null,
       paymentIntentsSucceededTotal: paidAmount
     })
   ]);
@@ -9499,7 +9519,7 @@ adminRouter.get("/room-board/unit/:unitId/invoice", requirePermission("ROOMS", "
     ? await computeRoomUnitFolioSummary({
         hotelId: hotel.id,
         currency: booking.currency,
-        booking: { id: booking.id, totalAmount: booking.totalAmount },
+        booking: { id: booking.id, totalAmount: booking.totalAmount, paymentStatus: booking.paymentStatus },
         paymentIntentsSucceededTotal: paidSucceeded
       })
     : null;
@@ -9640,7 +9660,7 @@ adminRouter.post("/room-board/unit/:unitId/send-whatsapp", requirePermission("RO
     ? await computeRoomUnitFolioSummary({
         hotelId: hotel.id,
         currency: booking.currency,
-        booking: { id: booking.id, totalAmount: booking.totalAmount },
+        booking: { id: booking.id, totalAmount: booking.totalAmount, paymentStatus: booking.paymentStatus },
         paymentIntentsSucceededTotal: paidSucceeded
       })
     : null;
