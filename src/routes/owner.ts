@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { InvoiceStatus, MessageDirection, SubscriptionStatus, UserRole } from "@prisma/client";
+import { ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, SubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerSetup";
 import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
@@ -268,6 +268,105 @@ function addOwnerDays(date: Date, days: number): Date {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
   return d;
+}
+
+type OnboardingRoomRow = {
+  code: string;
+  name: string;
+  capacity: number;
+  baseNightlyRate: number;
+  totalInventory: number;
+  unitNames: string[];
+};
+
+type OnboardingMenuRow = {
+  outletCode: string;
+  outletType: OutletKind;
+  outletName: string;
+  itemCode: string;
+  itemName: string;
+  category: string | null;
+  unitPrice: number;
+};
+
+function splitSetupLines(input: string): string[][] {
+  return input
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => line.split("|").map((part) => part.trim()));
+}
+
+function safeSetupCode(input: string, fallback: string): string {
+  const code = input
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+  return code || fallback;
+}
+
+function expandUnitNames(input: string, totalInventory: number, code: string): string[] {
+  const tokens = input
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const names: string[] = [];
+  for (const token of tokens) {
+    const match = token.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (match) {
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      const step = start <= end ? 1 : -1;
+      for (let n = start; step > 0 ? n <= end : n >= end; n += step) {
+        if (names.length >= 300) break;
+        names.push(String(n));
+      }
+    } else {
+      names.push(token);
+    }
+  }
+  if (names.length === 0) {
+    for (let i = 1; i <= totalInventory; i += 1) names.push(`${code}-${i}`);
+  }
+  return [...new Set(names)].slice(0, Math.max(totalInventory, 1));
+}
+
+function parseOnboardingRooms(input: string): OnboardingRoomRow[] {
+  return splitSetupLines(input)
+    .map((parts, index) => {
+      const code = safeSetupCode(parts[0] ?? "", `ROOM_${index + 1}`);
+      const name = (parts[1] ?? code).trim() || code;
+      const capacity = Math.max(1, parseInt(parts[2] ?? "2", 10) || 2);
+      const baseNightlyRate = Math.max(0, parseFloat(parts[3] ?? "0") || 0);
+      const requestedTotal = Math.max(1, parseInt(parts[4] ?? "1", 10) || 1);
+      const unitNames = expandUnitNames(parts[5] ?? "", requestedTotal, code);
+      return { code, name, capacity, baseNightlyRate, totalInventory: unitNames.length, unitNames };
+    })
+    .filter((row) => row.name && row.code);
+}
+
+function parseOutletKind(input: string): OutletKind {
+  const normalized = String(input || "").trim().toUpperCase();
+  if (normalized === OutletKind.CAFE) return OutletKind.CAFE;
+  if (normalized === OutletKind.ACTIVITY) return OutletKind.ACTIVITY;
+  return OutletKind.RESTAURANT;
+}
+
+function parseOnboardingMenu(input: string): OnboardingMenuRow[] {
+  return splitSetupLines(input)
+    .map((parts, index) => {
+      const outletCode = safeSetupCode(parts[0] ?? "", `OUTLET_${index + 1}`);
+      const outletType = parseOutletKind(parts[1] ?? "");
+      const outletName = (parts[2] ?? outletCode).trim() || outletCode;
+      const itemCode = safeSetupCode(parts[3] ?? "", `${outletCode}_ITEM_${index + 1}`);
+      const itemName = (parts[4] ?? itemCode).trim() || itemCode;
+      const category = (parts[5] ?? "").trim() || null;
+      const unitPrice = Math.max(0, parseFloat(parts[6] ?? "0") || 0);
+      return { outletCode, outletType, outletName, itemCode, itemName, category, unitPrice };
+    })
+    .filter((row) => row.outletCode && row.itemName);
 }
 
 /** Local YYYY-MM-DD for owner dashboard date filters (avoids UTC shift). */
@@ -1515,6 +1614,13 @@ ownerRouter.get("/hotels/new", requireOwnerAuth, async (req, res) => {
   const planOptions = plans
     .map((plan) => `<option value="${escapeHtml(plan.id)}">${escapeHtml(plan.name)} - ${formatMoney(plan.monthlyPrice, "OMR")}</option>`)
     .join("");
+  const defaultRoomSetup = `STD | Standard Room | 2 | 25 | 10 | 101-110
+DLX | Deluxe Room | 3 | 35 | 6 | 201-206
+FAM | Family Room | 4 | 45 | 4 | 301-304`;
+  const defaultMenuSetup = `REST | RESTAURANT | Restaurant | REST-BFAST | Breakfast | Meals | 3
+REST | RESTAURANT | Restaurant | REST-DINNER | Dinner Buffet | Meals | 8
+CAFE | CAFE | Cafe | CAFE-COFFEE | Coffee | Drinks | 1.5
+ACT | ACTIVITY | Activities | ACT-TOUR | Local Tour | Activity | 10`;
   const error = typeof req.query.error === "string" ? String(req.query.error) : "";
   const errorMsg =
     error === "missing"
@@ -1523,10 +1629,18 @@ ownerRouter.get("/hotels/new", requireOwnerAuth, async (req, res) => {
         ? '<p class="badge alert">That hotel slug already exists. Choose a different slug.</p>'
         : error === "plan"
           ? '<p class="badge alert">Select an active subscription plan before creating the hotel.</p>'
+          : error === "rooms"
+            ? '<p class="badge alert">Add at least one valid room type row.</p>'
           : "";
   const content = `
 <h2>Add New Hotel</h2>
-<p class="muted">Create a partner hotel tenant and attach its first subscription. Room types and channel setup can be completed after creation.</p>
+<p class="muted">Create a partner hotel tenant with the same ChatAstay PMS structure, while manually configuring that hotel's rooms, WhatsApp routing, and outlet/menu catalog.</p>
+<div class="grid-4" style="margin:12px 0">
+  <article class="stat"><h3>1. Account</h3><p>Tenant + subscription</p></article>
+  <article class="stat"><h3>2. Rooms</h3><p>Types, counts, unit names</p></article>
+  <article class="stat"><h3>3. Channels</h3><p>WhatsApp routing</p></article>
+  <article class="stat"><h3>4. Menu</h3><p>F&B and activities</p></article>
+</div>
 ${errorMsg}
 <form method="post" action="/owner/hotels/new" style="display:grid;gap:14px;max-width:820px">
   <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
@@ -1557,6 +1671,10 @@ ${errorMsg}
       <label>WhatsApp phone
         <input name="whatsappPhone" placeholder="9689XXXXXXX" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
       </label>
+      <label>WhatsApp Phone Number ID
+        <input name="whatsappPhoneNumberId" placeholder="Meta Cloud API phone number ID" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+        <span class="muted" style="font-size:12px">Optional now; required before routing this hotel to WhatsApp automation.</span>
+      </label>
     </div>
   </section>
   <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
@@ -1575,6 +1693,19 @@ ${errorMsg}
         <input name="checkOutTime" value="12:00" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
       </label>
     </div>
+  </section>
+  <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
+    <h3 style="margin-top:0">Rooms, counts, and unit names</h3>
+    <p class="muted">Use one row per room type: <code>code | name | capacity | base rate | room count | unit names/range</code>. This creates room types, physical room units, and initial availability.</p>
+    <textarea name="roomSetup" rows="6" required style="width:100%;padding:10px;border:1px solid #d8dee6;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(defaultRoomSetup)}</textarea>
+    <label style="display:block;margin-top:10px">Initial availability days
+      <input type="number" name="inventoryDays" min="30" max="730" value="365" style="width:160px;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+    </label>
+  </section>
+  <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
+    <h3 style="margin-top:0">Restaurant, cafe, and activities menu</h3>
+    <p class="muted">Use one row per menu item: <code>outlet code | outlet type | outlet name | item code | item name | category | price</code>. Outlet type can be <code>RESTAURANT</code>, <code>CAFE</code>, or <code>ACTIVITY</code>.</p>
+    <textarea name="menuSetup" rows="6" style="width:100%;padding:10px;border:1px solid #d8dee6;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(defaultMenuSetup)}</textarea>
   </section>
   <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
     <h3 style="margin-top:0">Subscription</h3>
@@ -1654,10 +1785,15 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
   const currency = String(req.body.currency ?? "OMR").trim().toUpperCase().slice(0, 3) || "OMR";
   const timezone = String(req.body.timezone ?? "Asia/Muscat").trim() || "Asia/Muscat";
   const whatsappPhone = String(req.body.whatsappPhone ?? "").trim() || null;
+  const whatsappPhoneNumberId = String(req.body.whatsappPhoneNumberId ?? "").trim();
   const propertyName = String(req.body.propertyName ?? "Main Property").trim();
   const addressLine1 = String(req.body.addressLine1 ?? "").trim() || null;
   const checkInTime = String(req.body.checkInTime ?? "14:00").trim() || null;
   const checkOutTime = String(req.body.checkOutTime ?? "12:00").trim() || null;
+  const roomRows = parseOnboardingRooms(String(req.body.roomSetup ?? ""));
+  const menuRows = parseOnboardingMenu(String(req.body.menuSetup ?? ""));
+  const inventoryDaysRaw = parseInt(String(req.body.inventoryDays ?? "365"), 10);
+  const inventoryDays = Number.isFinite(inventoryDaysRaw) ? Math.min(730, Math.max(30, inventoryDaysRaw)) : 365;
   const planId = String(req.body.planId ?? "").trim();
   const status = parseOwnerSubscriptionStatus(req.body.status);
   const periodDaysRaw = parseInt(String(req.body.periodDays ?? "30"), 10);
@@ -1670,6 +1806,10 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
 
   if (!displayName || !slug || !propertyName || !planId) {
     res.redirect("/owner/hotels/new?error=missing");
+    return;
+  }
+  if (roomRows.length === 0) {
+    res.redirect("/owner/hotels/new?error=rooms");
     return;
   }
   const [existingHotel, plan] = await Promise.all([
@@ -1695,9 +1835,41 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
     const createdHotel = await tx.hotel.create({
       data: { slug, legalName, displayName, city, country, timezone, currency, whatsappPhone, isActive: true }
     });
-    await tx.property.create({
+    const property = await tx.property.create({
       data: { hotelId: createdHotel.id, name: propertyName, city, addressLine1, checkInTime, checkOutTime }
     });
+    for (const row of roomRows) {
+      const roomType = await tx.roomType.create({
+        data: {
+          hotelId: createdHotel.id,
+          propertyId: property.id,
+          code: row.code,
+          name: row.name,
+          capacity: row.capacity,
+          baseNightlyRate: row.baseNightlyRate,
+          totalInventory: row.totalInventory,
+          isActive: true
+        }
+      });
+      for (const [index, unitName] of row.unitNames.entries()) {
+        await tx.roomUnit.create({
+          data: { hotelId: createdHotel.id, roomTypeId: roomType.id, name: unitName, sortOrder: index + 1, isActive: true }
+        });
+      }
+      for (let i = 0; i < inventoryDays; i += 1) {
+        await tx.inventory.create({
+          data: {
+            hotelId: createdHotel.id,
+            propertyId: property.id,
+            roomTypeId: roomType.id,
+            date: addOwnerDays(now, i),
+            total: row.totalInventory,
+            reserved: 0,
+            closedOut: false
+          }
+        });
+      }
+    }
     await tx.subscription.create({
       data: {
         hotelId: createdHotel.id,
@@ -1707,6 +1879,46 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
         currentPeriodEnd: addOwnerDays(now, periodDays)
       }
     });
+    for (const provider of [ChannelProvider.DIRECT, ChannelProvider.WHATSAPP, ChannelProvider.BOOKING_COM, ChannelProvider.AIRBNB]) {
+      await tx.integrationConnection.create({
+        data: {
+          hotelId: createdHotel.id,
+          provider,
+          status:
+            provider === ChannelProvider.DIRECT || (provider === ChannelProvider.WHATSAPP && whatsappPhoneNumberId)
+              ? "connected"
+              : "disconnected"
+        }
+      });
+    }
+    const outletsByCode = new Map<string, string>();
+    for (const row of menuRows) {
+      let outletId = outletsByCode.get(row.outletCode);
+      if (!outletId) {
+        const outlet = await tx.outlet.create({
+          data: {
+            hotelId: createdHotel.id,
+            code: row.outletCode,
+            name: row.outletName,
+            outletType: row.outletType,
+            isActive: true
+          }
+        });
+        outletId = outlet.id;
+        outletsByCode.set(row.outletCode, outlet.id);
+      }
+      await tx.outletMenuItem.create({
+        data: {
+          hotelId: createdHotel.id,
+          outletId,
+          itemCode: row.itemCode,
+          itemName: row.itemName,
+          category: row.category,
+          unitPrice: row.unitPrice,
+          isActive: true
+        }
+      });
+    }
     if (adminPassword) {
       await tx.hotelUser.create({
         data: {
@@ -1734,12 +1946,21 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
           planCode: plan.code,
           subscriptionStatus: status,
           propertyName,
+          roomTypesCreated: roomRows.length,
+          roomUnitsCreated: roomRows.reduce((sum, row) => sum + row.unitNames.length, 0),
+          outletItemsCreated: menuRows.length,
+          whatsappRoutingConfigured: Boolean(whatsappPhoneNumberId),
           adminUserCreated: Boolean(adminPassword)
         })
       }
     });
     return createdHotel;
   });
+
+  if (whatsappPhoneNumberId) {
+    const config = loadPartnerSetupConfig(hotel.id);
+    savePartnerSetupConfig({ ...config, whatsappPhoneNumberId }, hotel.id);
+  }
 
   res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}?created=1`);
 });
