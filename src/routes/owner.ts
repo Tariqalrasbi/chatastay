@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { InvoiceStatus, MessageDirection, SubscriptionStatus } from "@prisma/client";
+import { InvoiceStatus, MessageDirection, SubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerSetup";
 import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
@@ -240,6 +240,34 @@ function formatDate(value: Date | null | undefined): string {
 
 function formatMoney(amount: number, currency: string): string {
   return new Intl.NumberFormat("en", { style: "currency", currency, maximumFractionDigits: 2 }).format(amount);
+}
+
+function slugifyTenantName(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function parseOwnerSubscriptionStatus(input: unknown): SubscriptionStatus {
+  const status = String(input ?? "").toUpperCase();
+  if (
+    status === SubscriptionStatus.TRIALING ||
+    status === SubscriptionStatus.ACTIVE ||
+    status === SubscriptionStatus.PAST_DUE ||
+    status === SubscriptionStatus.CANCELED
+  ) {
+    return status;
+  }
+  return SubscriptionStatus.TRIALING;
+}
+
+function addOwnerDays(date: Date, days: number): Date {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
 }
 
 /** Local YYYY-MM-DD for owner dashboard date filters (avoids UTC shift). */
@@ -1462,6 +1490,10 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
   const content = `
 <h2>Hotels</h2>
 <p class="muted">Manage all partner hotels, status, and subscriptions. Use <strong>Activate</strong> to reactivate a suspended hotel.</p>
+<div class="actions" style="margin-bottom:12px">
+  <a class="btn-link primary" href="/owner/hotels/new">Add New Hotel</a>
+  <a class="btn-link" href="/owner/subscriptions">Manage subscriptions</a>
+</div>
 <form method="get" action="/owner/hotels" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
   <input type="text" name="q" value="${escapeHtml(q)}" placeholder="Search by name or slug" style="min-width:260px; padding:9px; border:1px solid #d8dee6; border-radius:8px" />
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Search</button>
@@ -1472,6 +1504,244 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
 </table>`;
 
   res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.get("/hotels/new", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) {
+    res.status(403).type("html").send(ownerLayout("<h2>Add New Hotel</h2><p>Access denied.</p>", true));
+    return;
+  }
+  const plans = await prisma.plan.findMany({ where: { isActive: true }, orderBy: { monthlyPrice: "asc" } });
+  const planOptions = plans
+    .map((plan) => `<option value="${escapeHtml(plan.id)}">${escapeHtml(plan.name)} - ${formatMoney(plan.monthlyPrice, "OMR")}</option>`)
+    .join("");
+  const error = typeof req.query.error === "string" ? String(req.query.error) : "";
+  const errorMsg =
+    error === "missing"
+      ? '<p class="badge alert">Hotel name, slug, property name, and plan are required.</p>'
+      : error === "duplicate"
+        ? '<p class="badge alert">That hotel slug already exists. Choose a different slug.</p>'
+        : error === "plan"
+          ? '<p class="badge alert">Select an active subscription plan before creating the hotel.</p>'
+          : "";
+  const content = `
+<h2>Add New Hotel</h2>
+<p class="muted">Create a partner hotel tenant and attach its first subscription. Room types and channel setup can be completed after creation.</p>
+${errorMsg}
+<form method="post" action="/owner/hotels/new" style="display:grid;gap:14px;max-width:820px">
+  <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
+    <h3 style="margin-top:0">Hotel account</h3>
+    <div class="grid-2">
+      <label>Hotel display name
+        <input name="displayName" required placeholder="Example Beach Resort" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Slug
+        <input name="slug" required placeholder="example-beach-resort" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+        <span class="muted" style="font-size:12px">Used for public URL and routing.</span>
+      </label>
+      <label>Legal name
+        <input name="legalName" placeholder="Example Beach Resort LLC" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>City
+        <input name="city" placeholder="Muscat" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Country
+        <input name="country" value="OM" maxlength="2" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Currency
+        <input name="currency" value="OMR" maxlength="3" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px;text-transform:uppercase" />
+      </label>
+      <label>Timezone
+        <input name="timezone" value="Asia/Muscat" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>WhatsApp phone
+        <input name="whatsappPhone" placeholder="9689XXXXXXX" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+  </section>
+  <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
+    <h3 style="margin-top:0">First property</h3>
+    <div class="grid-2">
+      <label>Property name
+        <input name="propertyName" required value="Main Property" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Address
+        <input name="addressLine1" placeholder="Street, city" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Check-in time
+        <input name="checkInTime" value="14:00" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Check-out time
+        <input name="checkOutTime" value="12:00" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+  </section>
+  <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
+    <h3 style="margin-top:0">Subscription</h3>
+    <div class="grid-2">
+      <label>Plan
+        <select name="planId" required style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px">
+          ${planOptions || '<option value="">No active plans available</option>'}
+        </select>
+      </label>
+      <label>Status
+        <select name="status" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px">
+          <option value="TRIALING">TRIALING</option>
+          <option value="ACTIVE">ACTIVE</option>
+          <option value="PAST_DUE">PAST_DUE</option>
+          <option value="CANCELED">CANCELED</option>
+        </select>
+      </label>
+      <label>Trial/period days
+        <input type="number" name="periodDays" min="1" max="365" value="30" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+  </section>
+  <section class="panel" style="box-shadow:none;padding:16px;border-radius:12px">
+    <h3 style="margin-top:0">Optional hotel admin user</h3>
+    <p class="muted" style="margin-top:0">Leave password empty if you want to create hotel users later from the hotel admin users screen.</p>
+    <div class="grid-2">
+      <label>Admin full name
+        <input name="adminFullName" placeholder="Hotel Owner" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Admin email
+        <input type="email" name="adminEmail" placeholder="owner@example.com" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Username
+        <input name="adminUsername" placeholder="owner" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>Password
+        <input type="text" name="adminPassword" minlength="8" placeholder="At least 8 characters" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label>PIN
+        <input name="adminPin" minlength="4" maxlength="12" placeholder="Optional staff PIN" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+  </section>
+  <div class="actions">
+    <button type="submit" style="padding:10px 16px;border:0;border-radius:10px;background:#0b6e6e;color:#fff;font-weight:800;cursor:pointer">Create Hotel & Subscription</button>
+    <a class="btn-link" href="/owner/hotels">Cancel</a>
+  </div>
+</form>
+<script>
+  (function () {
+    var nameInput = document.querySelector('input[name="displayName"]');
+    var slugInput = document.querySelector('input[name="slug"]');
+    if (!nameInput || !slugInput) return;
+    function slugify(value) {
+      return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+    }
+    nameInput.addEventListener("input", function () {
+      if (!slugInput.dataset.touched) slugInput.value = slugify(nameInput.value);
+    });
+    slugInput.addEventListener("input", function () { slugInput.dataset.touched = "1"; slugInput.value = slugify(slugInput.value); });
+  })();
+</script>`;
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) {
+    res.status(403).type("html").send(ownerLayout("<h2>Add New Hotel</h2><p>Access denied.</p>", true));
+    return;
+  }
+
+  const displayName = String(req.body.displayName ?? "").trim();
+  const slug = slugifyTenantName(String(req.body.slug ?? displayName));
+  const legalName = String(req.body.legalName ?? "").trim() || `${displayName} LLC`;
+  const city = String(req.body.city ?? "").trim() || null;
+  const country = String(req.body.country ?? "OM").trim().toUpperCase().slice(0, 2) || "OM";
+  const currency = String(req.body.currency ?? "OMR").trim().toUpperCase().slice(0, 3) || "OMR";
+  const timezone = String(req.body.timezone ?? "Asia/Muscat").trim() || "Asia/Muscat";
+  const whatsappPhone = String(req.body.whatsappPhone ?? "").trim() || null;
+  const propertyName = String(req.body.propertyName ?? "Main Property").trim();
+  const addressLine1 = String(req.body.addressLine1 ?? "").trim() || null;
+  const checkInTime = String(req.body.checkInTime ?? "14:00").trim() || null;
+  const checkOutTime = String(req.body.checkOutTime ?? "12:00").trim() || null;
+  const planId = String(req.body.planId ?? "").trim();
+  const status = parseOwnerSubscriptionStatus(req.body.status);
+  const periodDaysRaw = parseInt(String(req.body.periodDays ?? "30"), 10);
+  const periodDays = Number.isFinite(periodDaysRaw) ? Math.min(365, Math.max(1, periodDaysRaw)) : 30;
+  const adminPassword = String(req.body.adminPassword ?? "").trim();
+  const adminEmail = String(req.body.adminEmail ?? "").trim().toLowerCase();
+  const adminUsername = slugifyTenantName(String(req.body.adminUsername ?? "owner")).replaceAll("-", "_") || "owner";
+  const adminFullName = String(req.body.adminFullName ?? "Hotel Owner").trim() || "Hotel Owner";
+  const adminPin = String(req.body.adminPin ?? "").trim();
+
+  if (!displayName || !slug || !propertyName || !planId) {
+    res.redirect("/owner/hotels/new?error=missing");
+    return;
+  }
+  const [existingHotel, plan] = await Promise.all([
+    prisma.hotel.findUnique({ where: { slug } }),
+    prisma.plan.findFirst({ where: { id: planId, isActive: true } })
+  ]);
+  if (existingHotel) {
+    res.redirect("/owner/hotels/new?error=duplicate");
+    return;
+  }
+  if (!plan) {
+    res.redirect("/owner/hotels/new?error=plan");
+    return;
+  }
+  if (adminPassword && (!adminEmail || adminPassword.length < 8)) {
+    res.redirect("/owner/hotels/new?error=missing");
+    return;
+  }
+
+  const actorEmail = getOwnerSessionEmail(req) ?? ownerActorEmail;
+  const now = ownerStartOfDay(new Date());
+  const hotel = await prisma.$transaction(async (tx) => {
+    const createdHotel = await tx.hotel.create({
+      data: { slug, legalName, displayName, city, country, timezone, currency, whatsappPhone, isActive: true }
+    });
+    await tx.property.create({
+      data: { hotelId: createdHotel.id, name: propertyName, city, addressLine1, checkInTime, checkOutTime }
+    });
+    await tx.subscription.create({
+      data: {
+        hotelId: createdHotel.id,
+        planId: plan.id,
+        status,
+        currentPeriodStart: now,
+        currentPeriodEnd: addOwnerDays(now, periodDays)
+      }
+    });
+    if (adminPassword) {
+      await tx.hotelUser.create({
+        data: {
+          hotelId: createdHotel.id,
+          fullName: adminFullName,
+          email: adminEmail,
+          username: adminUsername,
+          passwordHash: hashPassword(adminPassword),
+          pinHash: adminPin.length >= 4 ? hashPassword(adminPin) : null,
+          role: UserRole.OWNER,
+          isActive: true
+        }
+      });
+    }
+    await tx.auditLog.create({
+      data: {
+        hotelId: createdHotel.id,
+        actorEmail,
+        actorUserId: `OWNER:${actorEmail}`,
+        action: "HOTEL_CREATED_BY_OWNER",
+        entityType: "Hotel",
+        entityId: createdHotel.id,
+        metadataJson: JSON.stringify({
+          slug,
+          planCode: plan.code,
+          subscriptionStatus: status,
+          propertyName,
+          adminUserCreated: Boolean(adminPassword)
+        })
+      }
+    });
+    return createdHotel;
+  });
+
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}?created=1`);
 });
 
 ownerRouter.post("/hotels/:id/toggle-active", requireOwnerAuth, async (req, res) => {
