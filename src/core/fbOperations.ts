@@ -9,6 +9,7 @@ import {
   FolioTxnPaymentStatus,
   FolioTxnSourceType
 } from "@prisma/client";
+import { randomUUID } from "crypto";
 import { prisma } from "../db";
 import { optionalHotelUserId } from "./folioService";
 import { bucketFolioPaymentMethod } from "./shiftCloseReport";
@@ -236,7 +237,13 @@ export async function recordWalkInDirectSale(params: {
   lines: { menuItemId: string; qty: number }[];
   /** When set (cashier panel), every line must match this outlet — prevents mixed-outlet posts. */
   outletScope?: FbOutletType | null;
-}): Promise<void> {
+}): Promise<{
+  saleId: string;
+  paymentId: string;
+  total: number;
+  paymentMethod: string;
+  lineCount: number;
+}> {
   const filtered = params.lines.filter((l) => l.qty >= 1);
   if (filtered.length === 0) throw new Error("Select at least one menu item.");
 
@@ -280,7 +287,16 @@ export async function recordWalkInDirectSale(params: {
       ? FolioTxnSourceType.POS_RESTAURANT
       : FolioTxnSourceType.POS_CAFE;
 
-  const walkInCreatedBy = optionalHotelUserId(params.staffId);
+  const candidateCreatedBy = optionalHotelUserId(params.staffId);
+  const validCreator = candidateCreatedBy
+    ? await prisma.hotelUser.findFirst({
+        where: { id: candidateCreatedBy, hotelId: params.hotelId },
+        select: { id: true }
+      })
+    : null;
+  const walkInCreatedBy = validCreator?.id;
+  const saleId = `POS-${randomUUID()}`;
+  let paymentId = "";
 
   await prisma.$transaction(async (tx) => {
     const chargeIds: string[] = [];
@@ -318,6 +334,8 @@ export async function recordWalkInDirectSale(params: {
           postedAt: new Date(),
           notes: "Quick cashier / walk-in (charge)",
           internalNote: "POS_WALK_IN_CASHIER",
+          externalSourceId: saleId,
+          externalSourcePayload: JSON.stringify({ source: "FB_DIRECT_SALE", saleId }),
           ...(walkInCreatedBy ? { createdByUserId: walkInCreatedBy } : {}),
           isVoided: false
         }
@@ -325,7 +343,7 @@ export async function recordWalkInDirectSale(params: {
       chargeIds.push(row.id);
     }
 
-    await tx.folioTransaction.create({
+    const payment = await tx.folioTransaction.create({
       data: {
         hotelId: params.hotelId,
         folioId: null,
@@ -351,11 +369,16 @@ export async function recordWalkInDirectSale(params: {
         postedAt: new Date(),
         notes: notes ?? `Walk-in direct sale; lines: ${chargeIds.length}`,
         internalNote: "POS_WALK_IN_CASHIER_PAY",
+        externalSourceId: saleId,
+        externalSourcePayload: JSON.stringify({ source: "FB_DIRECT_SALE", saleId, chargeIds }),
         ...(walkInCreatedBy ? { createdByUserId: walkInCreatedBy } : {}),
         isVoided: false
       }
     });
+    paymentId = payment.id;
   });
+
+  return { saleId, paymentId, total: totalFn, paymentMethod: method, lineCount: resolved.length };
 }
 
 function mapOutletCategoryToRevenue(o: FolioOutletCategory): FolioRevenueCategory {

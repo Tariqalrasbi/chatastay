@@ -1885,6 +1885,115 @@ async function sendInvoicePdfForBooking(params: {
   return { sent: true, skipped: false };
 }
 
+type DirectSaleReceipt = {
+  paymentId: string;
+  saleId: string;
+  issuedAt: Date;
+  hotelName: string;
+  currency: string;
+  paymentMethod: string;
+  total: number;
+  note: string | null;
+  lines: Array<{ itemName: string; quantity: number; unitPrice: number; lineTotal: number }>;
+};
+
+async function loadDirectSaleReceipt(hotelId: string, paymentId: string): Promise<DirectSaleReceipt | null> {
+  const [hotel, payment] = await Promise.all([
+    prisma.hotel.findUnique({ where: { id: hotelId }, select: { displayName: true, currency: true } }),
+    prisma.folioTransaction.findFirst({
+      where: {
+        id: paymentId,
+        hotelId,
+        transactionType: FolioTransactionType.PAYMENT,
+        internalNote: "POS_WALK_IN_CASHIER_PAY",
+        isVoided: false
+      }
+    })
+  ]);
+  if (!hotel || !payment) return null;
+
+  const saleId = payment.externalSourceId || payment.id;
+  const charges = payment.externalSourceId
+    ? await prisma.folioTransaction.findMany({
+        where: {
+          hotelId,
+          externalSourceId: payment.externalSourceId,
+          transactionType: FolioTransactionType.FNB_CHARGE,
+          isVoided: false
+        },
+        orderBy: { createdAt: "asc" }
+      })
+    : [];
+
+  return {
+    paymentId: payment.id,
+    saleId,
+    issuedAt: payment.postedAt,
+    hotelName: hotel.displayName,
+    currency: payment.currency || hotel.currency,
+    paymentMethod: payment.folioPaymentMethod || "CASH",
+    total: payment.netAmount,
+    note: payment.notes,
+    lines: charges.map((c) => ({
+      itemName: c.itemName,
+      quantity: c.quantity,
+      unitPrice: c.unitPrice,
+      lineTotal: c.netAmount
+    }))
+  };
+}
+
+function buildDirectSaleReceiptText(receipt: DirectSaleReceipt): string {
+  const lineText =
+    receipt.lines.length > 0
+      ? receipt.lines
+          .map((l) => `${l.itemName} x${l.quantity} = ${l.lineTotal.toFixed(2)} ${receipt.currency}`)
+          .join("\n")
+      : "POS sale";
+  return [
+    `${receipt.hotelName}`,
+    `Receipt: ${receipt.saleId}`,
+    `Date: ${formatDate(receipt.issuedAt)}`,
+    "",
+    lineText,
+    "",
+    `Total paid: ${receipt.total.toFixed(2)} ${receipt.currency}`,
+    `Payment method: ${receipt.paymentMethod}`,
+    "Thank you."
+  ].join("\n");
+}
+
+async function sendDirectSaleReceiptWhatsApp(params: {
+  hotelId: string;
+  paymentId: string;
+  phoneRaw: string;
+}): Promise<{ sent: boolean; error?: string }> {
+  const receipt = await loadDirectSaleReceipt(params.hotelId, params.paymentId);
+  if (!receipt) return { sent: false, error: "Receipt not found." };
+  const to = normalizePhoneForWhatsApp(params.phoneRaw);
+  if (!to) return { sent: false, error: "Guest WhatsApp number is missing or invalid." };
+
+  const partner = loadPartnerSetupConfig(params.hotelId);
+  try {
+    await sendWhatsAppText({
+      to,
+      body: buildDirectSaleReceiptText(receipt),
+      phoneNumberId: partner.whatsappPhoneNumberId || undefined
+    });
+  } catch (error) {
+    return { sent: false, error: error instanceof Error ? error.message.slice(0, 500) : "Failed to send receipt via WhatsApp." };
+  }
+
+  await logAudit({
+    hotelId: params.hotelId,
+    action: "FB_WALK_IN_RECEIPT_SENT",
+    entityType: "FolioTransaction",
+    entityId: receipt.paymentId,
+    metadata: { saleId: receipt.saleId, sentTo: to }
+  });
+  return { sent: true };
+}
+
 async function ensureDefaultFbMenu(hotelId: string): Promise<void> {
   const n = await prisma.menuItem.count({ where: { hotelId } });
   if (n > 0) return;
@@ -12328,7 +12437,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
     if (explicitGuestQ) p.set("guest_q", explicitGuestQ);
     if (explicitRefQ) p.set("ref_q", explicitRefQ);
     if (legacyQ && !explicitGuestQ && !explicitRefQ) p.set("q", legacyQ);
-    res.redirect(`/admin/fb/menu?${p.toString()}`);
+    res.redirect(`/admin/fb/menu?${p.toString()}#fb-inhouse`);
     return;
   }
 
@@ -12346,7 +12455,30 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
   });
 
   const directOk = req.query.directOk === "1";
+  const directPaymentId = typeof req.query.directPaymentId === "string" ? req.query.directPaymentId.trim() : "";
+  const directReceipt = directPaymentId ? await loadDirectSaleReceipt(hotel.id, directPaymentId) : null;
   const directErrStr = typeof req.query.directErr === "string" ? req.query.directErr.slice(0, 500) : "";
+  const directWhatsAppSent = req.query.directWhatsAppSent === "1";
+  const directWhatsAppErr =
+    typeof req.query.directWhatsAppErr === "string" ? req.query.directWhatsAppErr.trim().slice(0, 500) : "";
+  const directSuccessBanner =
+    directOk && directReceipt
+      ? `<div class="fb-pos-card" style="background:#ecfdf5;border:2px solid #34d399;margin-bottom:16px;padding:16px 18px;border-radius:12px" role="status">
+          <strong style="display:block;margin-bottom:8px;color:#065f46;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Sale confirmed</strong>
+          <p style="margin:0 0 10px;font-size:15px;color:#064e3b;font-weight:700">Receipt <code>${escapeHtml(directReceipt.saleId)}</code> · ${escapeHtml(formatMoney(directReceipt.total, directReceipt.currency))} paid by ${escapeHtml(directReceipt.paymentMethod)}. Posted to F&amp;B direct sales and walk-in payments.</p>
+          ${directWhatsAppSent ? '<p class="badge ok" style="margin:0 0 10px;width:fit-content">Receipt sent via WhatsApp.</p>' : ""}
+          ${directWhatsAppErr ? `<p class="badge alert" style="margin:0 0 10px;width:fit-content">${escapeHtml(directWhatsAppErr)}</p>` : ""}
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+            <a class="btn-link primary" target="_blank" rel="noopener" href="/admin/fb/menu/direct-sale/${encodeURIComponent(directReceipt.paymentId)}/receipt">Print receipt</a>
+            <form method="post" action="/admin/fb/menu/direct-sale/${encodeURIComponent(directReceipt.paymentId)}/send-whatsapp" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:0">
+              <label style="font-size:12px;font-weight:700;color:#065f46">Guest WhatsApp number<br/><input name="guest_whatsapp" placeholder="+968..." style="min-width:220px;padding:8px 10px;border:1px solid #86efac;border-radius:8px" /></label>
+              <button type="submit" class="btn-link" style="padding:8px 12px">Send receipt</button>
+            </form>
+          </div>
+        </div>`
+      : directOk
+        ? `<p class="badge ok" style="padding:12px 14px;margin-bottom:12px">Walk-in sale posted to ledger (F&amp;B lines + payment).</p>`
+        : "";
   const expenseSavedFlag = req.query.expenseSaved === "1";
   const expenseErrStr = typeof req.query.expenseErr === "string" ? req.query.expenseErr.slice(0, 400) : "";
 
@@ -12470,6 +12602,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
         </select>
       </label>
       <label style="flex:1;min-width:220px">Note / receipt ref<br/><input type="text" name="notes" maxlength="500" placeholder="Optional" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
+      <label style="flex:1;min-width:220px">Guest WhatsApp (optional)<br/><input type="tel" name="guest_whatsapp" maxlength="32" placeholder="+968..." style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
     </div>
     <div class="fb-cashier-footer">
       <p id="fb-cashier-total" style="margin:0;font-size:1.15rem;font-weight:800;color:#134e4a">Total: <span id="fb-cashier-total-num">0.00 ${escapeHtml(hotel.currency)}</span></p>
@@ -12608,6 +12741,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
   <a href="#fb-sales-summary">Sales report</a>
   <a href="#fb-catalog">Menu admin</a>
 </nav>
+${directSuccessBanner}
 ${snapshotMasterHtml}
 ${outletMasterStripHtml}
 ${fbQuickCashierSectionHtml}
@@ -12616,14 +12750,13 @@ ${mergedBanner}
 ${chargeSuccessFlag && chargeSuccessBanner ? `<div class="fb-pos-card" style="background:#ecfdf5;border:2px solid #34d399;margin-bottom:16px;padding:16px 18px;border-radius:12px" role="status"><strong style="display:block;margin-bottom:8px;color:#065f46;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Success — folio updated</strong>${chargeSuccessBanner}</div>` : ""}
 ${outletWarnFb && chargeSuccessFlag ? `<div class="fb-pos-card" style="background:#fffbeb;border:2px solid #f59e0b;margin-bottom:16px;padding:14px 16px;border-radius:12px" role="alert"><strong style="display:block;margin-bottom:6px;color:#92400e;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Outlet WhatsApp notice</strong><p style="margin:0;font-size:14px;color:#78350f;font-weight:600">${escapeHtml(outletWarnFb)}</p></div>` : ""}
 ${chargeErr ? `<p class="badge alert" style="padding:12px 14px;font-size:14px;margin-bottom:14px" role="alert"><strong>Post failed.</strong> ${escapeHtml(chargeErr)}</p>` : ""}
-${directOk ? `<p class="badge ok" style="padding:12px 14px;margin-bottom:12px">Walk-in sale posted to ledger (F&amp;B lines + payment).</p>` : ""}
 ${directErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom:12px">${escapeHtml(directErrStr)}</p>` : ""}
 ${expenseSavedFlag ? `<p class="badge ok" style="padding:12px 14px;margin-bottom:12px">Operational expense saved.</p>` : ""}
 ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom:12px">${escapeHtml(expenseErrStr)}</p>` : ""}
 <section id="fb-lookup" class="fb-pos-card" style="background:#f0f9ff;border:1px solid #7dd3fc;margin-bottom:16px;scroll-margin-top:72px">
   <h2 style="margin:0 0 10px;font-size:1.1rem">In-house guest lookup</h2>
   <p class="muted" style="margin:0 0 12px;font-size:13px"><strong>1)</strong> Stay date · <strong>2)</strong> Room / unit (or leave “All rooms”) · <strong>3)</strong> Filter by name, phone, or reference · <strong>4)</strong> Choose guest in the list to load folio — <em>no need to paste booking ID first</em>. Booking ID remains available as a fallback under Folio charge.</p>
-  <form id="fb-guest-filters" method="get" action="/admin/fb/menu" style="margin-bottom:14px">
+  <form id="fb-guest-filters" method="get" action="/admin/fb/menu#fb-lookup" style="margin-bottom:14px">
     <input type="hidden" name="report_start" value="${escapeHtml(reportStartVal)}" />
     <input type="hidden" name="report_end" value="${escapeHtml(reportEndVal)}" />
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-items:end">
@@ -12640,7 +12773,7 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px">
       <button type="submit" class="btn-link primary" style="padding:10px 18px;border:0;border-radius:8px;background:#0ea5e9;color:#fff;font-weight:700">Apply name &amp; ref filters</button>
-      <a class="muted" style="font-size:13px" href="/admin/fb/menu?ops_date=${encodeURIComponent(opsDateVal)}&amp;report_start=${encodeURIComponent(reportStartVal)}&amp;report_end=${encodeURIComponent(reportEndVal)}">Clear searches</a>
+      <a class="muted" style="font-size:13px" href="/admin/fb/menu?ops_date=${encodeURIComponent(opsDateVal)}&amp;report_start=${encodeURIComponent(reportStartVal)}&amp;report_end=${encodeURIComponent(reportEndVal)}#fb-lookup">Clear searches</a>
       <span class="muted" style="font-size:12px">Showing <strong>${inHouseList.length}</strong> match(es) · <strong>${fullInHouseList.length}</strong> in-house tonight</span>
     </div>
   </form>
@@ -12670,7 +12803,7 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
         if (rq) p.set("ref_q", rq);
         var lq = "${escapeHtml(legacyQ)}";
         if (lq && !gq && !rq) p.set("q", lq);
-        window.location.href = "/admin/fb/menu?" + p.toString();
+        window.location.href = "/admin/fb/menu?" + p.toString() + "#fb-inhouse";
       });
     })();
   </script>
@@ -12894,7 +13027,20 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
             input.focus();
             return;
           }
-          window.location.href = "/admin/fb/menu?bookingId=" + encodeURIComponent(id);
+          var p = new URLSearchParams();
+          p.set("bookingId", id);
+          p.set("ops_date", "${escapeHtml(opsDateVal)}");
+          p.set("report_start", "${escapeHtml(reportStartVal)}");
+          p.set("report_end", "${escapeHtml(reportEndVal)}");
+          var ru = "${escapeHtml(roomUnitFilter)}";
+          if (ru) p.set("room_unit_id", ru);
+          var gq = "${escapeHtml(explicitGuestQ)}";
+          if (gq) p.set("guest_q", gq);
+          var rq = "${escapeHtml(explicitRefQ)}";
+          if (rq) p.set("ref_q", rq);
+          var lq = "${escapeHtml(legacyQ)}";
+          if (lq && !gq && !rq) p.set("q", lq);
+          window.location.href = "/admin/fb/menu?" + p.toString() + "#fb-inhouse";
         });
       }
       if (form && root && input) {
@@ -13159,6 +13305,7 @@ adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, 
   }
   const paymentMethod = String(req.body.payment_method ?? "CASH");
   const notes = String(req.body.notes ?? "").trim();
+  const guestWhatsapp = String(req.body.guest_whatsapp ?? "").trim();
   const outletRaw = String(req.body.cashier_outlet ?? "RESTAURANT").toUpperCase();
   const outletScope = outletRaw === "COFFEE_SHOP" ? FbOutletType.COFFEE_SHOP : FbOutletType.RESTAURANT;
   const menuItems = await prisma.menuItem.findMany({
@@ -13173,7 +13320,7 @@ adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, 
     lines.push({ menuItemId: m.id, qty });
   }
   try {
-    await recordWalkInDirectSale({
+    const result = await recordWalkInDirectSale({
       hotelId: hotel.id,
       currency: hotel.currency,
       staffId: session.staffId,
@@ -13182,19 +13329,103 @@ adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, 
       lines,
       outletScope
     });
+    let whatsAppError = "";
+    if (guestWhatsapp) {
+      const sent = await sendDirectSaleReceiptWhatsApp({
+        hotelId: hotel.id,
+        paymentId: result.paymentId,
+        phoneRaw: guestWhatsapp
+      });
+      if (!sent.sent) whatsAppError = sent.error ?? "Receipt was posted but WhatsApp sending failed.";
+    }
     await logAudit({
       hotelId: hotel.id,
       action: "FB_WALK_IN_DIRECT_SALE",
       entityType: "Hotel",
       entityId: hotel.id,
-      metadata: { lineCount: lines.length }
+      metadata: { lineCount: lines.length, saleId: result.saleId, total: result.total, paymentMethod: result.paymentMethod }
     });
-    res.redirect("/admin/fb/menu?directOk=1");
+    const q = new URLSearchParams({
+      directOk: "1",
+      directPaymentId: result.paymentId
+    });
+    if (guestWhatsapp && !whatsAppError) q.set("directWhatsAppSent", "1");
+    if (whatsAppError) q.set("directWhatsAppErr", whatsAppError);
+    res.redirect(`/admin/fb/menu?${q.toString()}#fb-cashier-sale`);
   } catch (e) {
     res.redirect(
       "/admin/fb/menu?directErr=" + encodeURIComponent(e instanceof Error ? e.message : "Could not post walk-in sale.")
     );
   }
+});
+
+adminRouter.get("/fb/menu/direct-sale/:paymentId/receipt", requireFbOperationsEdit(), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.status(404).send("Hotel not found");
+    return;
+  }
+  const receipt = await loadDirectSaleReceipt(hotel.id, String(req.params.paymentId ?? ""));
+  if (!receipt) {
+    res.status(404).send("Receipt not found");
+    return;
+  }
+  const lineRows = receipt.lines
+    .map(
+      (l) => `<tr>
+        <td>${escapeHtml(l.itemName)}</td>
+        <td class="num">${l.quantity}</td>
+        <td class="num">${escapeHtml(formatMoney(l.unitPrice, receipt.currency))}</td>
+        <td class="num">${escapeHtml(formatMoney(l.lineTotal, receipt.currency))}</td>
+      </tr>`
+    )
+    .join("");
+  const content = `
+<section class="receipt-sheet">
+  <div class="actions" style="margin-bottom:14px">
+    <a class="btn-link" href="/admin/fb/menu?directOk=1&amp;directPaymentId=${encodeURIComponent(receipt.paymentId)}#fb-cashier-sale">Back to POS</a>
+    <button type="button" class="btn-link primary" onclick="window.print()">Print receipt</button>
+  </div>
+  <h2 style="margin-bottom:4px">${escapeHtml(receipt.hotelName)}</h2>
+  <p class="muted" style="margin-top:0">Direct POS receipt · ${escapeHtml(receipt.saleId)} · ${escapeHtml(formatDate(receipt.issuedAt))}</p>
+  <table>
+    <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Unit</th><th class="num">Total</th></tr></thead>
+    <tbody>${lineRows || '<tr><td colspan="4">POS sale</td></tr>'}</tbody>
+    <tfoot>
+      <tr><td colspan="3" class="num"><strong>Total paid</strong></td><td class="num"><strong>${escapeHtml(formatMoney(receipt.total, receipt.currency))}</strong></td></tr>
+      <tr><td colspan="3" class="num">Payment method</td><td class="num">${escapeHtml(receipt.paymentMethod)}</td></tr>
+    </tfoot>
+  </table>
+  ${receipt.note ? `<p class="muted">Note: ${escapeHtml(receipt.note)}</p>` : ""}
+</section>
+<style>
+  .receipt-sheet { max-width: 760px; margin: 0 auto; background: #fff; border: 1px solid #d8dee6; border-radius: 12px; padding: 18px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  @media print {
+    .sidebar, .section-tabs, nav, .actions { display:none !important; }
+    body { background:#fff; }
+    .receipt-sheet { border:0; max-width:100%; padding:0; }
+  }
+</style>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/fb/menu/direct-sale/:paymentId/send-whatsapp", requireFbOperationsEdit(), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/fb/menu?directErr=" + encodeURIComponent("Hotel not found."));
+    return;
+  }
+  const paymentId = String(req.params.paymentId ?? "");
+  const result = await sendDirectSaleReceiptWhatsApp({
+    hotelId: hotel.id,
+    paymentId,
+    phoneRaw: String(req.body.guest_whatsapp ?? "")
+  });
+  const q = new URLSearchParams({ directOk: "1", directPaymentId: paymentId });
+  if (result.sent) q.set("directWhatsAppSent", "1");
+  if (result.error) q.set("directWhatsAppErr", result.error);
+  res.redirect(`/admin/fb/menu?${q.toString()}#fb-cashier-sale`);
 });
 
 adminRouter.post("/fb/menu/expense", requireFbOperationsEdit(), async (req, res) => {
@@ -14990,6 +15221,7 @@ ${groupSectionHtml}
     <p class="muted" style="margin:0;font-size:12px">Follow-up lists: export <a class="inline-link" href="/admin/bookings/export?paymentStatus=LPO">LPO</a> or <a class="inline-link" href="/admin/bookings/export?paymentStatus=FRIENDS_TRANSFER">friends transfer</a> bookings from the <a class="inline-link" href="/admin/bookings">booking report</a>.</p>
     <div style="display:grid; gap:10px; margin-top:12px">
       <p class="muted" style="margin:0"><strong>${escapeHtml(hotel.displayName)}</strong> — send PDFs to the guest on WhatsApp (hotel-led wording; not a duplicate booking confirmation).</p>
+      <p style="margin:0"><a class="btn-link" target="_blank" rel="noopener" href="/admin/bookings/${encodeURIComponent(booking.id)}/invoice-print">Print invoice PDF</a></p>
       <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/send-invoice" style="display:grid; gap:6px">
         <p class="muted" style="margin:0">${escapeHtml(invoiceStatusNote)}</p>
         ${
