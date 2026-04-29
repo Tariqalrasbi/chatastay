@@ -369,6 +369,21 @@ function parseOnboardingMenu(input: string): OnboardingMenuRow[] {
     .filter((row) => row.outletCode && row.itemName);
 }
 
+function bodyArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((x) => String(x));
+  if (value == null) return [];
+  return [String(value)];
+}
+
+function parseSetupUserRole(input: unknown): UserRole {
+  const raw = String(input ?? "").toUpperCase();
+  if (raw === UserRole.MANAGER) return UserRole.MANAGER;
+  if (raw === UserRole.STAFF || raw === "RESTAURANT") return UserRole.STAFF;
+  if (raw === UserRole.FRONTDESK) return UserRole.FRONTDESK;
+  if (raw === UserRole.HOUSEKEEPING) return UserRole.HOUSEKEEPING;
+  return UserRole.OWNER;
+}
+
 /** Local YYYY-MM-DD for owner dashboard date filters (avoids UTC shift). */
 function formatDateForOwnerInput(input: Date | null | undefined): string {
   if (!input) return "";
@@ -1572,6 +1587,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Open</a>
           <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Admin Login</a>
+          <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/setup">Hotel Setup</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/extranet">Open Extranet (Safe)</a>
@@ -1987,6 +2003,345 @@ ownerRouter.post("/hotels/:id/toggle-active", requireOwnerAuth, async (req, res)
   res.redirect("/owner/hotels");
 });
 
+ownerRouter.get("/hotels/:id/setup", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) {
+    res.status(403).type("html").send(ownerLayout("<h2>Hotel Setup</h2><p>Access denied.</p>", true));
+    return;
+  }
+  const hotelId = String(req.params.id ?? "");
+  const hotel = await prisma.hotel.findUnique({
+    where: { id: hotelId },
+    include: {
+      users: { orderBy: { createdAt: "asc" } },
+      properties: { orderBy: { createdAt: "asc" } },
+      roomTypes: { orderBy: { name: "asc" }, include: { roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } } },
+      outlets: { orderBy: { code: "asc" }, include: { menuItems: { orderBy: { itemName: "asc" } } } },
+      subscriptions: { include: { plan: true }, orderBy: { createdAt: "desc" }, take: 1 }
+    }
+  });
+  if (!hotel) {
+    res.status(404).type("html").send(ownerLayout("<h2>Hotel Setup</h2><p>Hotel not found.</p>", true));
+    return;
+  }
+  const updated = req.query.updated ? `<p class="badge ok">Hotel setup updated.</p>` : "";
+  const firstProperty = hotel.properties[0];
+  const config = loadPartnerSetupConfig(hotel.id);
+  const userRows = hotel.users
+    .map(
+      (u) => `<tr>
+        <td><input name="userId" type="hidden" value="${escapeHtml(u.id)}" />${escapeHtml(u.fullName)}</td>
+        <td>${escapeHtml(u.email ?? "-")}</td>
+        <td>${escapeHtml(u.username ?? "-")}</td>
+        <td>${escapeHtml(String(u.role))}</td>
+        <td>${u.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
+      </tr>`
+    )
+    .join("");
+  const roomTypeRows = hotel.roomTypes
+    .map(
+      (rt) => `<tr>
+        <td><input type="hidden" name="roomTypeId" value="${escapeHtml(rt.id)}" /><input name="roomTypeName" value="${escapeHtml(rt.name)}" style="width:150px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input name="roomTypeCode" value="${escapeHtml(rt.code)}" style="width:90px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input type="number" min="1" name="roomTypeCapacity" value="${rt.capacity}" style="width:70px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input type="number" min="0" step="0.001" name="roomTypeRate" value="${rt.baseNightlyRate}" style="width:90px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input type="number" min="0" name="roomTypeTotal" value="${rt.totalInventory}" style="width:70px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><label style="font-size:12px"><input type="checkbox" name="roomTypeActive_${escapeHtml(rt.id)}" value="1" ${rt.isActive ? "checked" : ""} /> Active</label></td>
+        <td>${rt.roomUnits.map((u) => escapeHtml(u.name)).join(", ") || "-"}</td>
+      </tr>`
+    )
+    .join("");
+  const roomTypeOptions = hotel.roomTypes
+    .map((rt) => `<option value="${escapeHtml(rt.id)}">${escapeHtml(rt.name)} (${escapeHtml(rt.code)})</option>`)
+    .join("");
+  const outletOptions = hotel.outlets
+    .map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)} (${escapeHtml(o.code)})</option>`)
+    .join("");
+  const menuRows = hotel.outlets
+    .flatMap((outlet) =>
+      outlet.menuItems.map(
+        (item) => `<tr>
+          <td>${escapeHtml(outlet.name)}</td>
+          <td><input type="hidden" name="menuItemId" value="${escapeHtml(item.id)}" /><input name="menuItemName" value="${escapeHtml(item.itemName)}" style="width:160px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+          <td><input name="menuItemCode" value="${escapeHtml(item.itemCode)}" style="width:120px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+          <td><input name="menuCategory" value="${escapeHtml(item.category ?? "")}" style="width:120px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+          <td><input type="number" min="0" step="0.001" name="menuPrice" value="${item.unitPrice}" style="width:90px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+          <td><label style="font-size:12px"><input type="checkbox" name="menuActive_${escapeHtml(item.id)}" value="1" ${item.isActive ? "checked" : ""} /> Active</label></td>
+        </tr>`
+      )
+    )
+    .join("");
+  const outletRows = hotel.outlets
+    .map(
+      (o) => `<tr><td>${escapeHtml(o.code)}</td><td>${escapeHtml(o.name)}</td><td>${escapeHtml(o.outletType)}</td><td>${o.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge pending">Inactive</span>'}</td></tr>`
+    )
+    .join("");
+  const content = `
+<h2>Hotel Setup: ${escapeHtml(hotel.displayName)}</h2>
+<p class="muted">Edit the operational setup for this partner hotel. This page changes configuration only; it does not copy or delete live bookings, guests, payments, or folios.</p>
+${updated}
+<div class="actions">
+  <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Back to hotel</a>
+  <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Open admin login</a>
+</div>
+
+<section style="margin-top:14px">
+  <h3>Profile & WhatsApp</h3>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/profile" class="grid-2">
+    <label>Display name<input name="displayName" value="${escapeHtml(hotel.displayName)}" required style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>Legal name<input name="legalName" value="${escapeHtml(hotel.legalName)}" required style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>City<input name="city" value="${escapeHtml(hotel.city ?? "")}" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>Currency<input name="currency" value="${escapeHtml(hotel.currency)}" maxlength="3" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>Timezone<input name="timezone" value="${escapeHtml(hotel.timezone)}" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>WhatsApp display phone<input name="whatsappPhone" value="${escapeHtml(hotel.whatsappPhone ?? "")}" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <label>Meta Phone Number ID<input name="whatsappPhoneNumberId" value="${escapeHtml(config.whatsappPhoneNumberId)}" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+    <div style="align-self:end"><button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Save profile</button></div>
+  </form>
+</section>
+
+<section style="margin-top:18px">
+  <h3>Admin Users & Passwords</h3>
+  <table><thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Role</th><th>Status</th></tr></thead><tbody>${userRows || '<tr><td colspan="5">No hotel users yet.</td></tr>'}</tbody></table>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/admin-user" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <input name="fullName" placeholder="Full name" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <input type="email" name="email" placeholder="owner@hotel.com" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <input name="username" placeholder="username" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <input name="password" placeholder="new password" required minlength="8" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <input name="pin" placeholder="PIN optional" minlength="4" maxlength="12" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:110px" />
+    <select name="role" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
+      <option value="OWNER">OWNER</option><option value="MANAGER">MANAGER</option><option value="FRONTDESK">FRONTDESK</option><option value="HOUSEKEEPING">HOUSEKEEPING</option><option value="RESTAURANT">RESTAURANT</option><option value="STAFF">STAFF</option>
+    </select>
+    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Create / reset user</button>
+  </form>
+</section>
+
+<section style="margin-top:18px">
+  <h3>Rooms & Units</h3>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/room-types">
+    <table><thead><tr><th>Name</th><th>Code</th><th>Capacity</th><th>Rate</th><th>Total</th><th>Status</th><th>Units</th></tr></thead><tbody>${roomTypeRows || '<tr><td colspan="7">No room types yet.</td></tr>'}</tbody></table>
+    <button type="submit" style="margin-top:10px;padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Save room types</button>
+  </form>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/room-type-add" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <input name="name" placeholder="Room type name" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <input name="code" placeholder="CODE" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100px" />
+    <input type="number" name="capacity" min="1" value="2" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:90px" />
+    <input type="number" name="rate" min="0" step="0.001" placeholder="Rate" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100px" />
+    <input name="unitNames" placeholder="Units e.g. 101-110 or A1,A2" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;min-width:220px" />
+    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Add room type</button>
+  </form>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/room-unit-add" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <select name="roomTypeId" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px">${roomTypeOptions}</select>
+    <input name="unitNames" placeholder="Add units e.g. 111,112 or 111-120" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px;min-width:260px" />
+    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Add units</button>
+  </form>
+</section>
+
+<section style="margin-top:18px">
+  <h3>Outlets & Menu</h3>
+  <table><thead><tr><th>Code</th><th>Outlet</th><th>Type</th><th>Status</th></tr></thead><tbody>${outletRows || '<tr><td colspan="4">No outlets yet.</td></tr>'}</tbody></table>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/outlet-add" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <input name="code" placeholder="REST" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100px" />
+    <input name="name" placeholder="Restaurant" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <select name="outletType" style="padding:8px;border:1px solid #d8dee6;border-radius:8px"><option value="RESTAURANT">RESTAURANT</option><option value="CAFE">CAFE</option><option value="ACTIVITY">ACTIVITY</option></select>
+    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Add outlet</button>
+  </form>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/menu-items" style="margin-top:12px">
+    <table><thead><tr><th>Outlet</th><th>Item</th><th>Code</th><th>Category</th><th>Price</th><th>Status</th></tr></thead><tbody>${menuRows || '<tr><td colspan="6">No menu items yet.</td></tr>'}</tbody></table>
+    <button type="submit" style="margin-top:10px;padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Save menu prices/items</button>
+  </form>
+  <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/menu-item-add" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <select name="outletId" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px">${outletOptions}</select>
+    <input name="itemName" placeholder="Item name" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <input name="itemCode" placeholder="ITEM-CODE" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:130px" />
+    <input name="category" placeholder="Category" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:130px" />
+    <input type="number" name="price" min="0" step="0.001" placeholder="Price" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100px" />
+    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Add menu item</button>
+  </form>
+</section>`;
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/hotels/:id/setup/profile", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const hotel = await prisma.hotel.findUnique({ where: { id: hotelId } });
+  if (!hotel) return res.redirect("/owner/hotels");
+  const displayName = String(req.body.displayName ?? "").trim();
+  const legalName = String(req.body.legalName ?? "").trim();
+  await prisma.hotel.update({
+    where: { id: hotel.id },
+    data: {
+      displayName: displayName || hotel.displayName,
+      legalName: legalName || hotel.legalName,
+      city: String(req.body.city ?? "").trim() || null,
+      currency: String(req.body.currency ?? hotel.currency).trim().toUpperCase().slice(0, 3) || hotel.currency,
+      timezone: String(req.body.timezone ?? hotel.timezone).trim() || hotel.timezone,
+      whatsappPhone: String(req.body.whatsappPhone ?? "").trim() || null
+    }
+  });
+  const config = loadPartnerSetupConfig(hotel.id);
+  savePartnerSetupConfig({ ...config, whatsappPhoneNumberId: String(req.body.whatsappPhoneNumberId ?? "").trim() }, hotel.id);
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?updated=profile`);
+});
+
+ownerRouter.post("/hotels/:id/setup/admin-user", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const hotel = await prisma.hotel.findUnique({ where: { id: hotelId } });
+  if (!hotel) return res.redirect("/owner/hotels");
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const password = String(req.body.password ?? "").trim();
+  if (!email || password.length < 8) return res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup`);
+  const usernameRaw = String(req.body.username ?? "").trim();
+  const username = (usernameRaw ? slugifyTenantName(usernameRaw).replaceAll("-", "_") : email.split("@")[0]) || "owner";
+  const pin = String(req.body.pin ?? "").trim();
+  const data = {
+    fullName: String(req.body.fullName ?? "Hotel Admin").trim() || "Hotel Admin",
+    username,
+    passwordHash: hashPassword(password),
+    pinHash: pin.length >= 4 ? hashPassword(pin) : null,
+    role: parseSetupUserRole(req.body.role),
+    isActive: true
+  };
+  await prisma.hotelUser.upsert({
+    where: { hotelId_email: { hotelId: hotel.id, email } },
+    update: data,
+    create: { hotelId: hotel.id, email, ...data }
+  });
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?updated=user`);
+});
+
+ownerRouter.post("/hotels/:id/setup/room-types", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const ids = bodyArray(req.body.roomTypeId);
+  const names = bodyArray(req.body.roomTypeName);
+  const codes = bodyArray(req.body.roomTypeCode);
+  const capacities = bodyArray(req.body.roomTypeCapacity);
+  const rates = bodyArray(req.body.roomTypeRate);
+  const totals = bodyArray(req.body.roomTypeTotal);
+  for (let i = 0; i < ids.length; i += 1) {
+    const id = ids[i];
+    const existing = await prisma.roomType.findFirst({ where: { id, hotelId } });
+    if (!existing) continue;
+    await prisma.roomType.update({
+      where: { id },
+      data: {
+        name: names[i]?.trim() || existing.name,
+        code: safeSetupCode(codes[i] ?? existing.code, existing.code),
+        capacity: Math.max(1, parseInt(capacities[i] ?? String(existing.capacity), 10) || existing.capacity),
+        baseNightlyRate: Math.max(0, parseFloat(rates[i] ?? String(existing.baseNightlyRate)) || 0),
+        totalInventory: Math.max(0, parseInt(totals[i] ?? String(existing.totalInventory), 10) || 0),
+        isActive: req.body[`roomTypeActive_${id}`] === "1"
+      }
+    });
+  }
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup?updated=rooms`);
+});
+
+ownerRouter.post("/hotels/:id/setup/room-type-add", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const hotel = await prisma.hotel.findUnique({ where: { id: hotelId }, include: { properties: { take: 1 } } });
+  const property = hotel?.properties[0];
+  if (!hotel || !property) return res.redirect("/owner/hotels");
+  const code = safeSetupCode(String(req.body.code ?? ""), "ROOM");
+  const name = String(req.body.name ?? code).trim() || code;
+  const units = expandUnitNames(String(req.body.unitNames ?? ""), 1, code);
+  const roomType = await prisma.roomType.create({
+    data: {
+      hotelId: hotel.id,
+      propertyId: property.id,
+      code,
+      name,
+      capacity: Math.max(1, parseInt(String(req.body.capacity ?? "2"), 10) || 2),
+      baseNightlyRate: Math.max(0, parseFloat(String(req.body.rate ?? "0")) || 0),
+      totalInventory: units.length,
+      isActive: true
+    }
+  });
+  await prisma.roomUnit.createMany({ data: units.map((name, index) => ({ hotelId: hotel.id, roomTypeId: roomType.id, name, sortOrder: index + 1, isActive: true })) });
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?updated=roomType`);
+});
+
+ownerRouter.post("/hotels/:id/setup/room-unit-add", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const roomTypeId = String(req.body.roomTypeId ?? "");
+  const roomType = await prisma.roomType.findFirst({ where: { id: roomTypeId, hotelId } });
+  if (!roomType) return res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup`);
+  const units = expandUnitNames(String(req.body.unitNames ?? ""), 1, roomType.code);
+  const existingCount = await prisma.roomUnit.count({ where: { roomTypeId } });
+  for (const [index, name] of units.entries()) {
+    await prisma.roomUnit.upsert({
+      where: { roomTypeId_name: { roomTypeId, name } },
+      update: { isActive: true },
+      create: { hotelId, roomTypeId, name, sortOrder: existingCount + index + 1, isActive: true }
+    });
+  }
+  await prisma.roomType.update({ where: { id: roomTypeId }, data: { totalInventory: await prisma.roomUnit.count({ where: { roomTypeId, isActive: true } }) } });
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup?updated=units`);
+});
+
+ownerRouter.post("/hotels/:id/setup/outlet-add", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const code = safeSetupCode(String(req.body.code ?? ""), "OUTLET");
+  await prisma.outlet.upsert({
+    where: { hotelId_code: { hotelId, code } },
+    update: { name: String(req.body.name ?? code).trim() || code, outletType: parseOutletKind(req.body.outletType), isActive: true },
+    create: { hotelId, code, name: String(req.body.name ?? code).trim() || code, outletType: parseOutletKind(req.body.outletType), isActive: true }
+  });
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup?updated=outlet`);
+});
+
+ownerRouter.post("/hotels/:id/setup/menu-items", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const ids = bodyArray(req.body.menuItemId);
+  const names = bodyArray(req.body.menuItemName);
+  const codes = bodyArray(req.body.menuItemCode);
+  const categories = bodyArray(req.body.menuCategory);
+  const prices = bodyArray(req.body.menuPrice);
+  for (let i = 0; i < ids.length; i += 1) {
+    const id = ids[i];
+    const existing = await prisma.outletMenuItem.findFirst({ where: { id, hotelId } });
+    if (!existing) continue;
+    await prisma.outletMenuItem.update({
+      where: { id },
+      data: {
+        itemName: names[i]?.trim() || existing.itemName,
+        itemCode: safeSetupCode(codes[i] ?? existing.itemCode, existing.itemCode),
+        category: categories[i]?.trim() || null,
+        unitPrice: Math.max(0, parseFloat(prices[i] ?? String(existing.unitPrice)) || 0),
+        isActive: req.body[`menuActive_${id}`] === "1"
+      }
+    });
+  }
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup?updated=menu`);
+});
+
+ownerRouter.post("/hotels/:id/setup/menu-item-add", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const outletId = String(req.body.outletId ?? "");
+  const outlet = await prisma.outlet.findFirst({ where: { id: outletId, hotelId } });
+  if (!outlet) return res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup`);
+  const itemName = String(req.body.itemName ?? "").trim();
+  if (!itemName) return res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup`);
+  await prisma.outletMenuItem.create({
+    data: {
+      hotelId,
+      outletId,
+      itemName,
+      itemCode: safeSetupCode(String(req.body.itemCode ?? itemName), `${outlet.code}_ITEM`),
+      category: String(req.body.category ?? "").trim() || null,
+      unitPrice: Math.max(0, parseFloat(String(req.body.price ?? "0")) || 0),
+      isActive: true
+    }
+  });
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}/setup?updated=menuItem`);
+});
+
 ownerRouter.get("/hotels/:id/extranet", requireOwnerAuth, async (req, res) => {
   const hotelId = String(req.params.id ?? "");
   const hotel = await prisma.hotel.findUnique({ where: { id: hotelId } });
@@ -2189,6 +2544,7 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
 <p class="muted">Tenant deep-dive for owner operations and support.</p>
 <div class="actions">
   <a class="btn-link" href="/owner/hotels">Back to hotels</a>
+  <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/setup">Hotel Setup</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity (totals)</a>
   <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Open hotel admin login</a>
