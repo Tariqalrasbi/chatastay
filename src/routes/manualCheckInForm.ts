@@ -7,6 +7,8 @@ import type { ManualCheckInRoomSelectionSnapshot } from "./manualCheckInRoomSele
 export type ManualCheckInFormValues = {
   guestFullName: string;
   guestPhone: string;
+  guestPhoneCountryCode: string;
+  guestPhoneCountryCodeCustom: string;
   guestEmail: string;
   nationality: string;
   idNumber: string;
@@ -68,6 +70,8 @@ export function manualCheckInFormFromBody(req: Request): ManualCheckInFormValues
   return {
     guestFullName: String(req.body.guestFullName ?? ""),
     guestPhone: String(req.body.guestPhone ?? ""),
+    guestPhoneCountryCode: String(req.body.guestPhoneCountryCode ?? "+968"),
+    guestPhoneCountryCodeCustom: String(req.body.guestPhoneCountryCodeCustom ?? ""),
     guestEmail: String(req.body.guestEmail ?? ""),
     nationality: String(req.body.nationality ?? ""),
     idNumber: String(req.body.idNumber ?? ""),
@@ -191,6 +195,8 @@ export function buildManualCheckInPageHtml(
 
   const guestFullName = escapeHtml(form?.guestFullName ?? "");
   const guestPhone = escapeHtml(form?.guestPhone ?? "");
+  const guestPhoneCountryCode = escapeHtml(form?.guestPhoneCountryCode ?? "+968");
+  const guestPhoneCountryCodeCustom = escapeHtml(form?.guestPhoneCountryCodeCustom ?? "");
   const guestEmail = escapeHtml(form?.guestEmail ?? "");
   const nationality = escapeHtml(form?.nationality ?? "");
   const idNumber = escapeHtml(form?.idNumber ?? "");
@@ -320,8 +326,22 @@ ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991
     </div>
     <div class="fd-grid-2">
       <div class="fd-field">
-        <label for="fd-guest-phone">Mobile <span class="fd-req">*</span></label>
-        <input type="tel" id="fd-guest-phone" name="guestPhone" required autocomplete="tel" value="${guestPhone}" class="fd-input" placeholder="+968…" inputmode="tel" />
+        <label for="fd-guest-phone">Mobile / WhatsApp <span class="fd-req">*</span></label>
+        <div style="display:grid;grid-template-columns:120px 92px minmax(150px,1fr);gap:8px;align-items:end">
+          <select name="guestPhoneCountryCode" class="fd-input" aria-label="Country code">
+            <option value="+968" ${guestPhoneCountryCode === "+968" ? "selected" : ""}>Oman +968</option>
+            <option value="+971" ${guestPhoneCountryCode === "+971" ? "selected" : ""}>UAE +971</option>
+            <option value="+966" ${guestPhoneCountryCode === "+966" ? "selected" : ""}>KSA +966</option>
+            <option value="+974" ${guestPhoneCountryCode === "+974" ? "selected" : ""}>Qatar +974</option>
+            <option value="+973" ${guestPhoneCountryCode === "+973" ? "selected" : ""}>Bahrain +973</option>
+            <option value="+965" ${guestPhoneCountryCode === "+965" ? "selected" : ""}>Kuwait +965</option>
+            <option value="+91" ${guestPhoneCountryCode === "+91" ? "selected" : ""}>India +91</option>
+            <option value="+44" ${guestPhoneCountryCode === "+44" ? "selected" : ""}>UK +44</option>
+            <option value="+1" ${guestPhoneCountryCode === "+1" ? "selected" : ""}>US/CA +1</option>
+          </select>
+          <input type="tel" name="guestPhoneCountryCodeCustom" value="${guestPhoneCountryCodeCustom}" class="fd-input" placeholder="+..." inputmode="tel" aria-label="Other country code" />
+          <input type="tel" id="fd-guest-phone" name="guestPhone" required autocomplete="tel" value="${guestPhone}" class="fd-input" placeholder="local number or +968…" inputmode="tel" />
+        </div>
       </div>
       <div class="fd-field">
         <label for="fd-guest-email">Email</label>

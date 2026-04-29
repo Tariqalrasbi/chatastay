@@ -1659,6 +1659,61 @@ function normalizePhoneForWhatsApp(input: string): string {
   return input.replace(/\D/g, "");
 }
 
+function normalizeCountryCodeForWhatsApp(input: string, fallback = "+968"): string {
+  const raw = String(input ?? "").trim();
+  const digits = raw.replace(/\D/g, "");
+  if (digits) return digits;
+  return fallback.replace(/\D/g, "");
+}
+
+function combineWhatsAppCountryAndLocal(countryCodeRaw: string | undefined, phoneRaw: string): string {
+  const raw = String(phoneRaw ?? "").trim();
+  const direct = normalizePhoneForWhatsApp(raw);
+  if (!direct) return "";
+  if (raw.startsWith("+") || raw.startsWith("00")) return direct;
+
+  const countryCode = normalizeCountryCodeForWhatsApp(countryCodeRaw ?? "+968");
+  if (direct.startsWith(countryCode) && direct.length >= countryCode.length + 6) return direct;
+  return `${countryCode}${direct}`;
+}
+
+function renderWhatsAppPhoneFields(opts: {
+  phoneName: string;
+  countryCodeName: string;
+  customCountryCodeName: string;
+  label?: string;
+  required?: boolean;
+  phoneInputStyle?: string;
+  groupStyle?: string;
+}): string {
+  const label = opts.label ?? "Guest WhatsApp";
+  const requiredAttr = opts.required ? " required" : "";
+  const phoneStyle =
+    opts.phoneInputStyle ?? "width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px";
+  const groupStyle = opts.groupStyle ?? "display:grid;grid-template-columns:120px 96px minmax(180px,1fr);gap:8px;align-items:end";
+  return `<div style="${groupStyle}">
+    <label style="font-size:12px;font-weight:700">Country<br/>
+      <select name="${escapeHtml(opts.countryCodeName)}" style="width:100%;padding:9px 8px;border:1px solid #cbd5e1;border-radius:8px">
+        <option value="+968" selected>Oman +968</option>
+        <option value="+971">UAE +971</option>
+        <option value="+966">KSA +966</option>
+        <option value="+974">Qatar +974</option>
+        <option value="+973">Bahrain +973</option>
+        <option value="+965">Kuwait +965</option>
+        <option value="+91">India +91</option>
+        <option value="+44">UK +44</option>
+        <option value="+1">US/CA +1</option>
+      </select>
+    </label>
+    <label style="font-size:12px;font-weight:700">Other code<br/>
+      <input name="${escapeHtml(opts.customCountryCodeName)}" placeholder="+..." inputmode="tel" style="width:100%;padding:9px 8px;border:1px solid #cbd5e1;border-radius:8px" />
+    </label>
+    <label style="font-size:12px;font-weight:700">${escapeHtml(label)}<br/>
+      <input type="tel" name="${escapeHtml(opts.phoneName)}" maxlength="32" placeholder="local number or +968..." inputmode="tel" autocomplete="tel" style="${phoneStyle}"${requiredAttr} />
+    </label>
+  </div>`;
+}
+
 function getBadgeClass(status: string): "ok" | "pending" | "alert" {
   if (status === "CONFIRMED" || status === "SUCCEEDED" || status === "ACTIVE") return "ok";
   if (status === "CANCELLED" || status === "FAILED" || status === "NO_SHOW") return "alert";
@@ -1967,22 +2022,25 @@ async function sendDirectSaleReceiptWhatsApp(params: {
   hotelId: string;
   paymentId: string;
   phoneRaw: string;
+  countryCodeRaw?: string;
 }): Promise<{ sent: boolean; error?: string }> {
   const receipt = await loadDirectSaleReceipt(params.hotelId, params.paymentId);
   if (!receipt) return { sent: false, error: "Receipt not found." };
-  const to = normalizePhoneForWhatsApp(params.phoneRaw);
-  if (!to) return { sent: false, error: "Guest WhatsApp number is missing or invalid." };
+  const to = combineWhatsAppCountryAndLocal(params.countryCodeRaw, params.phoneRaw);
+  if (!to || to.length < 8 || to.length > 15) {
+    return {
+      sent: false,
+      error: "Guest WhatsApp number is invalid. Select/write country code and enter the local number, or enter a full + country-code number."
+    };
+  }
 
   const partner = loadPartnerSetupConfig(params.hotelId);
-  try {
-    await sendWhatsAppText({
-      to,
-      body: buildDirectSaleReceiptText(receipt),
-      phoneNumberId: partner.whatsappPhoneNumberId || undefined
-    });
-  } catch (error) {
-    return { sent: false, error: error instanceof Error ? error.message.slice(0, 500) : "Failed to send receipt via WhatsApp." };
-  }
+  const send = await trySendWhatsAppText({
+    to,
+    body: buildDirectSaleReceiptText(receipt),
+    phoneNumberId: partner.whatsappPhoneNumberId || undefined
+  });
+  if (!send.ok) return { sent: false, error: send.errorMessage.slice(0, 500) };
 
   await logAudit({
     hotelId: params.hotelId,
@@ -6503,6 +6561,9 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
   }
   const guestFullName = String(req.body.guestFullName ?? "").trim();
   const guestPhoneRaw = String(req.body.guestPhone ?? "").trim();
+  const guestPhoneCountryCode =
+    String(req.body.guestPhoneCountryCodeCustom ?? "").trim() ||
+    String(req.body.guestPhoneCountryCode ?? "+968").trim();
   const guestEmail = String(req.body.guestEmail ?? "").trim();
   const nationality = String(req.body.nationality ?? "").trim();
   const idNumber = String(req.body.idNumber ?? "").trim();
@@ -6550,7 +6611,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
     await fail("Guest full name is required.");
     return;
   }
-  const phoneE164 = normalizeGuestPhoneE164(guestPhoneRaw);
+  const phoneE164 = normalizeGuestPhoneE164(combineWhatsAppCountryAndLocal(guestPhoneCountryCode, guestPhoneRaw));
   if (!phoneE164 || phoneE164.length < 8) {
     await fail("Enter a valid phone number.");
     return;
@@ -12471,7 +12532,14 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
             <a class="btn-link primary" target="_blank" rel="noopener" href="/admin/fb/menu/direct-sale/${encodeURIComponent(directReceipt.paymentId)}/receipt">Print receipt</a>
             <form method="post" action="/admin/fb/menu/direct-sale/${encodeURIComponent(directReceipt.paymentId)}/send-whatsapp" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:0">
-              <label style="font-size:12px;font-weight:700;color:#065f46">Guest WhatsApp number<br/><input name="guest_whatsapp" placeholder="+968..." style="min-width:220px;padding:8px 10px;border:1px solid #86efac;border-radius:8px" /></label>
+              ${renderWhatsAppPhoneFields({
+                phoneName: "guest_whatsapp",
+                countryCodeName: "guest_whatsapp_country_code",
+                customCountryCodeName: "guest_whatsapp_country_code_custom",
+                label: "Guest WhatsApp number",
+                phoneInputStyle: "min-width:220px;padding:8px 10px;border:1px solid #86efac;border-radius:8px",
+                groupStyle: "display:grid;grid-template-columns:120px 96px minmax(220px,1fr);gap:8px;align-items:end"
+              })}
               <button type="submit" class="btn-link" style="padding:8px 12px">Send receipt</button>
             </form>
           </div>
@@ -12602,7 +12670,12 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
         </select>
       </label>
       <label style="flex:1;min-width:220px">Note / receipt ref<br/><input type="text" name="notes" maxlength="500" placeholder="Optional" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
-      <label style="flex:1;min-width:220px">Guest WhatsApp (optional)<br/><input type="tel" name="guest_whatsapp" maxlength="32" placeholder="+968..." style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px" /></label>
+      <div style="flex:1;min-width:420px">${renderWhatsAppPhoneFields({
+        phoneName: "guest_whatsapp",
+        countryCodeName: "guest_whatsapp_country_code",
+        customCountryCodeName: "guest_whatsapp_country_code_custom",
+        label: "Guest WhatsApp (optional)"
+      })}</div>
     </div>
     <div class="fb-cashier-footer">
       <p id="fb-cashier-total" style="margin:0;font-size:1.15rem;font-weight:800;color:#134e4a">Total: <span id="fb-cashier-total-num">0.00 ${escapeHtml(hotel.currency)}</span></p>
@@ -13306,6 +13379,9 @@ adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, 
   const paymentMethod = String(req.body.payment_method ?? "CASH");
   const notes = String(req.body.notes ?? "").trim();
   const guestWhatsapp = String(req.body.guest_whatsapp ?? "").trim();
+  const guestWhatsappCountryCode =
+    String(req.body.guest_whatsapp_country_code_custom ?? "").trim() ||
+    String(req.body.guest_whatsapp_country_code ?? "+968").trim();
   const outletRaw = String(req.body.cashier_outlet ?? "RESTAURANT").toUpperCase();
   const outletScope = outletRaw === "COFFEE_SHOP" ? FbOutletType.COFFEE_SHOP : FbOutletType.RESTAURANT;
   const menuItems = await prisma.menuItem.findMany({
@@ -13334,7 +13410,8 @@ adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, 
       const sent = await sendDirectSaleReceiptWhatsApp({
         hotelId: hotel.id,
         paymentId: result.paymentId,
-        phoneRaw: guestWhatsapp
+        phoneRaw: guestWhatsapp,
+        countryCodeRaw: guestWhatsappCountryCode
       });
       if (!sent.sent) whatsAppError = sent.error ?? "Receipt was posted but WhatsApp sending failed.";
     }
@@ -13420,7 +13497,10 @@ adminRouter.post("/fb/menu/direct-sale/:paymentId/send-whatsapp", requireFbOpera
   const result = await sendDirectSaleReceiptWhatsApp({
     hotelId: hotel.id,
     paymentId,
-    phoneRaw: String(req.body.guest_whatsapp ?? "")
+    phoneRaw: String(req.body.guest_whatsapp ?? ""),
+    countryCodeRaw:
+      String(req.body.guest_whatsapp_country_code_custom ?? "").trim() ||
+      String(req.body.guest_whatsapp_country_code ?? "+968").trim()
   });
   const q = new URLSearchParams({ directOk: "1", directPaymentId: paymentId });
   if (result.sent) q.set("directWhatsAppSent", "1");
