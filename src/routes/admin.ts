@@ -1170,7 +1170,7 @@ function renderLayout(
   const canNavOutlet =
     !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "ROOMS", "VIEW");
   const canNavFb =
-    !useFrontDeskChrome && (!perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW"));
+    !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW");
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
   type AdminNavGroup = "dashboard" | "reservations" | "rooms" | "comms" | "fb" | "insights" | "account" | "modules";
   type AdminNavItem = { group: AdminNavGroup; href: string; label: string; attrs?: string };
@@ -1230,6 +1230,7 @@ function renderLayout(
                 { group: "reservations", href: "/admin/bookings", label: "Reservations" },
                 { group: "rooms", href: "/admin/room-board", label: "Stay Operations" },
                 canNavComms ? { group: "comms", href: "/admin/conversations", label: "Guests &amp; Messages" } : false,
+                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Food &amp; Beverage" } : false,
                 moduleSwitcher
               ])
             : renderNavLinks([
@@ -4302,7 +4303,7 @@ adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   <a class="btn-link" href="/admin/analytics/decision?days=60&propertyId=ALL">60 days</a>
   <a class="btn-link" href="/admin/analytics/decision?days=90&propertyId=ALL">90 days</a>
 </div>
-<div class="grid-4">
+<div class="grid-4 bookings-report-stats">
   <article class="stat"><h3>Total bookings</h3><p>${cross.totals.bookingsTotal}</p></article>
   <article class="stat"><h3>Total revenue</h3><p>${formatMoney(cross.totals.revenue, hotel.currency)}</p></article>
   <article class="stat"><h3>Total commission</h3><p>${formatMoney(cross.totals.commission, hotel.currency)}</p></article>
@@ -11542,20 +11543,20 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
           ? `<span class="badge ok">Unit assigned${booking.roomUnit?.name ? ` (${escapeHtml(booking.roomUnit.name)})` : ""}</span>`
           : '<span class="badge pending">Pending assignment</span>';
         return `<tr${rowClass}>
-      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">${escapeHtml(displayBookingReference(booking))}</a></td>
-      <td>${vipMark}${escapeHtml(guestName)} <a class="inline-link" style="font-size:12px" href="/admin/guests/${encodeURIComponent(booking.guest.id)}" title="Guest profile">Profile</a></td>
-      <td>${escapeHtml(booking.guest.phoneE164)}</td>
-      <td>${escapeHtml(booking.roomType.name)}</td>
-      <td>${formatDate(booking.checkIn)}</td>
-      <td>${formatDate(booking.checkOut)}</td>
-      <td>${booking.adults}</td>
-      <td>${booking.nights}</td>
-      <td>${formatMoney(booking.totalAmount, hotel.currency)}</td>
-      <td><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td>
-      <td><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td>
-      <td>${unitAssignmentBadge}</td>
-      <td><span class="badge ${sourceLabel === "WhatsApp" ? "ok" : "pending"}">${escapeHtml(String(sourceLabel))}</span></td>
-      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Open details</a></td>
+      <td data-label="Reference"><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">${escapeHtml(displayBookingReference(booking))}</a></td>
+      <td data-label="Guest">${vipMark}${escapeHtml(guestName)} <a class="inline-link" style="font-size:12px" href="/admin/guests/${encodeURIComponent(booking.guest.id)}" title="Guest profile">Profile</a></td>
+      <td data-label="Phone">${escapeHtml(booking.guest.phoneE164)}</td>
+      <td data-label="Room">${escapeHtml(booking.roomType.name)}</td>
+      <td data-label="Check-in">${formatDate(booking.checkIn)}</td>
+      <td data-label="Check-out">${formatDate(booking.checkOut)}</td>
+      <td data-label="Guests">${booking.adults}</td>
+      <td data-label="Nights">${booking.nights}</td>
+      <td data-label="Total">${formatMoney(booking.totalAmount, hotel.currency)}</td>
+      <td data-label="Booking"><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td>
+      <td data-label="Payment"><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td>
+      <td data-label="Unit">${unitAssignmentBadge}</td>
+      <td data-label="Source"><span class="badge ${sourceLabel === "WhatsApp" ? "ok" : "pending"}">${escapeHtml(String(sourceLabel))}</span></td>
+      <td data-label="Actions"><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Open details</a></td>
       </tr>`
       }
     )
@@ -11603,8 +11604,57 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
 <p class="muted" style="margin-top:10px">Conversations in range: <strong><a class="inline-link" href="/admin/conversations?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}">${conversationsCount}</a></strong> (opens conversations filtered by this date range)</p>
 <style>
   .booking-whatsapp-confirmed { background: #f3fff8; }
+  .bookings-report-table { min-width: 980px; font-size: 12px; }
+  .bookings-report-table th,
+  .bookings-report-table td { padding: 8px 7px; vertical-align: middle; }
+  .bookings-report-table th { white-space: normal; line-height: 1.2; }
+  .bookings-report-table td { overflow-wrap: anywhere; }
+  .bookings-report-table .badge { white-space: normal; line-height: 1.2; }
+  @media (max-width: 1180px) {
+    .bookings-report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .bookings-report-table { min-width: 100%; border-collapse: separate; border-spacing: 0; }
+    .bookings-report-table thead { display: none; }
+    .bookings-report-table tbody tr {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0;
+      margin: 0 0 12px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+    }
+    .bookings-report-table tbody tr.booking-whatsapp-confirmed { background: #f3fff8; }
+    .bookings-report-table tbody td {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+      border-bottom: 1px dashed #e2e8f0;
+      padding: 8px 4px;
+      text-align: right;
+      font-size: 12px;
+    }
+    .bookings-report-table tbody td::before {
+      content: attr(data-label);
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-weight: 700;
+      text-align: left;
+    }
+    .bookings-report-table tbody td:last-child {
+      grid-column: 1 / -1;
+      border-bottom: 0;
+      justify-content: flex-end;
+    }
+    .bookings-report-table tbody td:last-child::before { margin-right: auto; }
+  }
+  @media (max-width: 640px) {
+    .bookings-report-stats { grid-template-columns: 1fr; }
+    .bookings-report-table tbody tr { grid-template-columns: 1fr; }
+  }
 </style>
-<table>
+<table class="bookings-report-table">
   <thead><tr><th>Reference</th><th>Guest Name</th><th>Phone Number</th><th>Room Type</th><th>Check-in</th><th>Check-out</th><th>Guests</th><th>Nights</th><th>Total Amount</th><th>Booking Status</th><th>Payment Status</th><th>Unit Assignment</th><th>Source</th><th>Actions</th></tr></thead>
   <tbody>${rows || '<tr><td colspan="14">No bookings in selected range.</td></tr>'}</tbody>
 </table>`;

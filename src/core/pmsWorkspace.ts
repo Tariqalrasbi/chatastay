@@ -36,7 +36,7 @@ export function listAccessibleWorkspaces(role: string, perm: PermissionMatrixLik
     acc.add("front_desk");
   }
 
-  if (matrixRowAllows(perm, "OUTLET", "VIEW")) {
+  if (matrixRowAllows(perm, "OUTLET", "VIEW") || matrixRowAllows(perm, "BOOKINGS", "VIEW")) {
     acc.add("restaurant");
   }
 
