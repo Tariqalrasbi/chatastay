@@ -322,7 +322,7 @@ async function getPlatformHotelBase(): Promise<{ id: string; displayName?: strin
 }
 
 function activeHotelSlug(): string {
-  return auditActorContext.getStore()?.session?.hotelSlug ?? defaultHotelSlug;
+  return auditActorContext.getStore()?.session?.hotelSlug || defaultHotelSlug;
 }
 
 function isScopedPropertyId(propertyId: string | null | undefined): propertyId is string {
@@ -723,6 +723,7 @@ type LoginHotelContext = {
   displayName: string;
   city?: string | null;
   country?: string | null;
+  requestedSlug?: string;
 };
 
 function hotelSignForLogin(hotel: LoginHotelContext): string {
@@ -731,36 +732,56 @@ function hotelSignForLogin(hotel: LoginHotelContext): string {
 
 async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
   const raw = String(req.query.hotel ?? req.body?.hotelSlug ?? req.body?.hotel ?? "").trim();
-  const slug = raw || defaultHotelSlug;
-  const hotel =
-    (await prisma.hotel.findUnique({
-      where: { slug },
-      select: { id: true, slug: true, displayName: true, city: true, country: true }
-    })) ??
-    (await prisma.hotel.findUnique({
-      where: { slug: activeHotelSlug() },
-      select: { id: true, slug: true, displayName: true, city: true, country: true }
-    }));
+  if (!raw) {
+    return {
+      id: "",
+      slug: "",
+      displayName: "ChatAstay Hotel Portal",
+      city: "Select your hotel account",
+      country: null
+    };
+  }
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: raw },
+    select: { id: true, slug: true, displayName: true, city: true, country: true }
+  });
   if (!hotel) {
-    return { id: "", slug: activeHotelSlug(), displayName: hotelName, city: "Seafront Hospitality", country: "Oman" };
+    return {
+      id: "",
+      slug: raw,
+      requestedSlug: raw,
+      displayName: "ChatAstay Hotel Portal",
+      city: "Hotel account not found",
+      country: null
+    };
   }
   return hotel;
 }
 
 function loginPageHtml(hotel?: LoginHotelContext): string {
-  const hotelSlug = hotel?.slug ?? defaultHotelSlug;
-  const hotelDisplayName = hotel?.displayName ?? hotelName;
+  const hotelSlug = hotel?.slug ?? "";
+  const hotelDisplayName = hotel?.displayName ?? "ChatAstay Hotel Portal";
+  const isKnownHotel = Boolean(hotel?.id);
+  const hotelSlugField = isKnownHotel
+    ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelSlug)}" />`
+    : `<label class="login-label" for="loginHotelSlug">Hotel slug</label><input class="login-input" id="loginHotelSlug" type="text" name="hotelSlug" value="${escapeHtml(
+        hotelSlug
+      )}" required autocomplete="organization" placeholder="example-hotel-slug" />`;
+  const invalidHotelNotice =
+    hotel?.requestedSlug && !hotel.id
+      ? `<p class="badge alert">No hotel account found for <code>${escapeHtml(hotel.requestedSlug)}</code>. Use the exact slug from the Owner Console.</p>`
+      : "";
   return readView("login.html")
     .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
     .replace('action="/admin/login"', `action="/admin/login?hotel=${encodeURIComponent(hotelSlug)}"`)
     .replace('action="/auth/staff-login"', `action="/auth/staff-login"`)
     .replace(
       '<fieldset class="login-fieldset" id="loginFieldsetMgmt">',
-      `<fieldset class="login-fieldset" id="loginFieldsetMgmt"><input type="hidden" name="hotelSlug" value="${escapeHtml(hotelSlug)}" />`
+      `<fieldset class="login-fieldset" id="loginFieldsetMgmt">${invalidHotelNotice}${hotelSlugField}`
     )
     .replace(
       '<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>',
-      `<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled><input type="hidden" name="hotelSlug" value="${escapeHtml(hotelSlug)}" />`
+      `<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>${hotelSlugField}`
     )
     .replace('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelSlug)}"`)
     .replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
@@ -3262,8 +3283,8 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
       role: "MANAGER",
       permissions: getPermissionsForEmail(email),
       hotelId: loginHotel.id || undefined,
-      hotelSlug: loginHotel.slug,
-      hotelName: loginHotel.displayName
+      hotelSlug: loginHotel.id ? loginHotel.slug : undefined,
+      hotelName: loginHotel.id ? loginHotel.displayName : undefined
     });
     return "MANAGER";
   }
