@@ -244,6 +244,9 @@ type AdminSession = {
   email: string;
   role: string;
   permissions: PermissionMatrix;
+  hotelId?: string;
+  hotelSlug?: string;
+  hotelName?: string;
   activePropertyId?: string | null;
   /** Active PMS workspace for nav + notification feed (not used for dedicated HK portal sessions). */
   activeWorkspace?: PmsWorkspaceId;
@@ -310,7 +313,16 @@ async function uniquePropertyCode(hotelId: string, baseName: string): Promise<st
 }
 
 async function getPlatformHotelBase(): Promise<{ id: string; displayName?: string | null } | null> {
-  return prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true } });
+  const session = auditActorContext.getStore()?.session;
+  if (session?.hotelId) {
+    const hotel = await prisma.hotel.findUnique({ where: { id: session.hotelId }, select: { id: true, displayName: true } });
+    if (hotel) return hotel;
+  }
+  return prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
+}
+
+function activeHotelSlug(): string {
+  return auditActorContext.getStore()?.session?.hotelSlug ?? defaultHotelSlug;
 }
 
 function isScopedPropertyId(propertyId: string | null | undefined): propertyId is string {
@@ -460,7 +472,18 @@ function effectivePermissionsForHotelUser(email: string, role: UserRole): Permis
   return normalizePermissionMatrix(store[email.toLowerCase()] ?? defaultPermissionsForRole(role));
 }
 
-function issueAdminSession(res: Response, params: { staffId: string; email: string; role: string; permissions: PermissionMatrix }): string {
+function issueAdminSession(
+  res: Response,
+  params: {
+    staffId: string;
+    email: string;
+    role: string;
+    permissions: PermissionMatrix;
+    hotelId?: string;
+    hotelSlug?: string;
+    hotelName?: string;
+  }
+): string {
   const token = crypto.randomUUID();
   const activeWorkspace: PmsWorkspaceId =
     params.role === "HOUSEKEEPING"
@@ -471,6 +494,9 @@ function issueAdminSession(res: Response, params: { staffId: string; email: stri
     email: params.email,
     role: params.role,
     permissions: params.permissions,
+    hotelId: params.hotelId,
+    hotelSlug: params.hotelSlug,
+    hotelName: params.hotelName,
     activeWorkspace
   });
   res.setHeader(
@@ -691,8 +717,53 @@ function loginDemoSectionHtml(): string {
 </details>`;
 }
 
-function loginPageHtml(): string {
-  return readView("login.html").replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
+type LoginHotelContext = {
+  id: string;
+  slug: string;
+  displayName: string;
+  city?: string | null;
+  country?: string | null;
+};
+
+function hotelSignForLogin(hotel: LoginHotelContext): string {
+  return [hotel.city, hotel.country].filter(Boolean).join(", ") || "Hotel operations";
+}
+
+async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
+  const raw = String(req.query.hotel ?? req.body?.hotelSlug ?? req.body?.hotel ?? "").trim();
+  const slug = raw || defaultHotelSlug;
+  const hotel =
+    (await prisma.hotel.findUnique({
+      where: { slug },
+      select: { id: true, slug: true, displayName: true, city: true, country: true }
+    })) ??
+    (await prisma.hotel.findUnique({
+      where: { slug: activeHotelSlug() },
+      select: { id: true, slug: true, displayName: true, city: true, country: true }
+    }));
+  if (!hotel) {
+    return { id: "", slug: activeHotelSlug(), displayName: hotelName, city: "Seafront Hospitality", country: "Oman" };
+  }
+  return hotel;
+}
+
+function loginPageHtml(hotel?: LoginHotelContext): string {
+  const hotelSlug = hotel?.slug ?? defaultHotelSlug;
+  const hotelDisplayName = hotel?.displayName ?? hotelName;
+  return readView("login.html")
+    .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
+    .replace('action="/admin/login"', `action="/admin/login?hotel=${encodeURIComponent(hotelSlug)}"`)
+    .replace('action="/auth/staff-login"', `action="/auth/staff-login"`)
+    .replace(
+      '<fieldset class="login-fieldset" id="loginFieldsetMgmt">',
+      `<fieldset class="login-fieldset" id="loginFieldsetMgmt"><input type="hidden" name="hotelSlug" value="${escapeHtml(hotelSlug)}" />`
+    )
+    .replace(
+      '<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>',
+      `<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled><input type="hidden" name="hotelSlug" value="${escapeHtml(hotelSlug)}" />`
+    )
+    .replace('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelSlug)}"`)
+    .replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
 }
 
 /** Client-side polling for conversation activity (no WebSockets in this stack). */
@@ -1041,12 +1112,19 @@ function getAdminNotificationScript(): string {
 <\/script>`;
 }
 
-function renderLayout(content: string, authenticated: boolean): string {
+function renderLayout(
+  content: string,
+  authenticated: boolean,
+  opts: { hotelName?: string; hotelSign?: string; hotelSlug?: string } = {}
+): string {
   const layout = readView("layout.html");
   const sess = authenticated ? auditActorContext.getStore()?.session : undefined;
   const permLike = (sess?.permissions ?? undefined) as PermissionMatrixLike | undefined;
+  const resolvedHotelName = opts.hotelName ?? sess?.hotelName ?? hotelName;
+  const resolvedHotelSlug = opts.hotelSlug ?? sess?.hotelSlug ?? defaultHotelSlug;
+  const resolvedHotelSign = opts.hotelSign ?? hotelSign;
   const uiErrorContextAttrs = sess
-    ? ` data-ui-user-id="${escapeHtml(sess.staffId)}" data-ui-role="${escapeHtml(String(sess.role))}" data-ui-hotel-slug="${escapeHtml(defaultHotelSlug)}"${
+    ? ` data-ui-user-id="${escapeHtml(sess.staffId)}" data-ui-role="${escapeHtml(String(sess.role))}" data-ui-hotel-slug="${escapeHtml(resolvedHotelSlug)}"${
         sess.activePropertyId ? ` data-ui-property-id="${escapeHtml(String(sess.activePropertyId))}"` : ""
       }${sess.activeWorkspace ? ` data-ui-workspace="${escapeHtml(String(sess.activeWorkspace))}"` : ""}`
     : "";
@@ -1279,8 +1357,8 @@ function renderLayout(content: string, authenticated: boolean): string {
     .replaceAll("{{adminTitle}}", "ChatAstay Admin")
     .replace("{{brandTagline}}", "WhatsApp-first booking ops")
     .replace("{{langSwitcher}}", langSwitcherHtml)
-    .replace("{{hotelName}}", hotelName)
-    .replace("{{hotelSign}}", hotelSign)
+    .replace("{{hotelName}}", escapeHtml(resolvedHotelName))
+    .replace("{{hotelSign}}", escapeHtml(resolvedHotelSign))
     .replace("{{navLinks}}", navHtml)
     .replace("{{sectionTabs}}", sectionTabsHtml)
     .replace("{{logoutAction}}", logoutHtml)
@@ -2808,7 +2886,7 @@ adminRouter.get("/", (req, res) => {
   res.redirect(pickPostLoginRedirect(s.role, s.permissions));
 });
 
-adminRouter.get("/login", (req, res) => {
+adminRouter.get("/login", async (req, res) => {
   if (isAuthenticated(req)) {
     const s = getSession(req);
     if (s) {
@@ -2818,6 +2896,7 @@ adminRouter.get("/login", (req, res) => {
     }
     return;
   }
+  const loginHotel = await resolveLoginHotel(req);
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
   const authErrorNotice =
     req.query.auth === "error" ? '<p class="badge alert">Sign in is temporarily unavailable. Please try again.</p>' : "";
@@ -2828,8 +2907,14 @@ adminRouter.get("/login", (req, res) => {
     req.query.onboard === "1" ? '<p class="badge ok">Property onboarding complete. You can sign in now.</p>' : "";
   const onboardLink =
     '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
-  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + onboardNotice + loginPageHtml() + onboardLink;
-  res.type("html").send(renderLayout(content, false));
+  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + onboardNotice + loginPageHtml(loginHotel) + onboardLink;
+  res.type("html").send(
+    renderLayout(content, false, {
+      hotelName: loginHotel.displayName,
+      hotelSign: hotelSignForLogin(loginHotel),
+      hotelSlug: loginHotel.slug
+    })
+  );
 });
 
 adminRouter.get("/onboard", async (req, res) => {
@@ -2916,7 +3001,7 @@ adminRouter.post("/onboard", async (req, res) => {
     return;
   }
 
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/onboard?error=Platform+hotel+is+not+configured");
     return;
@@ -3043,7 +3128,10 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
   if (!normalized) return;
   if (isResetRateLimited(req, normalized)) return;
 
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const loginHotel = await resolveLoginHotel(req);
+  const hotel = loginHotel.id
+    ? await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true } })
+    : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) return;
   const user = await prisma.hotelUser.findUnique({
     where: { hotelId_email: { hotelId: hotel.id, email: normalized } },
@@ -3076,7 +3164,7 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
     }
   });
   const resetBase = (process.env.APP_BASE_URL || appBaseUrl).replace(/\/$/, "") || "https://chatastay.com";
-  const resetLink = `${resetBase}/reset-password?token=${encodeURIComponent(token)}`;
+  const resetLink = `${resetBase}/reset-password?token=${encodeURIComponent(token)}&hotel=${encodeURIComponent(loginHotel.slug)}`;
   const sent = await sendPasswordResetEmail(user.email, resetLink);
   if (!sent) {
     await prisma.auditLog.create({
@@ -3108,7 +3196,7 @@ async function consumePasswordResetToken(rawToken: string, newPassword: string):
     }
   });
   if (!user || !user.isActive) {
-    const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (hotel) {
       await prisma.auditLog.create({
         data: {
@@ -3162,6 +3250,7 @@ async function consumePasswordResetToken(rawToken: string, newPassword: string):
 async function authenticateEmailLogin(req: Request, res: Response): Promise<string | null> {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const password = String(req.body.password ?? "");
+  const loginHotel = await resolveLoginHotel(req);
 
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD ?? "admin123";
@@ -3171,12 +3260,17 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
       staffId: "STAFF-SUPERADMIN",
       email,
       role: "MANAGER",
-      permissions: getPermissionsForEmail(email)
+      permissions: getPermissionsForEmail(email),
+      hotelId: loginHotel.id || undefined,
+      hotelSlug: loginHotel.slug,
+      hotelName: loginHotel.displayName
     });
     return "MANAGER";
   }
   try {
-    const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+    const hotel = loginHotel.id
+      ? await prisma.hotel.findUnique({ where: { id: loginHotel.id } })
+      : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
     if (hotel) {
       const hotelUser = await prisma.hotelUser.findUnique({
         where: { hotelId_email: { hotelId: hotel.id, email } }
@@ -3188,7 +3282,10 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
             staffId: hotelUser.id,
             email,
             role: String(hotelUser.role),
-            permissions: effectivePermissions
+            permissions: effectivePermissions,
+            hotelId: hotel.id,
+            hotelSlug: hotel.slug,
+            hotelName: hotel.displayName
           });
           await prisma.hotelUser.update({
             where: { id: hotelUser.id },
@@ -3209,8 +3306,11 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
   try {
     const username = String(req.body.username ?? "").trim().toLowerCase();
     const pin = String(req.body.pin ?? "").trim();
+    const loginHotel = await resolveLoginHotel(req);
     if (!username || pin.length < 4) return null;
-    const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = loginHotel.id
+      ? await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true, slug: true, displayName: true } })
+      : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, slug: true, displayName: true } });
     if (!hotel) return null;
     if (isStaffLoginRateLimited(req, hotel.id, username)) {
       await prisma.auditLog.create({
@@ -3287,7 +3387,10 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
       staffId: hotelUser.id,
       email: hotelUser.email ?? username,
       role: String(hotelUser.role),
-      permissions: effectivePermissions
+      permissions: effectivePermissions,
+      hotelId: hotel.id,
+      hotelSlug: hotel.slug,
+      hotelName: hotel.displayName
     });
     await prisma.hotelUser.update({
       where: { id: hotelUser.id },
@@ -3302,42 +3405,58 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
 
 adminRouter.post("/login", async (req, res) => {
   try {
+    const loginHotel = await resolveLoginHotel(req);
     const role = await authenticateEmailLogin(req, res);
     if (role) {
       const s = getSession(req);
       res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/profile");
       return;
     }
-    res.status(401).type("html").send(renderLayout(loginPageHtml(), false));
+    res.status(401).type("html").send(
+      renderLayout(loginPageHtml(loginHotel), false, {
+        hotelName: loginHotel.displayName,
+        hotelSign: hotelSignForLogin(loginHotel),
+        hotelSlug: loginHotel.slug
+      })
+    );
   } catch (err) {
     console.error("[Auth] /admin/login unexpected error:", err instanceof Error ? err.message : err);
     res.redirect("/admin/login?auth=error");
   }
 });
 
-adminRouter.get("/forgot-password", (req, res) => {
+adminRouter.get("/forgot-password", async (req, res) => {
   if (isAuthenticated(req)) {
     res.redirect("/admin/dashboard");
     return;
   }
+  const loginHotel = await resolveLoginHotel(req);
   const notice = req.query.sent ? '<p class="badge ok">If an account exists for that email, we sent a reset link. Check your inbox and spam folder.</p>' : "";
   const content = `
 <h2>Forgot Password</h2>
 <p class="muted">Enter the email address for your admin account. We will send a secure reset link (valid for 15 minutes).</p>
 ${notice}
-<form method="post" action="/admin/forgot-password" style="max-width: 420px">
+<form method="post" action="/admin/forgot-password?hotel=${encodeURIComponent(loginHotel.slug)}" style="max-width: 420px">
+  <input type="hidden" name="hotelSlug" value="${escapeHtml(loginHotel.slug)}" />
   <label for="email">Email</label><br />
   <input id="email" type="email" name="email" required style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
   <button type="submit" style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700">Send reset link</button>
 </form>
-<p class="muted" style="margin-top: 12px"><a href="/admin/login">Back to login</a></p>`;
-  res.type("html").send(renderLayout(content, false));
+<p class="muted" style="margin-top: 12px"><a href="/admin/login?hotel=${encodeURIComponent(loginHotel.slug)}">Back to login</a></p>`;
+  res.type("html").send(
+    renderLayout(content, false, {
+      hotelName: loginHotel.displayName,
+      hotelSign: hotelSignForLogin(loginHotel),
+      hotelSlug: loginHotel.slug
+    })
+  );
 });
 
 adminRouter.post("/forgot-password", async (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
+  const loginHotel = await resolveLoginHotel(req);
   await createPasswordResetForEmail(email, req);
-  res.redirect("/admin/forgot-password?sent=1");
+  res.redirect(`/admin/forgot-password?sent=1&hotel=${encodeURIComponent(loginHotel.slug)}`);
 });
 
 adminRouter.get("/reset-password", async (req, res) => {
@@ -3421,7 +3540,7 @@ authRouter.post("/reset-password", async (req, res) => {
   const newPassword = String(req.body.newPassword ?? "");
   const consumed = await consumePasswordResetToken(token, newPassword);
   if (!consumed.ok) {
-    const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (hotel) {
       const action =
         consumed.reason === "invalid_or_expired" ? "PASSWORD_RESET_INVALID_TOKEN" : consumed.reason === "invalid_input" ? "PASSWORD_RESET_INVALID_TOKEN" : "PASSWORD_RESET_EXPIRED";
@@ -3448,11 +3567,12 @@ authRouter.get("/reset-password", (req, res) => {
 
 authRouter.post("/staff-login", async (req, res) => {
   try {
+    const loginHotel = await resolveLoginHotel(req);
     const role = await authenticateStaffLogin(req, res);
     if (!role) {
       const accept = String(req.headers.accept ?? "").toLowerCase();
       if (accept.includes("text/html")) {
-        res.redirect("/admin/login?staff=failed");
+        res.redirect(`/admin/login?staff=failed&hotel=${encodeURIComponent(loginHotel.slug)}`);
         return;
       }
       res.status(401).json({ ok: false, error: "invalid_credentials" });
@@ -3470,7 +3590,8 @@ authRouter.post("/staff-login", async (req, res) => {
     console.error("[Auth] /auth/staff-login unexpected error:", err instanceof Error ? err.message : err);
     const accept = String(req.headers.accept ?? "").toLowerCase();
     if (accept.includes("text/html")) {
-      res.redirect("/admin/login?staff=error");
+      const slug = String(req.body?.hotelSlug ?? req.body?.hotel ?? defaultHotelSlug).trim() || defaultHotelSlug;
+      res.redirect(`/admin/login?staff=error&hotel=${encodeURIComponent(slug)}`);
       return;
     }
     res.status(500).json({ ok: false, error: "staff_login_unavailable" });
@@ -3479,11 +3600,12 @@ authRouter.post("/staff-login", async (req, res) => {
 
 authRouter.post("/email-login", async (req, res) => {
   try {
+    const loginHotel = await resolveLoginHotel(req);
     const role = await authenticateEmailLogin(req, res);
     if (!role) {
       const accept = String(req.headers.accept ?? "").toLowerCase();
       if (accept.includes("text/html")) {
-        res.redirect("/admin/login");
+        res.redirect(`/admin/login?hotel=${encodeURIComponent(loginHotel.slug)}`);
         return;
       }
       res.status(401).json({ ok: false, error: "invalid_credentials" });
@@ -3501,7 +3623,8 @@ authRouter.post("/email-login", async (req, res) => {
     console.error("[Auth] /auth/email-login unexpected error:", err instanceof Error ? err.message : err);
     const accept = String(req.headers.accept ?? "").toLowerCase();
     if (accept.includes("text/html")) {
-      res.redirect("/admin/login?auth=error");
+      const slug = String(req.body?.hotelSlug ?? req.body?.hotel ?? defaultHotelSlug).trim() || defaultHotelSlug;
+      res.redirect(`/admin/login?auth=error&hotel=${encodeURIComponent(slug)}`);
       return;
     }
     res.status(500).json({ ok: false, error: "email_login_unavailable" });
@@ -3668,7 +3791,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
     isActive: boolean | null;
   }> = [];
   try {
-    const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
     if (!hotel) {
       res.type("html").send(renderLayout("<h2>Users</h2><p>No hotel data found.</p>", true));
       return;
@@ -3827,7 +3950,7 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
   };
 
   try {
-    const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
     if (!hotel) {
       jsonErr(404, "Hotel not found.");
       return;
@@ -3956,7 +4079,7 @@ adminRouter.get("/dashboard", requireAuth, (_req, res) => {
 
 adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -4066,7 +4189,7 @@ adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
 
 adminRouter.get("/analytics/optimization", requireAuth, async (_req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true }
   });
   if (!hotel) {
@@ -4122,7 +4245,7 @@ function leadOutreachTemplate(template: "initial_intro" | "followup_1" | "follow
 }
 
 adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Leads</h2><p>No hotel data found.</p>", true));
     return;
@@ -4222,7 +4345,7 @@ adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, r
 });
 
 adminRouter.post("/leads", requireAuth, requirePlatformAcquisition, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/leads");
     return;
@@ -4253,7 +4376,7 @@ adminRouter.post("/leads", requireAuth, requirePlatformAcquisition, async (req, 
 });
 
 adminRouter.post("/leads/:leadId/status", requireAuth, requirePlatformAcquisition, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/leads");
     return;
@@ -4290,7 +4413,7 @@ adminRouter.post("/leads/:leadId/status", requireAuth, requirePlatformAcquisitio
 });
 
 adminRouter.post("/leads/:leadId/outreach", requireAuth, requirePlatformAcquisition, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
   if (!hotel) {
     res.redirect("/admin/leads");
     return;
@@ -4381,7 +4504,7 @@ adminRouter.post("/leads/:leadId/outreach", requireAuth, requirePlatformAcquisit
 
 adminRouter.get("/profile", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: {
       subscriptions: {
         where: { status: { in: ["ACTIVE", "TRIALING", "PAST_DUE"] } },
@@ -4894,7 +5017,7 @@ type RoomBoardLoadViewResult = {
 
 async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts): Promise<RoomBoardLoadViewResult | null> {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: {
       roomTypes: { where: { isActive: true }, orderBy: { name: "asc" }, include: { property: true, roomUnits: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } } }
     }
@@ -5392,7 +5515,7 @@ async function backfillMissingRoomUnitAssignmentsForDate(params: { hotelId: stri
 }
 
 adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/room-board");
     return;
@@ -5527,7 +5650,7 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
 });
 
 adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
   if (!hotel) {
     res.type("html").send(renderHkLayout({ title: "My tasks", active: "tasks", content: "<h2>My tasks</h2><p>No hotel data.</p>" }));
     return;
@@ -5702,7 +5825,7 @@ ${hkShowingNote}
 });
 
 adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const shift = parseHousekeepingShiftInput(req.body.shift);
@@ -5759,7 +5882,7 @@ adminRouter.post("/hk/task/:taskId/assign", requireAuth, requireHousekeepingPort
 });
 
 adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const shift = parseHousekeepingShiftInput(req.body.shift);
@@ -5825,7 +5948,7 @@ adminRouter.post("/hk/task/:taskId/start-cleaning", requireAuth, requireHousekee
 });
 
 adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPortal, requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const targetStatusRaw = String(req.body.targetStatus ?? "AVAILABLE").trim().toUpperCase();
@@ -6174,7 +6297,7 @@ async function respondManualCheckInValidationError(
 
 adminRouter.get("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -6212,7 +6335,7 @@ adminRouter.get("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"),
 
 adminRouter.get("/front-desk/check-in/room-options", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true }
   });
   if (!hotel) {
@@ -6241,7 +6364,7 @@ adminRouter.get("/front-desk/check-in/room-options", requirePermission("BOOKINGS
 
 adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -6561,7 +6684,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
 
 adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -6616,7 +6739,7 @@ ${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-ra
 
 adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true }
   });
   if (!hotel) {
@@ -6780,7 +6903,7 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
 
 adminRouter.get("/shifts", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -6857,7 +6980,7 @@ ${filterForm}
 
 adminRouter.get("/shift-report/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -6897,7 +7020,7 @@ adminRouter.get("/shift-report/:id", requirePermission("BOOKINGS", "VIEW"), asyn
 
 adminRouter.get("/shift-close", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -7136,7 +7259,7 @@ ${snapshotHtml}
 adminRouter.post("/shift-close", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const session = getSession(req);
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, currency: true }
   });
   if (!hotel || !session) {
@@ -7347,7 +7470,7 @@ adminRouter.post("/shift-close", requirePermission("BOOKINGS", "VIEW"), async (r
 });
 
 adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true, currency: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true, currency: true } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Handover Sheet</h2><p>No hotel data found.</p>", true));
     return;
@@ -7571,7 +7694,7 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
 
 adminRouter.get("/room-board/detail/:roomTypeId", requirePermission("ROOMS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { roomTypes: { where: { isActive: true }, include: { property: true } } }
   });
   if (!hotel) {
@@ -7650,7 +7773,7 @@ adminRouter.get("/room-board/detail/:roomTypeId", requirePermission("ROOMS", "VI
 
 adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, currency: true }
   });
   if (!hotel) {
@@ -8920,7 +9043,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
   try {
     const staffId = requireHotelStaffIdForFolioJson(req, res);
     if (staffId === null) return;
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9079,7 +9202,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson
   try {
     const staffId = requireHotelStaffIdForFolioJson(req, res);
     if (staffId === null) return;
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9154,7 +9277,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/:txnId/void", requirePermission
   try {
     const staffId = requireHotelStaffIdForFolioJson(req, res);
     if (staffId === null) return;
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9234,7 +9357,7 @@ adminRouter.get("/api/bookings/:bookingId/folio", requirePermissionJson("BOOKING
       res.status(401).json({ ok: false, error: "Unauthorized" });
       return;
     }
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9262,7 +9385,7 @@ adminRouter.get("/api/bookings/:bookingId/folio/summary", requirePermissionJson(
       res.status(401).json({ ok: false, error: "Unauthorized" });
       return;
     }
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9299,7 +9422,7 @@ adminRouter.get("/api/bookings/:bookingId/folio/transactions", requirePermission
       res.status(401).json({ ok: false, error: "Unauthorized" });
       return;
     }
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9330,7 +9453,7 @@ adminRouter.post("/api/bookings/:bookingId/folio/refund", requirePermissionJson(
   try {
     const staffId = requireHotelStaffIdForFolioJson(req, res);
     if (staffId === null) return;
-    const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+    const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
     if (!hotel) {
       res.status(400).json({ ok: false, error: "Hotel not found" });
       return;
@@ -9387,7 +9510,7 @@ adminRouter.post("/api/bookings/:bookingId/folio/refund", requirePermissionJson(
 });
 
 adminRouter.post("/room-board/unit/:unitId/details", requirePermission("ROOMS", "EDIT"), idCardUpload.single("idCard"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/room-board");
     return;
@@ -9474,7 +9597,7 @@ adminRouter.post("/room-board/unit/:unitId/details", requirePermission("ROOMS", 
 });
 
 adminRouter.get("/room-board/unit/:unitId/invoice", requirePermission("ROOMS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true, currency: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true, currency: true } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Guest Invoice</h2><p>No hotel data found.</p>", true));
     return;
@@ -9607,7 +9730,7 @@ ${errorBanner}
 
 adminRouter.post("/room-board/unit/:unitId/send-whatsapp", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -9740,7 +9863,7 @@ adminRouter.post("/room-board/unit/:unitId/send-whatsapp", requirePermission("RO
 });
 
 adminRouter.get("/ai-analytics", requireAuth, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>AI Analytics</h2><p>No hotel data found.</p>", true));
     return;
@@ -9944,7 +10067,7 @@ adminRouter.post("/offers/:id/toggle", requirePermission("ROOMS", "EDIT"), async
 });
 
 adminRouter.get("/campaigns", requirePermission("BOOKINGS", "VIEW"), async (_req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Campaigns</h2><p>No hotel data found.</p>", true));
     return;
@@ -9982,7 +10105,7 @@ adminRouter.get("/campaigns", requirePermission("BOOKINGS", "VIEW"), async (_req
 });
 
 adminRouter.get("/campaigns/new", requirePermission("BOOKINGS", "VIEW"), async (_req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
     return;
@@ -10010,7 +10133,7 @@ adminRouter.get("/campaigns/new", requirePermission("BOOKINGS", "VIEW"), async (
 });
 
 adminRouter.post("/campaigns/new", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/campaigns");
     return;
@@ -10150,7 +10273,7 @@ adminRouter.post("/campaigns/new", requirePermission("BOOKINGS", "EDIT"), async 
 });
 
 adminRouter.get("/campaigns/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
     return;
@@ -10228,7 +10351,7 @@ ${sentNotice}
 });
 
 adminRouter.get("/booking-funnel", requireAuth, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Booking Funnel</h2><p>No hotel data found.</p>", true));
     return;
@@ -10317,7 +10440,7 @@ adminRouter.get("/booking-funnel", requireAuth, async (req, res) => {
 });
 
 adminRouter.get("/routing-health", requireAuth, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Routing Health</h2><p>No hotel data found.</p>", true));
     return;
@@ -10371,7 +10494,7 @@ adminRouter.get("/routing-health", requireAuth, async (req, res) => {
 
 adminRouter.get("/rooms", requirePermission("ROOMS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: {
       roomTypes: {
         where: { isActive: true },
@@ -10537,7 +10660,7 @@ ${unitSavedInfo}
 });
 
 adminRouter.post("/rooms/update/:roomTypeId", requirePermission("ROOMS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/rooms");
     return;
@@ -10568,7 +10691,7 @@ adminRouter.post("/rooms/update/:roomTypeId", requirePermission("ROOMS", "EDIT")
 });
 
 adminRouter.post("/rooms/:roomTypeId/units/add", requirePermission("ROOMS", "MANAGE"), requirePlatformOwner, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/rooms");
     return;
@@ -10593,7 +10716,7 @@ adminRouter.post("/rooms/:roomTypeId/units/add", requirePermission("ROOMS", "MAN
 });
 
 adminRouter.post("/rooms/:roomTypeId/units/bulk", requirePermission("ROOMS", "MANAGE"), requirePlatformOwner, async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/rooms");
     return;
@@ -10643,7 +10766,7 @@ adminRouter.post("/rooms/units/:id/toggle", requirePermission("ROOMS", "MANAGE")
 });
 
 adminRouter.post("/rooms/season", requirePermission("ROOMS", "MANAGE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/rooms");
     return;
@@ -10677,7 +10800,7 @@ adminRouter.post("/rooms/season", requirePermission("ROOMS", "MANAGE"), async (r
 });
 
 adminRouter.post("/rooms/offers", requirePermission("ROOMS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/rooms");
     return;
@@ -10738,7 +10861,7 @@ adminRouter.post("/rooms/offers", requirePermission("ROOMS", "EDIT"), async (req
 
 adminRouter.get("/inventory", requirePermission("ROOMS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
   });
   if (!hotel) {
@@ -10807,7 +10930,7 @@ ${info}
 });
 
 adminRouter.post("/inventory/update", requirePermission("ROOMS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/inventory");
     return;
@@ -10856,7 +10979,7 @@ adminRouter.post("/inventory/update", requirePermission("ROOMS", "EDIT"), async 
 
 adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -10960,7 +11083,7 @@ ${
 
 adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true }
   });
   if (!hotel) {
@@ -11107,7 +11230,7 @@ ${savedNotice}
 });
 
 adminRouter.post("/guests/:guestId", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -11154,7 +11277,7 @@ adminRouter.post("/guests/:guestId", requirePermission("BOOKINGS", "EDIT"), asyn
 });
 
 adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Bookings</h2><p>No hotel data found.</p>", true));
     return;
@@ -11298,7 +11421,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
 });
 
 adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true, currency: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, currency: true } });
   if (!hotel) {
     res.status(404).send("Hotel not found");
     return;
@@ -11402,7 +11525,7 @@ adminRouter.get("/reports", requirePermission("REPORTS", "VIEW"), (_req, res) =>
 
 adminRouter.get("/daily-digest", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug }
+    where: { slug: activeHotelSlug() }
   });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Daily digest</h2><p>No hotel data found.</p>", true));
@@ -11486,7 +11609,7 @@ ${flash}
 
 adminRouter.post("/daily-digest/send", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug }
+    where: { slug: activeHotelSlug() }
   });
   if (!hotel) {
     res.redirect("/admin/daily-digest?err=" + encodeURIComponent("No hotel"));
@@ -11503,7 +11626,7 @@ adminRouter.post("/daily-digest/send", requireAuth, async (req, res) => {
 
 adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { roomTypes: { where: { isActive: true }, select: { id: true, totalInventory: true } } }
   });
   if (!hotel) {
@@ -11694,7 +11817,7 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
 
 adminRouter.get("/reports-center", requirePermission("REPORTS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
   });
   if (!hotel) {
@@ -12021,7 +12144,7 @@ ${broadcastNotice}
 });
 
 adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true, currency: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true, currency: true } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>F&amp;B menu</h2><p>No hotel data found.</p>", true));
     return;
@@ -12881,7 +13004,7 @@ ${expenseErrStr ? `<p class="badge alert" style="padding:12px 14px;margin-bottom
 });
 
 adminRouter.post("/fb/menu/charge-folio", requireFbOperationsEdit(), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
     return;
@@ -12952,7 +13075,7 @@ adminRouter.post("/fb/menu/charge-folio", requireFbOperationsEdit(), async (req,
 });
 
 adminRouter.post("/fb/menu/append-resort-menu", requireFbOperationsEdit(), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
     return;
@@ -12969,7 +13092,7 @@ adminRouter.post("/fb/menu/append-resort-menu", requireFbOperationsEdit(), async
 });
 
 adminRouter.post("/fb/menu/add", requireFbOperationsEdit(), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
     return;
@@ -12991,7 +13114,7 @@ adminRouter.post("/fb/menu/add", requireFbOperationsEdit(), async (req, res) => 
 });
 
 adminRouter.post("/fb/menu/:itemId/toggle", requireFbOperationsEdit(), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
     return;
@@ -13006,7 +13129,7 @@ adminRouter.post("/fb/menu/:itemId/toggle", requireFbOperationsEdit(), async (re
 adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, res) => {
   const session = getSession(req);
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, currency: true }
   });
   if (!hotel || !session) {
@@ -13055,7 +13178,7 @@ adminRouter.post("/fb/menu/direct-sale", requireFbOperationsEdit(), async (req, 
 
 adminRouter.post("/fb/menu/expense", requireFbOperationsEdit(), async (req, res) => {
   const session = getSession(req);
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel || !session) {
     res.redirect("/admin/fb/menu?expenseErr=" + encodeURIComponent("Session or hotel missing."));
     return;
@@ -13093,7 +13216,7 @@ adminRouter.post("/fb/menu/expense", requireFbOperationsEdit(), async (req, res)
 });
 
 adminRouter.get("/bookings/:id/fb-order", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true, displayName: true, currency: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true, currency: true } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -13161,7 +13284,7 @@ ${err}
 });
 
 adminRouter.post("/bookings/:id/fb-order", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -13251,7 +13374,7 @@ function outletTicketWhatsappBadgeHtml(t: {
 }
 
 adminRouter.get("/restaurant-ops", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (_req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { displayName: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { displayName: true } });
   const title = hotel?.displayName ?? "Hotel";
   const content = `
 <h2>Restaurant &amp; outlet operations</h2>
@@ -13273,7 +13396,7 @@ adminRouter.get("/restaurant-ops", requirePermissionAny([{ module: "OUTLET", act
 
 adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true }
   });
   if (!hotel) {
@@ -13835,7 +13958,7 @@ ${alertsHtml}
 });
 
 adminRouter.post("/housekeeping/notifications/read", requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   if (!hotel || !session || session.staffId === "STAFF-SUPERADMIN") {
     res.redirect("/admin/housekeeping");
@@ -13854,7 +13977,7 @@ adminRouter.post("/housekeeping/notifications/read", requirePermissionAny([{ mod
 });
 
 adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const shift = parseHousekeepingShiftInput(req.body.shift);
@@ -13929,7 +14052,7 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
 });
 
 adminRouter.post("/housekeeping/task/:taskId/start", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const shift = parseHousekeepingShiftInput(req.body.shift);
@@ -13986,7 +14109,7 @@ adminRouter.post("/housekeeping/task/:taskId/start", requirePermissionAny([{ mod
 });
 
 adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ module: "HOUSEKEEPING", action: "MANAGE" }, { module: "ROOMS", action: "MANAGE" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const assigneeId = String((req.body as { assigneeId?: unknown }).assigneeId ?? "").trim();
@@ -14063,7 +14186,7 @@ adminRouter.post("/housekeeping/task/:taskId/reassign", requirePermissionAny([{ 
 });
 
 adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ module: "HOUSEKEEPING", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   const session = getSession(req);
   const taskId = String(req.params.taskId ?? "");
   const targetStatusRaw = String(req.body.targetStatus ?? "AVAILABLE").trim().toUpperCase();
@@ -14127,7 +14250,7 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
 
 adminRouter.get("/outlet-dashboard", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -14340,7 +14463,7 @@ ${errBanner}
 
 adminRouter.get("/outlet-orders", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
@@ -14486,7 +14609,7 @@ ${errBanner}
 });
 
 adminRouter.post("/outlet-orders/:ticketId/status", requirePermissionAny([{ module: "OUTLET", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
-  const hotel = await prisma.hotel.findFirst({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/outlet-dashboard");
     return;
@@ -14542,7 +14665,7 @@ adminRouter.post("/outlet-orders/:ticketId/status", requirePermissionAny([{ modu
 
 adminRouter.get("/bookings/:id/invoice-print", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, city: true, country: true }
   });
   if (!hotel) {
@@ -14595,7 +14718,7 @@ adminRouter.get("/bookings/:id/invoice-print", requirePermission("BOOKINGS", "VI
 });
 
 adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Booking</h2><p>No hotel data found.</p>", true));
     return;
@@ -14893,7 +15016,7 @@ ${groupSectionHtml}
 });
 
 adminRouter.post("/reports-center/guest-broadcast", requirePermission("REPORTS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/reports-center");
     return;
@@ -14947,7 +15070,7 @@ adminRouter.post("/reports-center/guest-broadcast", requirePermission("REPORTS",
 });
 
 adminRouter.get("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Select Unit</h2><p>No hotel data found.</p>", true));
     return;
@@ -15033,7 +15156,7 @@ ${renderBookingWizard(2, { bookingId: booking.id, conversationId: booking.conver
 });
 
 adminRouter.post("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15128,7 +15251,7 @@ adminRouter.post("/bookings/:id/select-unit", requirePermission("BOOKINGS", "EDI
 });
 
 adminRouter.get("/bookings/:id/change-room", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Change room</h2><p>No hotel data found.</p>", true));
     return;
@@ -15225,7 +15348,7 @@ ${errorBanner}
 });
 
 adminRouter.post("/bookings/:id/change-room", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15295,7 +15418,7 @@ adminRouter.post("/bookings/:id/change-room", requirePermission("BOOKINGS", "EDI
 });
 
 adminRouter.get("/bookings/:id/add-linked-room", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Add linked room</h2><p>No hotel data found.</p>", true));
     return;
@@ -15365,7 +15488,7 @@ ${errorBanner}
 });
 
 adminRouter.post("/bookings/:id/add-linked-room", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15561,7 +15684,7 @@ adminRouter.post("/bookings/:id/add-linked-room", requirePermission("BOOKINGS", 
 });
 
 adminRouter.get("/bookings/:id/confirm", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Confirm Booking</h2><p>No hotel data found.</p>", true));
     return;
@@ -15617,7 +15740,7 @@ ${inventoryWarning}
 });
 
 adminRouter.post("/bookings/:id/confirm", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15753,7 +15876,7 @@ adminRouter.post("/bookings/:id/confirm", requirePermission("BOOKINGS", "EDIT"),
 });
 
 adminRouter.post("/bookings/:id/send-invoice", requirePermission("BILLING", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15782,7 +15905,7 @@ adminRouter.post("/bookings/:id/send-invoice", requirePermission("BILLING", "CRE
 });
 
 adminRouter.post("/bookings/:id/send-quotation", requirePermission("BILLING", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15808,7 +15931,7 @@ adminRouter.post("/bookings/:id/send-quotation", requirePermission("BILLING", "C
 });
 
 adminRouter.post("/bookings/:id/send-receipt", requirePermission("BILLING", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15834,7 +15957,7 @@ adminRouter.post("/bookings/:id/send-receipt", requirePermission("BILLING", "CRE
 });
 
 adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -15957,7 +16080,7 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
 });
 
 adminRouter.post("/bookings/:id/payment", requirePermission("BILLING", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/bookings");
     return;
@@ -16011,7 +16134,7 @@ adminRouter.post("/bookings/:id/payment", requirePermission("BILLING", "EDIT"), 
 
 adminRouter.get("/calendar", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
   });
   if (!hotel) {
@@ -16177,7 +16300,7 @@ adminRouter.get(
   requirePermissionJson("CONVERSATIONS", "VIEW"),
   async (req, res) => {
     const hotel = await prisma.hotel.findUnique({
-      where: { slug: defaultHotelSlug },
+      where: { slug: activeHotelSlug() },
       select: { id: true }
     });
     if (!hotel) {
@@ -16295,7 +16418,7 @@ adminRouter.get(
   requirePermissionJson("CONVERSATIONS", "VIEW"),
   async (req, res) => {
     const hotel = await prisma.hotel.findUnique({
-      where: { slug: defaultHotelSlug },
+      where: { slug: activeHotelSlug() },
       select: { id: true }
     });
     if (!hotel) {
@@ -16334,7 +16457,7 @@ adminRouter.get(
 );
 
 adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Conversations</h2><p>No hotel data found.</p>", true));
     return;
@@ -16432,7 +16555,7 @@ adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), as
 });
 
 adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Conversation</h2><p>No hotel data found.</p>", true));
     return;
@@ -16597,7 +16720,7 @@ ${replyError}
 });
 
 adminRouter.post("/conversations/:id/switch-to-receptionist", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/conversations");
     return;
@@ -16665,7 +16788,7 @@ adminRouter.post("/conversations/:id/switch-to-receptionist", requirePermission(
 });
 
 adminRouter.post("/conversations/:id/end-agent-handoff", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/conversations");
     return;
@@ -16726,7 +16849,7 @@ adminRouter.post("/conversations/:id/end-agent-handoff", requirePermission("CONV
 });
 
 adminRouter.post("/conversations/:id/state", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/conversations");
     return;
@@ -16764,7 +16887,7 @@ adminRouter.post("/conversations/:id/state", requirePermission("CONVERSATIONS", 
 });
 
 adminRouter.post("/conversations/:id/reply", requirePermission("CONVERSATIONS", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/conversations");
     return;
@@ -16831,7 +16954,7 @@ adminRouter.post("/conversations/:id/reply", requirePermission("CONVERSATIONS", 
 });
 
 adminRouter.get("/conversations/:id/create-booking", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/conversations");
     return;
@@ -16898,7 +17021,7 @@ ${renderBookingWizard(1, { conversationId: conversation.id })}
 });
 
 adminRouter.post("/conversations/:id/create-booking", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/conversations");
     return;
@@ -17031,7 +17154,7 @@ adminRouter.post("/conversations/:id/create-booking", requirePermission("BOOKING
 
 adminRouter.get("/subscription", requirePermission("BILLING", "VIEW"), async (_req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: {
       subscriptions: {
         where: { status: { in: ["ACTIVE", "TRIALING", "PAST_DUE"] } },
@@ -17140,7 +17263,7 @@ adminRouter.get("/subscription", requirePermission("BILLING", "VIEW"), async (_r
 
 adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug }
+    where: { slug: activeHotelSlug() }
   });
 
   if (!hotel) {
@@ -17246,7 +17369,7 @@ adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, re
 
 adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug }
+    where: { slug: activeHotelSlug() }
   });
 
   if (!hotel) {
@@ -17329,7 +17452,7 @@ adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (
 
 adminRouter.get("/integrations", requireAuth, async (_req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: {
       integrations: {
         include: { mappings: true, syncJobs: { orderBy: { createdAt: "desc" }, take: 1 } },
@@ -17434,7 +17557,7 @@ adminRouter.get("/integrations", requireAuth, async (_req, res) => {
 
 adminRouter.post("/integrations/booking-com/prepare-sync", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { integrations: true }
   });
   if (!hotel) {
@@ -17487,7 +17610,7 @@ adminRouter.post("/integrations/booking-com/prepare-sync", requireAuth, async (r
 
 adminRouter.get("/setup", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
@@ -17749,7 +17872,7 @@ ${errorNotice}
 
 adminRouter.post("/setup", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
@@ -17849,7 +17972,7 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
 
 adminRouter.post("/setup/send-test", requireAuth, async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
-    where: { slug: defaultHotelSlug },
+    where: { slug: activeHotelSlug() },
     include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {

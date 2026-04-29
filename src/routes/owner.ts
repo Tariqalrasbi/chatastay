@@ -1571,6 +1571,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
       <td>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Open</a>
+          <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Admin Login</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/extranet">Open Extranet (Safe)</a>
@@ -2190,7 +2191,7 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
   <a class="btn-link" href="/owner/hotels">Back to hotels</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity (totals)</a>
-  <a class="btn-link primary" href="/admin/dashboard">Open partner extranet</a>
+  <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Open hotel admin login</a>
 </div>
 <div class="grid-2">
   <section>
