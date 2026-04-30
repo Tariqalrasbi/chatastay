@@ -68,9 +68,9 @@
     <div id="loginPanelStaff" class="login-panel" role="tabpanel" aria-labelledby="loginTabStaff" hidden>
       <form method="post" action="/auth/staff-login" id="loginFormStaff">
         <fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>
-          <label class="login-label" for="loginStaffUser">Staff ID or Username</label>
-          <input class="login-input" id="loginStaffUser" type="text" name="username" required autocomplete="username" />
-          <label class="login-label" for="loginStaffPin">4-digit PIN</label>
+          <label class="login-label" for="loginStaffUser">Staff email or username</label>
+          <input class="login-input" id="loginStaffUser" type="text" name="username" required autocomplete="username" placeholder="denish or denish@hotel.com" />
+          <label class="login-label" for="loginStaffPin">PIN or password</label>
           <input
             class="login-input"
             id="loginStaffPin"
@@ -78,10 +78,9 @@
             name="pin"
             required
             autocomplete="current-password"
-            inputmode="numeric"
             minlength="4"
-            maxlength="12"
-            placeholder="••••"
+            maxlength="128"
+            placeholder="4-digit PIN or password"
           />
           <button class="login-btn login-btn--staff" type="submit" id="loginBtnStaff">Access Workspace</button>
         </fieldset>

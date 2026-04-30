@@ -3493,19 +3493,19 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
 
 async function authenticateStaffLogin(req: Request, res: Response): Promise<string | null> {
   try {
-    const username = String(req.body.username ?? "").trim().toLowerCase();
-    const pin = String(req.body.pin ?? "").trim();
+    const identifier = String(req.body.username ?? "").trim().toLowerCase();
+    const credential = String(req.body.pin ?? "").trim();
     const loginHotel = await resolveLoginHotel(req);
-    if (!username || pin.length < 4) return null;
+    if (!identifier || !credential) return null;
     const hotel = loginHotel.id
       ? await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true, slug: true, displayName: true } })
       : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, slug: true, displayName: true } });
     if (!hotel) return null;
-    if (isStaffLoginRateLimited(req, hotel.id, username)) {
+    if (isStaffLoginRateLimited(req, hotel.id, identifier)) {
       await prisma.auditLog.create({
         data: {
           hotelId: hotel.id,
-          actorEmail: username,
+          actorEmail: identifier,
           action: "STAFF_LOGIN_FAILED",
           entityType: "Auth",
           metadataJson: JSON.stringify({ reason: "rate_limited", ip: getRequestIp(req) })
@@ -3513,29 +3513,32 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
       });
       return null;
     }
-    const hotelUser = await prisma.hotelUser.findUnique({
-      where: { hotelId_username: { hotelId: hotel.id, username } }
+    const hotelUser = await prisma.hotelUser.findFirst({
+      where: {
+        hotelId: hotel.id,
+        OR: [{ username: identifier }, { email: identifier }]
+      }
     });
-    if (!hotelUser?.isActive || !hotelUser.pinHash) {
-      recordStaffLoginFailure(req, hotel.id, username);
+    if (!hotelUser?.isActive || (!hotelUser.pinHash && !hotelUser.passwordHash)) {
+      recordStaffLoginFailure(req, hotel.id, identifier);
       await prisma.auditLog.create({
         data: {
           hotelId: hotel.id,
-          actorEmail: username,
+          actorEmail: identifier,
           action: "STAFF_LOGIN_FAILED",
           entityType: "Auth",
-          metadataJson: JSON.stringify({ reason: "user_not_found_or_pin_missing", ip: getRequestIp(req) })
+          metadataJson: JSON.stringify({ reason: "user_not_found_or_secret_missing", ip: getRequestIp(req) })
         }
       });
       return null;
     }
     if (!["FRONTDESK", "HOUSEKEEPING", "STAFF", "OWNER"].includes(String(hotelUser.role))) {
-      recordStaffLoginFailure(req, hotel.id, username);
+      recordStaffLoginFailure(req, hotel.id, identifier);
       await prisma.auditLog.create({
         data: {
           hotelId: hotel.id,
           actorUserId: hotelUser.id,
-          actorEmail: hotelUser.email ?? username,
+          actorEmail: hotelUser.email ?? identifier,
           action: "STAFF_LOGIN_FAILED",
           entityType: "Auth",
           entityId: hotelUser.id,
@@ -3544,37 +3547,39 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
       });
       return null;
     }
-    if (!(await verifyPin(pin, hotelUser.pinHash))) {
-      recordStaffLoginFailure(req, hotel.id, username);
+    const pinOk = hotelUser.pinHash ? await verifyPin(credential, hotelUser.pinHash) : false;
+    const passwordOk = hotelUser.passwordHash ? await verifySecret(credential, hotelUser.passwordHash) : false;
+    if (!pinOk && !passwordOk) {
+      recordStaffLoginFailure(req, hotel.id, identifier);
       await prisma.auditLog.create({
         data: {
           hotelId: hotel.id,
           actorUserId: hotelUser.id,
-          actorEmail: hotelUser.email ?? username,
+          actorEmail: hotelUser.email ?? identifier,
           action: "STAFF_LOGIN_FAILED",
           entityType: "Auth",
           entityId: hotelUser.id,
-          metadataJson: JSON.stringify({ reason: "pin_invalid", ip: getRequestIp(req) })
+          metadataJson: JSON.stringify({ reason: "credential_invalid", ip: getRequestIp(req) })
         }
       });
       return null;
     }
-    clearStaffLoginFailures(req, hotel.id, username);
+    clearStaffLoginFailures(req, hotel.id, identifier);
     await prisma.auditLog.create({
       data: {
         hotelId: hotel.id,
         actorUserId: hotelUser.id,
-        actorEmail: hotelUser.email ?? username,
+        actorEmail: hotelUser.email ?? identifier,
         action: "STAFF_LOGIN_SUCCESS",
         entityType: "Auth",
         entityId: hotelUser.id,
         metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
       }
     });
-    const effectivePermissions = effectivePermissionsForHotelUser(hotelUser.email ?? username, hotelUser.role);
+    const effectivePermissions = effectivePermissionsForHotelUser(hotelUser.email ?? identifier, hotelUser.role);
     issueAdminSession(res, {
       staffId: hotelUser.id,
-      email: hotelUser.email ?? username,
+      email: hotelUser.email ?? identifier,
       role: String(hotelUser.role),
       permissions: effectivePermissions,
       hotelId: hotel.id,
