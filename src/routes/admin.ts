@@ -3089,7 +3089,10 @@ adminRouter.get("/login", async (req, res) => {
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
   const authErrorNotice =
     req.query.auth === "error" ? '<p class="badge alert">Sign in is temporarily unavailable. Please try again.</p>' : "";
-  const staffNotice = req.query.staff === "failed" ? '<p class="badge alert">Staff sign in failed. Check your username and PIN.</p>' : "";
+  const staffNotice =
+    req.query.staff === "failed"
+      ? '<p class="badge alert">Staff sign in failed. Check your staff email/username and PIN/password.</p>'
+      : "";
   const staffErrorNotice =
     req.query.staff === "error" ? '<p class="badge alert">Staff sign in is temporarily unavailable. Please try again.</p>' : "";
   const onboardNotice =

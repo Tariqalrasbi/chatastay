@@ -67,7 +67,7 @@
 
     <div id="loginPanelStaff" class="login-panel" role="tabpanel" aria-labelledby="loginTabStaff" hidden>
       <form method="post" action="/auth/staff-login" id="loginFormStaff">
-        <fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>
+        <fieldset class="login-fieldset" id="loginFieldsetStaff">
           <label class="login-label" for="loginStaffUser">Staff email or username</label>
           <input class="login-input" id="loginStaffUser" type="text" name="username" required autocomplete="username" placeholder="denish or denish@hotel.com" />
           <label class="login-label" for="loginStaffPin">PIN or password</label>
@@ -319,6 +319,14 @@
 
     function wireSubmitLoading(form, button, loadingLabel, defaultLabel) {
       if (!form || !button) return;
+      function resetLoadingState() {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.classList.remove("is-loading");
+        button.textContent = defaultLabel;
+        var fs2 = form.querySelector("fieldset");
+        if (fs2) fs2.removeAttribute("aria-busy");
+      }
       form.addEventListener("submit", function () {
         if (button.disabled) return;
         button.disabled = true;
@@ -327,16 +335,10 @@
         button.textContent = loadingLabel;
         var fs = form.querySelector("fieldset");
         if (fs) fs.setAttribute("aria-busy", "true");
+        window.setTimeout(resetLoadingState, 12000);
       });
       window.addEventListener("pageshow", function (ev) {
-        if (ev.persisted) {
-          button.disabled = false;
-          button.removeAttribute("aria-busy");
-          button.classList.remove("is-loading");
-          button.textContent = defaultLabel;
-          var fs2 = form.querySelector("fieldset");
-          if (fs2) fs2.removeAttribute("aria-busy");
-        }
+        resetLoadingState();
       });
     }
 
@@ -345,8 +347,12 @@
 
     var initial = "management";
     try {
+      var qs = new URLSearchParams(window.location.search);
+      if (qs.get("staff")) initial = "staff";
+    } catch (e) {}
+    try {
       var saved = localStorage.getItem(STORAGE_KEY);
-      if (saved === "staff") initial = "staff";
+      if (initial !== "staff" && saved === "staff") initial = "staff";
     } catch (e) {}
     setMode(initial);
 
