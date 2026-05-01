@@ -830,6 +830,7 @@
           if (path === "/admin/profile") return "dashboard";
           if (
             path.startsWith("/admin/users") ||
+            path.startsWith("/admin/audit-trail") ||
             path.startsWith("/admin/subscription") ||
             path.startsWith("/admin/billing") ||
             path.startsWith("/admin/integrations") ||
@@ -858,33 +859,38 @@
           if (
             path.startsWith("/admin/bookings") ||
             path.startsWith("/admin/calendar") ||
-            path.startsWith("/admin/inventory") ||
-            path.startsWith("/admin/offers") ||
             path.startsWith("/admin/guests")
           )
             return "reservations";
           if (
             path.startsWith("/admin/rooms") ||
+            path.startsWith("/admin/inventory") ||
+            path.startsWith("/admin/offers")
+          )
+            return "inventory";
+          if (
             path.startsWith("/admin/room-board") ||
-            path.startsWith("/admin/housekeeping") ||
             path.startsWith("/admin/handover-sheet") ||
             path.startsWith("/admin/front-desk") ||
             path.startsWith("/admin/shifts") ||
             path.startsWith("/admin/shift-close") ||
             path.startsWith("/admin/shift-report")
           )
-            return "rooms";
+            return "frontdesk";
+          if (path.startsWith("/admin/housekeeping") || path.startsWith("/admin/hk")) return "housekeeping";
           return "dashboard";
         };
         var activeGroup = groupByPath(currentPath);
         var groupLabels = {
           dashboard: "Today",
           reservations: "Reservations",
-          rooms: "Stay Operations",
-          comms: "Guests & Messages",
-          fb: "Food & Beverage",
+          frontdesk: "Front Desk",
+          inventory: "Rooms & Rates",
+          housekeeping: "Housekeeping",
+          comms: "WhatsApp Center",
+          fb: "Restaurant / Café",
           insights: "Reports",
-          account: "Admin",
+          account: "Property Setup",
           modules: "Workspaces",
         };
         var escapeText = function (value) {

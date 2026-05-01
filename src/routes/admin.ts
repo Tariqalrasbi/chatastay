@@ -1196,7 +1196,19 @@ function renderLayout(
   const canNavFb =
     !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW");
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
-  type AdminNavGroup = "dashboard" | "reservations" | "rooms" | "comms" | "fb" | "insights" | "account" | "modules";
+  const canNavBookings = !perm || hasPermission(perm, "BOOKINGS", "VIEW");
+  const canNavRooms = !perm || hasPermission(perm, "ROOMS", "VIEW");
+  type AdminNavGroup =
+    | "dashboard"
+    | "reservations"
+    | "frontdesk"
+    | "inventory"
+    | "housekeeping"
+    | "comms"
+    | "fb"
+    | "insights"
+    | "account"
+    | "modules";
   type AdminNavItem = { group: AdminNavGroup; href: string; label: string; attrs?: string };
   type AdminSectionLink = { href: string; label: string; attrs?: string };
   type AdminSection = { group: AdminNavGroup; links: Array<AdminSectionLink | string> };
@@ -1230,41 +1242,45 @@ function renderLayout(
             ? { group: "reservations", href: "/admin/bookings", label: "Reservations" }
             : false,
           perm && hasPermission(perm, "ROOMS", "VIEW")
-            ? { group: "rooms", href: "/admin/room-board", label: "Stay Operations" }
+            ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" }
             : false,
           { group: "insights", href: "/admin/management-kpi", label: "Reports" },
-          { group: "account", href: "/admin/setup", label: "Admin" },
+          { group: "account", href: "/admin/setup", label: "Property Setup" },
           moduleSwitcher
         ])
       : useRestaurantChrome
         ? renderNavLinks([
             { group: "dashboard", href: "/admin/module/restaurant", label: "Today" },
-            canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Food &amp; Beverage" } : false,
+            canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant / Café" } : false,
             moduleSwitcher
           ])
         : useHousekeepingManagerChrome
           ? renderNavLinks([
               { group: "dashboard", href: "/admin/module/housekeeping", label: "Today" },
-              { group: "rooms", href: "/admin/housekeeping", label: "Stay Operations" },
+              { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" },
               moduleSwitcher
             ])
           : useFrontDeskChrome
             ? renderNavLinks([
                 { group: "dashboard", href: "/admin/module/front-desk", label: "Today" },
-                { group: "reservations", href: "/admin/bookings", label: "Reservations" },
-                { group: "rooms", href: "/admin/room-board", label: "Stay Operations" },
-                canNavComms ? { group: "comms", href: "/admin/conversations", label: "Guests &amp; Messages" } : false,
-                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Food &amp; Beverage" } : false,
+                canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
+                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
+                canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+                canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
+                canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
+                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant / Café" } : false,
                 moduleSwitcher
               ])
             : renderNavLinks([
                 { group: "dashboard", href: "/admin/profile", label: "Today" },
-                { group: "reservations", href: "/admin/bookings", label: "Reservations" },
-                { group: "rooms", href: "/admin/room-board", label: "Stay Operations" },
-                canNavComms ? { group: "comms", href: "/admin/conversations", label: "Guests &amp; Messages" } : false,
-                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Food &amp; Beverage" } : false,
+                canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
+                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
+                canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+                canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
+                canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
+                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant / Café" } : false,
                 { group: "insights", href: "/admin/reports-center", label: "Reports" },
-                { group: "account", href: "/admin/setup", label: "Admin" },
+                { group: "account", href: "/admin/setup", label: "Property Setup" },
                 moduleSwitcher
               ])
     : '<a href="/admin/login">Login</a>';
@@ -1293,46 +1309,63 @@ function renderLayout(
   const reservationTabs: AdminSection = {
     group: "reservations",
     links: [
-      { href: "/admin/bookings", label: "Bookings" },
+      { href: "/admin/bookings", label: "All reservations" },
       { href: "/admin/calendar", label: "Calendar" },
-      { href: "/admin/inventory", label: "Availability" },
-      { href: "/admin/rooms", label: "Rates" },
-      { href: "/admin/offers", label: "Offers" }
+      { href: "/admin/bookings?status=PENDING", label: "Pending" },
+      { href: "/admin/bookings?status=CONFIRMED", label: "Confirmed" },
+      { href: "/admin/bookings?status=CANCELLED", label: "Cancellations" }
     ]
   };
-  const stayOpsTabs: AdminSection = {
-    group: "rooms",
+  const frontDeskTabs: AdminSection = {
+    group: "frontdesk",
     links: [
-      { href: "/admin/room-board", label: "Room board" },
-      canNavHousekeeping ? { href: "/admin/housekeeping", label: "Housekeeping" } : "",
-      { href: "/admin/handover-sheet", label: "Handover" },
+      { href: "/admin/room-board", label: "Room rack" },
       { href: "/admin/front-desk/check-in", label: "Check-in" },
       { href: "/admin/front-desk/check-out", label: "Check-out" },
+      { href: "/admin/handover-sheet", label: "Handover" },
       { href: "/admin/shifts", label: "Shifts" },
-      { href: "/admin/shift-close", label: "Shift close" },
+      { href: "/admin/shift-close", label: "Shift close" }
+    ]
+  };
+  const inventoryTabs: AdminSection = {
+    group: "inventory",
+    links: [
+      { href: "/admin/rooms", label: "Room types &amp; rates" },
+      { href: "/admin/inventory", label: "Availability" },
+      { href: "/admin/offers", label: "Offers &amp; promotions" }
+    ]
+  };
+  const housekeepingTabs: AdminSection = {
+    group: "housekeeping",
+    links: [
+      { href: "/admin/housekeeping", label: "Housekeeping board" },
+      { href: "/admin/hk", label: "My tasks" },
+      { href: "/admin/hk/room-board", label: "Room status" },
       '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>'
-    ].filter(Boolean)
+    ]
   };
   const guestMessageTabs: AdminSection = {
     group: "comms",
     links: [
       {
         href: "/admin/conversations",
-        label: 'Guest conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span>',
+        label: 'Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span>',
         attrs: "data-admin-conv-link"
       },
-      { href: "/admin/campaigns", label: "Campaigns" }
+      { href: "/admin/campaigns", label: "Templates &amp; campaigns" },
+      '<span class="nav-tab-placeholder" title="Uses existing conversation error logs" aria-disabled="true">Failed messages</span>',
+      '<span class="nav-tab-placeholder" title="Configured from property setup and WhatsApp flow settings" aria-disabled="true">Bot flow</span>'
     ]
   };
   const foodBeverageTabs: AdminSection = {
     group: "fb",
     links: [
-      { href: "/admin/module/restaurant", label: "Today" },
-      { href: "/admin/fb/menu", label: "F&amp;B master" },
+      { href: "/admin/module/restaurant", label: "Service today" },
+      { href: "/admin/fb/menu", label: "Menu items" },
       ...(canNavOutlet
         ? [
-            { href: "/admin/outlet-dashboard", label: "Outlet board" },
-            { href: "/admin/outlet-orders", label: "Outlet orders" },
+            { href: "/admin/outlet-dashboard", label: "Orders / KOT" },
+            { href: "/admin/outlet-orders", label: "Order history" },
             { href: "/admin/restaurant-ops", label: "Operations guide" }
           ]
         : [])
@@ -1352,8 +1385,8 @@ function renderLayout(
   const adminTabs: AdminSection = {
     group: "account",
     links: [
-      { href: "/admin/setup", label: "Settings" },
-      ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Users &amp; permissions" }] : []),
+      { href: "/admin/setup", label: "Property profile" },
+      ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Staff users &amp; roles" }] : []),
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/audit-trail", label: "Audit trail" }] : []),
       ...(perm && hasPermission(perm, "BILLING", "VIEW")
         ? [
@@ -1364,10 +1397,20 @@ function renderLayout(
       { href: "/admin/integrations", label: "Integrations" }
     ]
   };
-  const fdTabs = renderSections([todayTabs, reservationTabs, stayOpsTabs, canNavComms ? guestMessageTabs : false]);
+  const fdTabs = renderSections([
+    todayTabs,
+    canNavBookings ? reservationTabs : false,
+    canNavRooms ? frontDeskTabs : false,
+    canNavRooms ? inventoryTabs : false,
+    canNavHousekeeping ? housekeepingTabs : false,
+    canNavComms ? guestMessageTabs : false,
+    canNavFb ? foodBeverageTabs : false
+  ]);
   const ownerTabs = renderSections([
     todayTabs,
     perm && hasPermission(perm, "BOOKINGS", "VIEW") ? reservationTabs : false,
+    perm && hasPermission(perm, "ROOMS", "VIEW") ? frontDeskTabs : false,
+    perm && hasPermission(perm, "ROOMS", "VIEW") ? inventoryTabs : false,
     reportTabs,
     adminTabs
   ]);
@@ -1375,7 +1418,7 @@ function renderLayout(
   const hkManagerTabs = renderSections([
     todayTabs,
     {
-      group: "rooms",
+      group: "housekeeping",
       links: [
         { href: "/admin/housekeeping", label: "Cleaning queue" },
         { href: "/admin/room-board", label: "Room board" },
@@ -1385,8 +1428,10 @@ function renderLayout(
   ]);
   const fullTabs = renderSections([
     todayTabs,
-    reservationTabs,
-    stayOpsTabs,
+    canNavBookings ? reservationTabs : false,
+    canNavRooms ? frontDeskTabs : false,
+    canNavRooms ? inventoryTabs : false,
+    canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
     canNavFb ? foodBeverageTabs : false,
     reportTabs,
@@ -2908,11 +2953,8 @@ function requirePmsModule(workspace: PmsWorkspaceId) {
 
 function pickPostLoginRedirect(role: string, permissions: PermissionMatrix): string {
   const acc = listAccessibleWorkspaces(role, permissions as PermissionMatrixLike);
-  if (acc.length > 1) {
-    return "/admin/workspaces";
-  }
-  if (acc.length === 1) {
-    return workspaceHomeUrl(acc[0], role);
+  if (acc.length >= 1) {
+    return workspaceHomeUrl(inferDefaultWorkspace(role, permissions as PermissionMatrixLike), role);
   }
   return "/admin/profile";
 }
@@ -3097,10 +3139,10 @@ adminRouter.get("/workspaces", requireAuth, (req, res) => {
     return;
   }
   const labels: Record<PmsWorkspaceId, { title: string; desc: string }> = {
-    owner: { title: "Hotel management", desc: "Occupancy, revenue, risk, and property account health." },
-    front_desk: { title: "Front desk", desc: "Arrivals, departures, room board, folios, and reception." },
-    restaurant: { title: "Restaurant / outlet", desc: "Food service, outlet board, and room charges." },
-    housekeeping: { title: "Housekeeping", desc: "Cleaning queue, room readiness, and task execution." }
+    owner: { title: "Owner / management", desc: "Portfolio, revenue, reports, billing, and account health." },
+    front_desk: { title: "Today / command center", desc: "Arrivals, departures, in-house guests, room rack, folios, and reception." },
+    restaurant: { title: "Restaurant / café", desc: "Menu, orders, KOT, direct sales, and room charges." },
+    housekeeping: { title: "Housekeeping & maintenance", desc: "Cleaning queue, room readiness, room status, and tasks." }
   };
   const cards = acc
     .map((w) => {
@@ -3114,7 +3156,7 @@ adminRouter.get("/workspaces", requireAuth, (req, res) => {
   const content = `${pmsWorkspacePageStyles}
 <div class="pms-hero">
   <h1>Choose workspace</h1>
-  <p>Select the operational module that matches what you are doing right now. You can switch any time from the sidebar.</p>
+  <p>Select the PMS workspace that matches the operation you are doing now. You can switch any time from the sidebar.</p>
 </div>
 <div class="pms-picker">${cards}</div>`;
   res.type("html").send(renderLayout(content, true));
@@ -3161,19 +3203,32 @@ adminRouter.get("/module/owner", requireAuth, requirePmsModule("owner"), (_req, 
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"), (_req, res) => {
+adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"), (req, res) => {
+  const session = getSession(req);
+  const canOpenComms = !session?.permissions || hasPermission(session.permissions, "CONVERSATIONS", "VIEW");
+  const canOpenFb = !session?.permissions || hasPermission(session.permissions, "OUTLET", "VIEW") || hasPermission(session.permissions, "BOOKINGS", "VIEW");
+  const canOpenBookings = !session?.permissions || hasPermission(session.permissions, "BOOKINGS", "VIEW");
+  const canOpenRooms = !session?.permissions || hasPermission(session.permissions, "ROOMS", "VIEW");
   const content = `${pmsWorkspacePageStyles}
 <div class="pms-hero">
-  <h1>Front desk workspace</h1>
-  <p>Reception operations: arrivals, departures, room readiness, folios, and guest issues — tuned for speed and clarity.</p>
+  <h1>Today / Command Center</h1>
+  <p>Daily PMS command screen: arrivals, departures, in-house guests, room readiness, folios, balances, and urgent guest work.</p>
 </div>
 <div class="pms-grid">
-  <div class="pms-card"><h3>Room board</h3><p>Live room state, assignments, and housekeeping linkage.</p><a href="/admin/room-board">Open room board →</a></div>
-  <div class="pms-card"><h3>Bookings</h3><p>Confirmations, changes, and in-house reservations.</p><a href="/admin/bookings">Open bookings →</a></div>
-  <div class="pms-card"><h3>Check-in</h3><p>Walk-ins and scheduled arrivals.</p><a href="/admin/front-desk/check-in">Start check-in →</a></div>
-  <div class="pms-card"><h3>Check-out</h3><p>Departures, folio settlement, and task triggers.</p><a href="/admin/front-desk/check-out">Start check-out →</a></div>
-  <div class="pms-card"><h3>Handover</h3><p>Shift continuity and reception notes.</p><a href="/admin/handover-sheet">Open handover →</a></div>
-  <div class="pms-card"><h3>Shifts</h3><p>Cashiering and shift discipline.</p><a href="/admin/shifts">Manage shifts →</a></div>
+  ${canOpenRooms ? '<div class="pms-card"><h3>Room rack</h3><p>Live room state, assignments, occupancy, and housekeeping linkage.</p><a href="/admin/room-board">Open room rack →</a></div>' : ""}
+  ${canOpenBookings ? '<div class="pms-card"><h3>Reservations</h3><p>Arrivals, pending bookings, confirmations, changes, and guest records.</p><a href="/admin/bookings">Open reservations →</a></div>' : ""}
+  ${canOpenBookings ? '<div class="pms-card"><h3>Check-in</h3><p>Walk-ins and scheduled arrivals with room assignment and folio creation.</p><a href="/admin/front-desk/check-in">Start check-in →</a></div>' : ""}
+  ${canOpenRooms ? '<div class="pms-card"><h3>Check-out</h3><p>Departures, folio settlement, room status change, and housekeeping trigger.</p><a href="/admin/front-desk/check-out">Start check-out →</a></div>' : ""}
+  ${
+    canOpenComms
+      ? '<div class="pms-card"><h3>WhatsApp center</h3><p>Guest conversations, receptionist handoff, and booking follow-up.</p><a href="/admin/conversations">Open WhatsApp center →</a></div>'
+      : ""
+  }
+  ${
+    canOpenFb
+      ? '<div class="pms-card"><h3>Restaurant / café</h3><p>Orders, direct sales, KOT, and folio posting for in-house guests.</p><a href="/admin/fb/menu">Open restaurant →</a></div>'
+      : ""
+  }
 </div>`;
   res.type("html").send(renderLayout(content, true));
 });
