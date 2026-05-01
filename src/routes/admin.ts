@@ -1405,7 +1405,8 @@ function renderLayout(
     .replace("{{content}}", content)
     .replace(
       "{{extraScripts}}",
-      authenticated ? getAdminLiveScript() + getAdminNotificationScript() + getAdminPropertySwitcherScript() : ""
+      getPasswordRevealScript() +
+        (authenticated ? getBackForwardCacheGuardScript() + getAdminLiveScript() + getAdminNotificationScript() + getAdminPropertySwitcherScript() : "")
     );
 }
 
@@ -1531,6 +1532,60 @@ const pmsWorkspacePageStyles = `<style>
 function renderPage(pageFile: string, authenticated: boolean): string {
   const content = readView(pageFile);
   return renderLayout(content, authenticated);
+}
+
+function getBackForwardCacheGuardScript(): string {
+  return `<script>
+(function () {
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) window.location.reload();
+  });
+})();
+</script>`;
+}
+
+function getPasswordRevealScript(): string {
+  return `<style>
+.password-reveal-wrap{position:relative;display:inline-block;max-width:100%;vertical-align:top}
+.password-reveal-wrap>input{padding-right:42px!important}
+.password-reveal-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:#475569;cursor:pointer;width:28px;height:28px;border-radius:999px;font-size:16px;line-height:28px;text-align:center}
+.password-reveal-btn:hover,.password-reveal-btn:focus{background:#eef2f7;outline:0;color:#0f172a}
+</style>
+<script>
+(function () {
+  function enhancePassword(input) {
+    if (!input || input.dataset.passwordRevealBound === "1") return;
+    input.dataset.passwordRevealBound = "1";
+    var parent = input.parentNode;
+    if (!parent) return;
+    var wrap = document.createElement("span");
+    wrap.className = "password-reveal-wrap";
+    wrap.style.width = input.style.width || "100%";
+    parent.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    if (!input.style.width || input.style.width === "100%") input.style.width = "100%";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "password-reveal-btn";
+    btn.setAttribute("aria-label", "Show password");
+    btn.setAttribute("title", "Show password");
+    btn.innerHTML = "&#128065;";
+    btn.addEventListener("click", function () {
+      var show = input.type === "password";
+      input.type = show ? "text" : "password";
+      btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+      btn.setAttribute("title", show ? "Hide password" : "Show password");
+      input.focus({ preventScroll: true });
+    });
+    wrap.appendChild(btn);
+  }
+  function boot() {
+    document.querySelectorAll('input[type="password"]').forEach(enhancePassword);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+</script>`;
 }
 
 function escapeHtml(input: string): string {
@@ -2884,6 +2939,13 @@ function requirePermissionAnyJson(checks: Array<{ module: PermissionModule; acti
   };
 }
 
+function setProtectedNoStoreHeaders(res: Response): void {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+}
+
 /** Master F&amp;B page: outlet/restaurant staff or reservations — backward compatible with BOOKINGS-only users. */
 function requireFbOperationsView() {
   return requirePermissionAny([
@@ -2914,6 +2976,16 @@ function classifyConversationActivity(
   }
   return "inquiry";
 }
+
+adminRouter.use((_req, res, next) => {
+  setProtectedNoStoreHeaders(res);
+  next();
+});
+
+authRouter.use((_req, res, next) => {
+  setProtectedNoStoreHeaders(res);
+  next();
+});
 
 adminRouter.use((req, _res, next) => {
   const session = getSession(req);
@@ -3977,11 +4049,13 @@ authRouter.post("/property-context", async (req, res) => {
 adminRouter.post("/logout", (req, res) => {
   const token = getSessionToken(req);
   if (token) activeSessions.delete(token);
+  setProtectedNoStoreHeaders(res);
   res.setHeader(
     "Set-Cookie",
-    `${sessionCookieName}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`
+    `${sessionCookieName}=; HttpOnly; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax`
   );
-  res.redirect("/admin/login");
+  res.setHeader("Clear-Site-Data", '"cache"');
+  res.redirect(303, "/admin/login");
 });
 
 function parsePermissionsFromBody(body: Record<string, unknown>): PermissionMatrix {
