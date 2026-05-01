@@ -2041,13 +2041,23 @@ ownerRouter.get("/hotels/:id/setup", requireOwnerAuth, async (req, res) => {
   const config = loadPartnerSetupConfig(hotel.id);
   const userRows = hotel.users
     .map(
-      (u) => `<tr>
-        <td><input name="userId" type="hidden" value="${escapeHtml(u.id)}" />${escapeHtml(u.fullName)}</td>
-        <td>${escapeHtml(u.email ?? "-")}</td>
-        <td>${escapeHtml(u.username ?? "-")}</td>
-        <td>${escapeHtml(String(u.role))}</td>
-        <td>${u.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
+      (u) => {
+        const role = String(u.role);
+        const formId = `owner-user-edit-${u.id}`;
+        const roleOptions = ["OWNER", "MANAGER", "FRONTDESK", "HOUSEKEEPING", "RESTAURANT", "STAFF"]
+          .map((r) => `<option value="${r}" ${r === role || (r === "RESTAURANT" && role === "STAFF") ? "selected" : ""}>${r}</option>`)
+          .join("");
+        return `<tr>
+        <td><form id="${escapeHtml(formId)}" method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/admin-user/${encodeURIComponent(u.id)}"></form><input form="${escapeHtml(formId)}" name="fullName" value="${escapeHtml(u.fullName)}" required style="width:140px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input form="${escapeHtml(formId)}" type="email" name="email" value="${escapeHtml(u.email ?? "")}" required style="width:180px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input form="${escapeHtml(formId)}" name="username" value="${escapeHtml(u.username ?? "")}" style="width:130px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><select form="${escapeHtml(formId)}" name="role" style="padding:6px;border:1px solid #d8dee6;border-radius:8px">${roleOptions}</select></td>
+        <td><label style="font-size:12px"><input form="${escapeHtml(formId)}" type="checkbox" name="isActive" value="1" ${u.isActive ? "checked" : ""} /> Active</label></td>
+        <td><input form="${escapeHtml(formId)}" name="password" placeholder="new password optional" minlength="8" style="width:160px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><input form="${escapeHtml(formId)}" name="pin" placeholder="PIN optional" minlength="4" maxlength="12" style="width:100px;padding:6px;border:1px solid #d8dee6;border-radius:8px" /></td>
+        <td><button form="${escapeHtml(formId)}" type="submit" style="padding:7px 10px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Save</button></td>
       </tr>`
+      }
     )
     .join("");
   const roomTypeRows = hotel.roomTypes
@@ -2113,7 +2123,8 @@ ${updated}
 
 <section style="margin-top:18px">
   <h3>Admin Users & Passwords</h3>
-  <table><thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Role</th><th>Status</th></tr></thead><tbody>${userRows || '<tr><td colspan="5">No hotel users yet.</td></tr>'}</tbody></table>
+  <p class="muted" style="font-size:12px;margin-top:-6px">Edit existing rows with <strong>Save</strong>. Leave password/PIN blank to keep the current credential. Use the create form only for a new person.</p>
+  <table><thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Role</th><th>Status</th><th>Password reset</th><th>PIN reset</th><th>Action</th></tr></thead><tbody>${userRows || '<tr><td colspan="8">No hotel users yet.</td></tr>'}</tbody></table>
   <form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/setup/admin-user" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
     <input name="fullName" placeholder="Full name" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
     <input type="email" name="email" placeholder="owner@hotel.com" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
@@ -2123,7 +2134,7 @@ ${updated}
     <select name="role" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
       <option value="OWNER">OWNER</option><option value="MANAGER">MANAGER</option><option value="FRONTDESK">FRONTDESK</option><option value="HOUSEKEEPING">HOUSEKEEPING</option><option value="RESTAURANT">RESTAURANT</option><option value="STAFF">STAFF</option>
     </select>
-    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Create / reset user</button>
+    <button type="submit" style="padding:8px 12px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Create new user</button>
   </form>
 </section>
 
@@ -2221,6 +2232,70 @@ ownerRouter.post("/hotels/:id/setup/admin-user", requireOwnerAuth, async (req, r
     create: { hotelId: hotel.id, email, ...data }
   });
   res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?updated=user`);
+});
+
+ownerRouter.post("/hotels/:id/setup/admin-user/:userId", requireOwnerAuth, async (req, res) => {
+  if (!canManageRoomCapacity(req)) return res.redirect("/owner/hotels");
+  const hotelId = String(req.params.id ?? "");
+  const userId = String(req.params.userId ?? "");
+  const hotel = await prisma.hotel.findUnique({ where: { id: hotelId } });
+  if (!hotel) return res.redirect("/owner/hotels");
+  const existing = await prisma.hotelUser.findFirst({ where: { id: userId, hotelId: hotel.id } });
+  if (!existing) return res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?error=user`);
+
+  const email = String(req.body.email ?? "").trim().toLowerCase();
+  const password = String(req.body.password ?? "").trim();
+  const usernameRaw = String(req.body.username ?? "").trim();
+  const username = usernameRaw ? slugifyTenantName(usernameRaw).replaceAll("-", "_") : null;
+  const pin = String(req.body.pin ?? "").trim();
+  const fullName = String(req.body.fullName ?? existing.fullName).trim() || existing.fullName;
+
+  if (!email) return res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?error=email`);
+  if (password && password.length < 8) return res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?error=password`);
+  if (pin && pin.length < 4) return res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?error=pin`);
+
+  try {
+    await prisma.hotelUser.update({
+      where: { id: existing.id },
+      data: {
+        fullName,
+        email,
+        username,
+        role: parseSetupUserRole(req.body.role),
+        isActive: req.body.isActive === "1" || req.body.isActive === "on",
+        ...(password
+          ? {
+              passwordHash: hashPassword(password),
+              passwordResetTokenHash: null,
+              passwordResetExpiresAt: null,
+              passwordResetRequestedAt: null
+            }
+          : {}),
+        ...(pin ? { pinHash: hashPassword(pin) } : {})
+      }
+    });
+    await logOwnerAudit({
+      hotelId: hotel.id,
+      action: "OWNER_HOTEL_USER_UPDATED",
+      entityType: "HotelUser",
+      entityId: existing.id,
+      actorEmail: getOwnerSessionEmail(req),
+      metadata: {
+        emailChanged: existing.email !== email,
+        usernameChanged: existing.username !== username,
+        passwordReset: Boolean(password),
+        pinReset: Boolean(pin)
+      }
+    });
+    res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?updated=user`);
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?error=duplicate`);
+      return;
+    }
+    console.error("[owner] update hotel setup user failed:", err instanceof Error ? err.message : String(err));
+    res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/setup?error=userUpdate`);
+  }
 });
 
 ownerRouter.post("/hotels/:id/setup/room-types", requireOwnerAuth, async (req, res) => {
