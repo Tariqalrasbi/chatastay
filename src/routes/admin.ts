@@ -3339,9 +3339,8 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
   if (isResetRateLimited(req, normalized)) return;
 
   const loginHotel = await resolveLoginHotel(req);
-  const hotel = loginHotel.id
-    ? await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true } })
-    : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!loginHotel.id) return;
+  const hotel = await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true } });
   if (!hotel) return;
   const user = await prisma.hotelUser.findUnique({
     where: { hotelId_email: { hotelId: hotel.id, email: normalized } },
@@ -3461,6 +3460,7 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const password = String(req.body.password ?? "");
   const loginHotel = await resolveLoginHotel(req);
+  if (!loginHotel.id) return null;
 
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD ?? "admin123";
@@ -3478,9 +3478,7 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
     return "MANAGER";
   }
   try {
-    const hotel = loginHotel.id
-      ? await prisma.hotel.findUnique({ where: { id: loginHotel.id } })
-      : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
+    const hotel = await prisma.hotel.findUnique({ where: { id: loginHotel.id } });
     if (hotel) {
       const hotelUser = await prisma.hotelUser.findUnique({
         where: { hotelId_email: { hotelId: hotel.id, email } }
@@ -3517,10 +3515,9 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
     const identifier = String(req.body.username ?? "").trim().toLowerCase();
     const credential = String(req.body.pin ?? "").trim();
     const loginHotel = await resolveLoginHotel(req);
+    if (!loginHotel.id) return null;
     if (!identifier || !credential) return null;
-    const hotel = loginHotel.id
-      ? await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true, slug: true, displayName: true } })
-      : await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, slug: true, displayName: true } });
+    const hotel = await prisma.hotel.findUnique({ where: { id: loginHotel.id }, select: { id: true, slug: true, displayName: true } });
     if (!hotel) return null;
     if (isStaffLoginRateLimited(req, hotel.id, identifier)) {
       await prisma.auditLog.create({
