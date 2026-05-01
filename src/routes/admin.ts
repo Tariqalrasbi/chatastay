@@ -4149,6 +4149,14 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
   const created = req.query.created ? '<p class="badge ok">User created with permissions.</p>' : "";
   const updated = req.query.updated ? '<p class="badge ok">User details updated.</p>' : "";
   const resetSent = req.query.resetSent ? '<p class="badge ok">Password reset link sent to the registered email.</p>' : "";
+  const deleted = req.query.deleted ? '<p class="badge ok">User deleted.</p>' : "";
+  const deactivated = req.query.deactivated ? '<p class="badge ok">User had operation history, so the account was deactivated instead of deleted.</p>' : "";
+  const userErrorNotice =
+    req.query.error === "selfDelete"
+      ? '<p class="badge alert">You cannot delete the account currently signed in.</p>'
+      : req.query.error === "delete"
+        ? '<p class="badge alert">Could not delete this user. Please try again.</p>'
+        : "";
 
   const rows = users
     .map((user) => {
@@ -4192,6 +4200,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
               <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Save user details</button>
               ${safeEmail ? `<button type="submit" formaction="/admin/users/${encodeURIComponent(user.id)}/send-reset" style="padding:9px 13px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Send password reset email</button>` : ""}
+              <button type="submit" formaction="/admin/users/${encodeURIComponent(user.id)}/delete" onclick="return confirm('Delete this user account? If the user has operation history, the account will be deactivated instead to preserve audit records.')" style="padding:9px 13px; border:0; border-radius:8px; background:#fee2e2; color:#991b1b; font-weight:700">Delete user</button>
             </div>
           </form>
         </td>
@@ -4204,7 +4213,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
   const content = `
 <h2>Users &amp; permissions</h2>
 <p class="muted">Create and edit hotel staff accounts. Best practice is password reset by registered email, but management can also directly update username, role, permissions, active status, password, or PIN when operations need an immediate fix.</p>
-${created}${updated}${resetSent}
+${created}${updated}${resetSent}${deleted}${deactivated}${userErrorNotice}
 <div class="actions">
   <a class="btn-link primary" href="/admin/profile">Back to profile</a>
 </div>
@@ -4653,6 +4662,65 @@ adminRouter.post("/users/:id/send-reset", requirePermission("USERS", "EDIT"), as
     metadata: { email: user.email }
   });
   res.redirect("/admin/users?resetSent=1");
+});
+
+adminRouter.post("/users/:id/delete", requirePermission("USERS", "DELETE"), async (req, res) => {
+  try {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+    if (!hotel) {
+      res.redirect("/admin/users?error=hotel");
+      return;
+    }
+    const target = await prisma.hotelUser.findFirst({
+      where: { id: String(req.params.id ?? ""), hotelId: hotel.id },
+      select: { id: true, email: true, username: true, role: true }
+    });
+    if (!target) {
+      res.redirect("/admin/users?error=user");
+      return;
+    }
+    const session = getSession(req);
+    if (session?.staffId === target.id) {
+      res.redirect("/admin/users?error=selfDelete");
+      return;
+    }
+
+    const store = readPermissionStore();
+    const permKey = hotelUserPermissionKey(target);
+
+    try {
+      await prisma.hotelUser.delete({ where: { id: target.id } });
+      if (permKey) {
+        delete store[permKey];
+        writePermissionStore(store);
+      }
+      await logAudit({
+        hotelId: hotel.id,
+        action: "HOTEL_USER_DELETED",
+        entityType: "HotelUser",
+        entityId: target.id,
+        metadata: { email: target.email, username: target.username, role: String(target.role) }
+      });
+      res.redirect("/admin/users?deleted=1");
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
+        await prisma.hotelUser.update({ where: { id: target.id }, data: { isActive: false } });
+        await logAudit({
+          hotelId: hotel.id,
+          action: "HOTEL_USER_DEACTIVATED_INSTEAD_OF_DELETE",
+          entityType: "HotelUser",
+          entityId: target.id,
+          metadata: { reason: "linked_operation_history", email: target.email, username: target.username, role: String(target.role) }
+        });
+        res.redirect("/admin/users?deactivated=1");
+        return;
+      }
+      throw err;
+    }
+  } catch (err) {
+    console.error("[admin] POST /users/:id/delete failed:", err instanceof Error ? err.message : String(err));
+    res.redirect("/admin/users?error=delete");
+  }
 });
 
 adminRouter.get("/dashboard", requireAuth, (_req, res) => {
