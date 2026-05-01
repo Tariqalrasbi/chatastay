@@ -4900,12 +4900,12 @@ adminRouter.get("/analytics/optimization", requireAuth, async (_req, res) => {
 
 function leadOutreachTemplate(template: "initial_intro" | "followup_1" | "followup_2", leadHotelName: string): string {
   if (template === "followup_1") {
-    return `Hello, just following up from WhatsStay regarding ${leadHotelName}. Would you be open to a short demo on how AI WhatsApp booking and operations can help your hotel team?`;
+    return `Hello, just following up from ChatStay regarding ${leadHotelName}. Would you be open to a short demo on how AI WhatsApp booking and operations can help your hotel team?`;
   }
   if (template === "followup_2") {
-    return `Quick follow-up from WhatsStay for ${leadHotelName}. If this is not a fit now, we are happy to reconnect later.`;
+    return `Quick follow-up from ChatStay for ${leadHotelName}. If this is not a fit now, we are happy to reconnect later.`;
   }
-  return `Hello from WhatsStay. We help hotels like ${leadHotelName} automate WhatsApp booking, guest operations, upsell, and follow-up in one platform. Would you like a quick walkthrough?`;
+  return `Hello from ChatStay. We help hotels like ${leadHotelName} automate WhatsApp booking, guest operations, upsell, and follow-up in one platform. Would you like a quick walkthrough?`;
 }
 
 adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, res) => {
@@ -5115,7 +5115,7 @@ adminRouter.post("/leads/:leadId/outreach", requireAuth, requirePlatformAcquisit
     try {
       await sendEmail({
         to: lead.contactEmail,
-        subject: `WhatsStay for ${lead.hotelName}`,
+        subject: `ChatStay for ${lead.hotelName}`,
         html: `<p>${escapeHtml(body).replace(/\n/g, "<br/>")}</p>`,
         text: body
       });
@@ -11743,7 +11743,7 @@ ${
 </table>`
     : queryOk
       ? ""
-      : '<p class="muted">Tip: paste the WhatsStay booking ID, type part of the guest name, or enter mobile digits (with or without country code).</p>'
+      : '<p class="muted">Tip: paste the ChatStay booking ID, type part of the guest name, or enter mobile digits (with or without country code).</p>'
 }`;
   res.type("html").send(renderLayout(content, true));
 });

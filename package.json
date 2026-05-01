@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:3001": "PORT=3001 tsx watch src/index.ts",
-    "prebuild": "prisma generate",
+    "prebuild": "npm run prisma:generate && npm run prisma:verify",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "migrate:deploy": "node scripts/migrate-deploy.cjs",
@@ -16,8 +16,9 @@
     "bootstrap:foundation": "node scripts/bootstrap-foundation.cjs",
     "inspect:db": "node scripts/inspect-production-data.cjs",
     "restore:db": "node scripts/restore-sqlite.cjs",
-    "start:with-migrate": "node scripts/migrate-deploy.cjs && prisma generate && node dist/index.js",
-    "prisma:generate": "prisma generate",
+    "start:with-migrate": "node scripts/migrate-deploy.cjs && npm run prisma:generate && node dist/index.js",
+    "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
+    "prisma:verify": "node scripts/verify-prisma-client.cjs",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
     "seed": "tsx prisma/seed.ts",
@@ -31,7 +32,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1032.0",
-    "@prisma/client": "^6.4.1",
+    "@prisma/client": "6.19.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "multer": "^2.1.1",
@@ -45,7 +46,7 @@
     "@types/node": "^22.10.7",
     "@types/nodemailer": "^6.4.17",
     "@types/pdfkit": "^0.17.5",
-    "prisma": "^6.4.1",
+    "prisma": "6.19.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
