@@ -987,7 +987,7 @@ function getAdminLiveScript(): string {
   pollActivity();
   pollDetailCatchUp();
 })();
-<\/script>`;
+</script>`;
 }
 
 function getAdminNotificationScript(): string {
@@ -1154,7 +1154,7 @@ function getAdminNotificationScript(): string {
   poll();
   window.setInterval(poll, POLL_MS);
 })();
-<\/script>`;
+</script>`;
 }
 
 function renderLayout(
