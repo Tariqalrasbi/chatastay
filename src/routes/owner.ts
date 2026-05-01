@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, SubscriptionStatus, UserRole } from "@prisma/client";
+import { ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, Prisma, SubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerSetup";
 import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
@@ -71,6 +71,11 @@ const passwordResetChallenges = new Map<string, { email: string; expiresAt: numb
 const totpTimeStepSeconds = 30;
 const totpDigits = 6;
 const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+async function nextHotelAccountNumber(tx: Prisma.TransactionClient): Promise<number> {
+  const max = await tx.hotel.aggregate({ _max: { accountNumber: true } });
+  return (max._max.accountNumber ?? 0) + 1;
+}
 
 interface OwnerUser {
   email: string;
@@ -1555,10 +1560,15 @@ ownerRouter.post("/digest/send", requireOwnerAuth, async (req, res) => {
 
 ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const accountQuery = /^\d+$/.test(q) ? Number(q) : null;
   const hotels = await prisma.hotel.findMany({
     where: q
       ? {
-          OR: [{ displayName: { contains: q } }, { slug: { contains: q } }]
+          OR: [
+            { displayName: { contains: q } },
+            { slug: { contains: q } },
+            ...(accountQuery ? [{ accountNumber: accountQuery }] : [])
+          ]
         }
       : undefined,
     include: {
@@ -1578,7 +1588,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
       const activeSub = hotel.subscriptions[0];
       return `<tr>
       <td>${escapeHtml(hotel.displayName)}</td>
-      <td>${escapeHtml(hotel.slug)}</td>
+      <td><strong>#${hotel.accountNumber ?? "—"}</strong><div class="muted" style="font-size:11px">${escapeHtml(hotel.slug)}</div></td>
       <td>${hotel.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Suspended</span>'}</td>
       <td>${activeSub ? `${escapeHtml(activeSub.plan.name)} (${escapeHtml(activeSub.status)})` : "-"}</td>
       <td>${hotel.roomTypes.length}</td>
@@ -1586,7 +1596,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
       <td>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Open</a>
-          <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Admin Login</a>
+          <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(String(hotel.accountNumber ?? hotel.slug))}" target="_blank" rel="noopener noreferrer">Admin Login</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/setup">Hotel Setup</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity</a>
           <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
@@ -1611,11 +1621,11 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
   <a class="btn-link" href="/owner/subscriptions">Manage subscriptions</a>
 </div>
 <form method="get" action="/owner/hotels" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
-  <input type="text" name="q" value="${escapeHtml(q)}" placeholder="Search by name or slug" style="min-width:260px; padding:9px; border:1px solid #d8dee6; border-radius:8px" />
+  <input type="text" name="q" value="${escapeHtml(q)}" placeholder="Search by account #, name, or slug" style="min-width:260px; padding:9px; border:1px solid #d8dee6; border-radius:8px" />
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Search</button>
 </form>
 <table>
-  <thead><tr><th>Hotel</th><th>Slug</th><th>Status</th><th>Plan</th><th>Active Room Types</th><th>Created</th><th>Actions</th></tr></thead>
+  <thead><tr><th>Hotel</th><th>Account #</th><th>Status</th><th>Plan</th><th>Active Room Types</th><th>Created</th><th>Actions</th></tr></thead>
   <tbody>${rows || '<tr><td colspan="7">No hotels found.</td></tr>'}</tbody>
 </table>`;
 
@@ -1651,7 +1661,7 @@ ACT | ACTIVITY | Activities | ACT-TOUR | Local Tour | Activity | 10`;
           : "";
   const content = `
 <h2>Add New Hotel</h2>
-<p class="muted">Create a partner hotel tenant with the same ChatAstay PMS structure, while manually configuring that hotel's rooms, WhatsApp routing, and outlet/menu catalog.</p>
+<p class="muted">Create a partner hotel tenant with the same ChatAstay PMS structure. The numeric account number is assigned automatically in sequence and is used for Extranet login.</p>
 <div class="grid-4" style="margin:12px 0">
   <article class="stat"><h3>1. Account</h3><p>Tenant + subscription</p></article>
   <article class="stat"><h3>2. Rooms</h3><p>Types, counts, unit names</p></article>
@@ -1666,9 +1676,9 @@ ${errorMsg}
       <label>Hotel display name
         <input name="displayName" required placeholder="Example Beach Resort" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
       </label>
-      <label>Slug
+      <label>System URL slug
         <input name="slug" required placeholder="example-beach-resort" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
-        <span class="muted" style="font-size:12px">Used for public URL and routing.</span>
+        <span class="muted" style="font-size:12px">Auto-filled from the name; account number is used for login.</span>
       </label>
       <label>Legal name
         <input name="legalName" placeholder="Example Beach Resort LLC" style="width:100%;padding:9px;border:1px solid #d8dee6;border-radius:8px" />
@@ -1849,8 +1859,9 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
   const actorEmail = getOwnerSessionEmail(req) ?? ownerActorEmail;
   const now = ownerStartOfDay(new Date());
   const hotel = await prisma.$transaction(async (tx) => {
+    const accountNumber = await nextHotelAccountNumber(tx);
     const createdHotel = await tx.hotel.create({
-      data: { slug, legalName, displayName, city, country, timezone, currency, whatsappPhone, isActive: true }
+      data: { slug, accountNumber, legalName, displayName, city, country, timezone, currency, whatsappPhone, isActive: true }
     });
     const property = await tx.property.create({
       data: { hotelId: createdHotel.id, name: propertyName, city, addressLine1, checkInTime, checkOutTime }
@@ -1959,6 +1970,7 @@ ownerRouter.post("/hotels/new", requireOwnerAuth, async (req, res) => {
         entityType: "Hotel",
         entityId: createdHotel.id,
         metadataJson: JSON.stringify({
+          accountNumber,
           slug,
           planCode: plan.code,
           subscriptionStatus: status,
@@ -2077,11 +2089,11 @@ ownerRouter.get("/hotels/:id/setup", requireOwnerAuth, async (req, res) => {
     .join("");
   const content = `
 <h2>Hotel Setup: ${escapeHtml(hotel.displayName)}</h2>
-<p class="muted">Edit the operational setup for this partner hotel. This page changes configuration only; it does not copy or delete live bookings, guests, payments, or folios.</p>
+<p class="muted">Account #${hotel.accountNumber ?? "—"} is the hotel login number. Edit the operational setup for this partner hotel. This page changes configuration only; it does not copy or delete live bookings, guests, payments, or folios.</p>
 ${updated}
 <div class="actions">
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}">Back to hotel</a>
-  <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Open admin login</a>
+  <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(String(hotel.accountNumber ?? hotel.slug))}" target="_blank" rel="noopener noreferrer">Open admin login</a>
 </div>
 
 <section style="margin-top:14px">
@@ -2547,13 +2559,14 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/setup">Hotel Setup</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp">WhatsApp Routing</a>
   <a class="btn-link" href="/owner/hotels/${encodeURIComponent(hotel.id)}/room-capacity">Room capacity (totals)</a>
-  <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener noreferrer">Open hotel admin login</a>
+  <a class="btn-link primary" href="/admin/login?hotel=${encodeURIComponent(String(hotel.accountNumber ?? hotel.slug))}" target="_blank" rel="noopener noreferrer">Open hotel admin login</a>
 </div>
 <div class="grid-2">
   <section>
     <h3>Tenant Profile</h3>
     <table>
       <tbody>
+        <tr><th>Account #</th><td><strong>${hotel.accountNumber ?? "—"}</strong></td></tr>
         <tr><th>Slug</th><td>${escapeHtml(hotel.slug)}</td></tr>
         <tr><th>Status</th><td>${hotel.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Suspended</span>'}</td></tr>
         <tr><th>City</th><td>${escapeHtml(hotel.city ?? "-")}</td></tr>

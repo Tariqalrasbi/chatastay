@@ -720,14 +720,19 @@ function loginDemoSectionHtml(): string {
 type LoginHotelContext = {
   id: string;
   slug: string;
+  accountNumber?: number | null;
   displayName: string;
   city?: string | null;
   country?: string | null;
-  requestedSlug?: string;
+  requestedKey?: string;
 };
 
 function hotelSignForLogin(hotel: LoginHotelContext): string {
   return [hotel.city, hotel.country].filter(Boolean).join(", ") || "Hotel operations";
+}
+
+function hotelAccountKeyForLogin(hotel: LoginHotelContext): string {
+  return hotel.accountNumber ? String(hotel.accountNumber) : hotel.slug;
 }
 
 async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
@@ -737,19 +742,30 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
       id: "",
       slug: "",
       displayName: "ChatAstay Hotel Portal",
-      city: "Select your hotel account",
+      city: "Enter your hotel account number",
       country: null
     };
   }
-  const hotel = await prisma.hotel.findUnique({
-    where: { slug: raw },
-    select: { id: true, slug: true, displayName: true, city: true, country: true }
-  });
+  const numericAccount = /^\d+$/.test(raw) ? Number(raw) : null;
+  const hotelIdByAccount = numericAccount
+    ? await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT id FROM "Hotel" WHERE "accountNumber" = ${numericAccount} LIMIT 1`)
+    : [];
+  const hotel = numericAccount
+    ? await prisma.hotel
+        .findUnique({
+          where: { id: hotelIdByAccount[0]?.id ?? "" },
+          select: { id: true, slug: true, displayName: true, city: true, country: true }
+        })
+        .then((h) => (h ? { ...h, accountNumber: numericAccount } : null))
+    : await prisma.hotel.findUnique({
+        where: { slug: raw },
+        select: { id: true, slug: true, displayName: true, city: true, country: true }
+      });
   if (!hotel) {
     return {
       id: "",
       slug: raw,
-      requestedSlug: raw,
+      requestedKey: raw,
       displayName: "ChatAstay Hotel Portal",
       city: "Hotel account not found",
       country: null
@@ -760,30 +776,31 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
 
 function loginPageHtml(hotel?: LoginHotelContext): string {
   const hotelSlug = hotel?.slug ?? "";
+  const hotelAccountKey = hotel ? hotelAccountKeyForLogin(hotel) : hotelSlug;
   const hotelDisplayName = hotel?.displayName ?? "ChatAstay Hotel Portal";
   const isKnownHotel = Boolean(hotel?.id);
   const hotelSlugField = isKnownHotel
-    ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelSlug)}" />`
-    : `<label class="login-label" for="loginHotelSlug">Hotel slug</label><input class="login-input" id="loginHotelSlug" type="text" name="hotelSlug" value="${escapeHtml(
-        hotelSlug
-      )}" required autocomplete="organization" placeholder="example-hotel-slug" />`;
+    ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelAccountKey)}" />`
+    : `<label class="login-label" for="loginHotelSlug">Hotel account number</label><input class="login-input" id="loginHotelSlug" type="text" name="hotelSlug" value="${escapeHtml(
+        hotelAccountKey
+      )}" required autocomplete="organization" inputmode="numeric" placeholder="1" />`;
   const invalidHotelNotice =
-    hotel?.requestedSlug && !hotel.id
-      ? `<p class="badge alert">No hotel account found for <code>${escapeHtml(hotel.requestedSlug)}</code>. Use the exact slug from the Owner Console.</p>`
+    hotel?.requestedKey && !hotel.id
+      ? `<p class="badge alert">No hotel account found for <code>${escapeHtml(hotel.requestedKey)}</code>. Use the numeric account number from the Owner Console.</p>`
       : "";
   return readView("login.html")
     .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
-    .replace('action="/admin/login"', `action="/admin/login?hotel=${encodeURIComponent(hotelSlug)}"`)
+    .replace('action="/admin/login"', `action="/admin/login?hotel=${encodeURIComponent(hotelAccountKey)}"`)
     .replace('action="/auth/staff-login"', `action="/auth/staff-login"`)
     .replace(
       '<fieldset class="login-fieldset" id="loginFieldsetMgmt">',
       `<fieldset class="login-fieldset" id="loginFieldsetMgmt">${invalidHotelNotice}${hotelSlugField}`
     )
     .replace(
-      '<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>',
-      `<fieldset class="login-fieldset" id="loginFieldsetStaff" disabled>${hotelSlugField}`
+      '<fieldset class="login-fieldset" id="loginFieldsetStaff">',
+      `<fieldset class="login-fieldset" id="loginFieldsetStaff">${hotelSlugField}`
     )
-    .replace('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelSlug)}"`)
+    .replaceAll('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelAccountKey)}"`)
     .replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
 }
 
@@ -1322,6 +1339,7 @@ function renderLayout(
     links: [
       { href: "/admin/setup", label: "Settings" },
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Users &amp; permissions" }] : []),
+      ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/audit-trail", label: "Audit trail" }] : []),
       ...(perm && hasPermission(perm, "BILLING", "VIEW")
         ? [
             { href: "/admin/billing", label: "Billing" },
@@ -3356,7 +3374,7 @@ async function createPasswordResetForEmail(email: string, req: Request): Promise
     }
   });
   const resetBase = (process.env.APP_BASE_URL || appBaseUrl).replace(/\/$/, "") || "https://chatastay.com";
-  const resetLink = `${resetBase}/reset-password?token=${encodeURIComponent(token)}&hotel=${encodeURIComponent(loginHotel.slug)}`;
+  const resetLink = `${resetBase}/reset-password?token=${encodeURIComponent(token)}&hotel=${encodeURIComponent(hotelAccountKeyForLogin(loginHotel))}`;
   const sent = await sendPasswordResetEmail(user.email, resetLink);
   if (!sent) {
     await prisma.auditLog.create({
@@ -3628,18 +3646,19 @@ adminRouter.get("/forgot-password", async (req, res) => {
     return;
   }
   const loginHotel = await resolveLoginHotel(req);
+  const hotelAccountKey = hotelAccountKeyForLogin(loginHotel);
   const notice = req.query.sent ? '<p class="badge ok">If an account exists for that email, we sent a reset link. Check your inbox and spam folder.</p>' : "";
   const content = `
 <h2>Forgot Password</h2>
 <p class="muted">Enter the email address for your admin account. We will send a secure reset link (valid for 15 minutes).</p>
 ${notice}
-<form method="post" action="/admin/forgot-password?hotel=${encodeURIComponent(loginHotel.slug)}" style="max-width: 420px">
-  <input type="hidden" name="hotelSlug" value="${escapeHtml(loginHotel.slug)}" />
+<form method="post" action="/admin/forgot-password?hotel=${encodeURIComponent(hotelAccountKey)}" style="max-width: 420px">
+  <input type="hidden" name="hotelSlug" value="${escapeHtml(hotelAccountKey)}" />
   <label for="email">Email</label><br />
   <input id="email" type="email" name="email" required style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
   <button type="submit" style="width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; background: #25d366; color: #083d2d; font-weight: 700">Send reset link</button>
 </form>
-<p class="muted" style="margin-top: 12px"><a href="/admin/login?hotel=${encodeURIComponent(loginHotel.slug)}">Back to login</a></p>`;
+<p class="muted" style="margin-top: 12px"><a href="/admin/login?hotel=${encodeURIComponent(hotelAccountKey)}">Back to login</a></p>`;
   res.type("html").send(
     renderLayout(content, false, {
       hotelName: loginHotel.displayName,
@@ -3653,7 +3672,7 @@ adminRouter.post("/forgot-password", async (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const loginHotel = await resolveLoginHotel(req);
   await createPasswordResetForEmail(email, req);
-  res.redirect(`/admin/forgot-password?sent=1&hotel=${encodeURIComponent(loginHotel.slug)}`);
+  res.redirect(`/admin/forgot-password?sent=1&hotel=${encodeURIComponent(hotelAccountKeyForLogin(loginHotel))}`);
 });
 
 adminRouter.get("/reset-password", async (req, res) => {
@@ -3769,7 +3788,7 @@ authRouter.post("/staff-login", async (req, res) => {
     if (!role) {
       const accept = String(req.headers.accept ?? "").toLowerCase();
       if (accept.includes("text/html")) {
-        res.redirect(`/admin/login?staff=failed&hotel=${encodeURIComponent(loginHotel.slug)}`);
+        res.redirect(`/admin/login?staff=failed&hotel=${encodeURIComponent(hotelAccountKeyForLogin(loginHotel))}`);
         return;
       }
       res.status(401).json({ ok: false, error: "invalid_credentials" });
@@ -3787,8 +3806,8 @@ authRouter.post("/staff-login", async (req, res) => {
     console.error("[Auth] /auth/staff-login unexpected error:", err instanceof Error ? err.message : err);
     const accept = String(req.headers.accept ?? "").toLowerCase();
     if (accept.includes("text/html")) {
-      const slug = String(req.body?.hotelSlug ?? req.body?.hotel ?? defaultHotelSlug).trim() || defaultHotelSlug;
-      res.redirect(`/admin/login?staff=error&hotel=${encodeURIComponent(slug)}`);
+      const hotelKey = String(req.body?.hotelSlug ?? req.body?.hotel ?? defaultHotelSlug).trim() || defaultHotelSlug;
+      res.redirect(`/admin/login?staff=error&hotel=${encodeURIComponent(hotelKey)}`);
       return;
     }
     res.status(500).json({ ok: false, error: "staff_login_unavailable" });
@@ -3802,7 +3821,7 @@ authRouter.post("/email-login", async (req, res) => {
     if (!role) {
       const accept = String(req.headers.accept ?? "").toLowerCase();
       if (accept.includes("text/html")) {
-        res.redirect(`/admin/login?hotel=${encodeURIComponent(loginHotel.slug)}`);
+        res.redirect(`/admin/login?hotel=${encodeURIComponent(hotelAccountKeyForLogin(loginHotel))}`);
         return;
       }
       res.status(401).json({ ok: false, error: "invalid_credentials" });
@@ -4138,6 +4157,61 @@ ${created}
     <tbody>${rows || '<tr><td colspan="5">No users yet.</td></tr>'}</tbody>
   </table>
 </section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/audit-trail", requirePermission("USERS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
+  if (!hotel) {
+    res.redirect("/admin/login");
+    return;
+  }
+  const actor = String(req.query.actor ?? "").trim();
+  const action = String(req.query.action ?? "").trim();
+  const entity = String(req.query.entity ?? "").trim();
+  const takeRaw = Number.parseInt(String(req.query.take ?? "100"), 10);
+  const take = Number.isFinite(takeRaw) ? Math.max(25, Math.min(300, takeRaw)) : 100;
+  const andFilters: Prisma.AuditLogWhereInput[] = [];
+  if (actor) andFilters.push({ OR: [{ actorEmail: { contains: actor } }, { actorUserId: { contains: actor } }] });
+  if (action) andFilters.push({ action: { contains: action.toUpperCase() } });
+  if (entity) andFilters.push({ OR: [{ entityType: { contains: entity } }, { entityId: { contains: entity } }] });
+  const where = {
+    hotelId: hotel.id,
+    ...(andFilters.length ? { AND: andFilters } : {})
+  };
+  const logs = await prisma.auditLog.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take
+  });
+  const rows = logs
+    .map((log) => {
+      const metadata = parseAuditMetadata(log.metadataJson);
+      const metadataPreview = Object.keys(metadata).length ? JSON.stringify(metadata).slice(0, 280) : "";
+      return `<tr>
+        <td>${formatDateTime(log.createdAt)}</td>
+        <td>${escapeHtml(log.actorEmail || log.actorUserId || "SYSTEM")}</td>
+        <td><code>${escapeHtml(log.action)}</code></td>
+        <td>${escapeHtml(log.entityType)}${log.entityId ? `<div class="muted" style="font-size:11px">${escapeHtml(log.entityId)}</div>` : ""}</td>
+        <td>${escapeHtml(metadataPreview || "-")}</td>
+      </tr>`;
+    })
+    .join("");
+  const content = `
+<h2>Audit Trail</h2>
+<p class="muted">Latest recorded operations for ${escapeHtml(hotel.displayName)}. Use actor email/ID to review what a manager, front desk user, housekeeper, or staff member did.</p>
+<form method="get" action="/admin/audit-trail" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:14px 0">
+  <label>Actor email or ID<br /><input name="actor" value="${escapeHtml(actor)}" placeholder="denish@hotel.com" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+  <label>Action<br /><input name="action" value="${escapeHtml(action)}" placeholder="LOGIN, FOLIO, BOOKING" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+  <label>Entity<br /><input name="entity" value="${escapeHtml(entity)}" placeholder="Booking, RoomUnit, ID" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+  <label>Rows<br /><input type="number" name="take" min="25" max="300" value="${take}" style="width:90px;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
+  <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Filter</button>
+  <a class="btn-link" href="/admin/audit-trail">Clear</a>
+</form>
+<table>
+  <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Metadata</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="5">No audit entries found.</td></tr>'}</tbody>
+</table>`;
   res.type("html").send(renderLayout(content, true));
 });
 
