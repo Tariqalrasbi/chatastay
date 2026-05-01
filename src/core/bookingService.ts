@@ -14,7 +14,7 @@ import { createRoleRoutedNotification } from "./notifications";
 import { refreshGuestSegmentTagsForGuest } from "./guestSegmentation";
 import { mergeLightGuestMemoryFromConfirmedBooking } from "./lightGuestMemory";
 import { ensureActiveFolio } from "./folioService";
-import { addDays, findAvailableRoomType, startOfDay } from "./availability";
+import { addDays, findAvailableRoomType, findAvailableRoomTypes, startOfDay } from "./availability";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
 import { trackDecisionEventSafe } from "./decisionAnalytics";
 
@@ -165,6 +165,8 @@ export async function createConfirmedBookingAtomic(params: {
   /** When omitted, adults defaults to `guests` and children to 0. */
   adults?: number;
   children?: number;
+  /** Optional guest-selected room type from the mobile booking form. Falls back to best available. */
+  preferredRoomTypeId?: string;
   /** Distinguishes WhatsApp automation from front-desk / OTA sources. */
   source?: ChannelProvider;
 }): Promise<{
@@ -197,13 +199,25 @@ export async function createConfirmedBookingAtomic(params: {
     };
   }
 
-  const offer = await findAvailableRoomType({
-    hotelId: params.hotelId,
-    checkIn: params.checkIn,
-    checkOut: params.checkOut,
-    guests: params.guests,
-    rooms: params.rooms
-  });
+  const offer = params.preferredRoomTypeId
+    ? (await findAvailableRoomTypes({
+        hotelId: params.hotelId,
+        checkIn: params.checkIn,
+        checkOut: params.checkOut,
+        guests: params.guests,
+        rooms: params.rooms,
+        adults: params.adults,
+        children: params.children
+      })).find((item) => item.roomTypeId === params.preferredRoomTypeId) ?? null
+    : await findAvailableRoomType({
+        hotelId: params.hotelId,
+        checkIn: params.checkIn,
+        checkOut: params.checkOut,
+        guests: params.guests,
+        rooms: params.rooms,
+        adults: params.adults,
+        children: params.children
+      });
   if (!offer) {
     throw new Error("No availability for selected dates.");
   }

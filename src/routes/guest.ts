@@ -1,8 +1,10 @@
 import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
+import { ChannelProvider } from "@prisma/client";
 import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
+import { createConfirmedBookingAtomic } from "../core/bookingService";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
@@ -355,7 +357,7 @@ guestRouter.get("/book", async (req, res) => {
   const content = `
 <section class="hero-card">
   <h1>Book ${escapeHtml(hotel.displayName)}</h1>
-  <p class="muted">Fill everything in one mobile screen. We will check availability and send confirmation back to WhatsApp.</p>
+  <p class="muted">Fill everything in one mobile screen, confirm here, and receive your booking number immediately.</p>
 </section>
 ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
 <form method="post" action="/guest/book" style="display:grid; gap:12px; max-width:620px">
@@ -371,15 +373,25 @@ ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
   </div>
   <div class="row">
     <label>Adults
-      <input type="number" name="adults" min="1" max="16" value="2" required />
+      <select name="adults" required>
+        ${Array.from({ length: 10 }, (_, idx) => idx + 1)
+          .map((n) => `<option value="${n}" ${n === 2 ? "selected" : ""}>${n} adult${n > 1 ? "s" : ""}</option>`)
+          .join("")}
+      </select>
     </label>
     <label>Children
-      <input type="number" name="children" min="0" max="12" value="0" />
+      <select name="children">
+        ${Array.from({ length: 7 }, (_, n) => `<option value="${n}">${n} child${n === 1 ? "" : "ren"}</option>`).join("")}
+      </select>
     </label>
   </div>
   <div class="row">
     <label>Rooms
-      <input type="number" name="rooms" min="1" max="6" value="1" required />
+      <select name="rooms" required>
+        ${Array.from({ length: 6 }, (_, idx) => idx + 1)
+          .map((n) => `<option value="${n}">${n} room${n > 1 ? "s" : ""}</option>`)
+          .join("")}
+      </select>
     </label>
     <label>Preferred room
       <select name="roomTypeId">
@@ -466,109 +478,127 @@ guestRouter.post("/book", async (req, res) => {
   }
 
   const normalizedGuestPhone = sessionPhone || normalizePhone(phone);
-  const guest =
-    (sessionGuestId
-      ? await prisma.guest.findUnique({ where: { id: sessionGuestId } })
-      : normalizedGuestPhone
-        ? await prisma.guest.upsert({
-            where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedGuestPhone } },
-            update: { ...(guestName ? { fullName: guestName } : {}) },
-            create: { hotelId: hotel.id, phoneE164: normalizedGuestPhone, ...(guestName ? { fullName: guestName } : {}) }
-          })
-        : null) ?? null;
-
-  let conversationId: string | undefined;
-  if (guest) {
-    const conversation =
-      (await prisma.conversation.findFirst({
-        where: { hotelId: hotel.id, guestId: guest.id, state: { in: ["NEW", "QUALIFYING", "QUOTED", "PAYMENT_PENDING", "CONFIRMED"] } },
-        orderBy: { updatedAt: "desc" }
-      })) ??
-      (await prisma.conversation.create({
-        data: { hotelId: hotel.id, guestId: guest.id, state: "QUALIFYING", lastMessageAt: new Date() }
-      }));
-    conversationId = conversation.id;
-    const draftState = {
-      language: guest.locale || "en",
-      stage: "WAITING_CONFIRMATION",
-      guestName: guestName || guest.fullName || undefined,
-      checkIn: toIsoDate(checkIn),
-      checkOut: toIsoDate(checkOut),
-      guestCount: guests,
-      adultCount: adults,
-      childCount: children,
-      roomCount: rooms,
-      suggestedRoomTypeId: offer.roomTypeId,
-      suggestedRoomTypeName: offer.roomTypeName,
-      suggestedPropertyId: offer.propertyId,
-      nightlyRate: offer.nightlyTotal,
-      nights: offer.nights,
-      totalAmount: offer.total,
-      specialRequests
-    };
-    await saveConversationSession({
+  if (!normalizedGuestPhone) {
+    const query = new URLSearchParams({
       hotelId: hotel.id,
-      guestId: guest.id,
-      conversationId,
-      phoneE164: guest.phoneE164,
-      state: draftState,
-      ttlMs: 60 * 60 * 1000
+      error: "Please enter your WhatsApp number so we can confirm the booking."
     });
-    await upsertBookingDraft({
-      hotelId: hotel.id,
-      guestId: guest.id,
-      conversationId,
-      currency: hotel.currency,
-      source: "MOBILE_BOOKING_FORM",
-      state: draftState
-    });
+    if (token) query.set("token", token);
+    if (guestName) query.set("guestName", guestName);
+    res.redirect(`/guest/book?${query.toString()}`);
+    return;
   }
 
-  const summaryMessage = [
-    `I found availability for ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)}.`,
-    `Room: ${offer.roomTypeName}`,
+  const guest = sessionGuestId
+    ? await prisma.guest.update({
+        where: { id: sessionGuestId },
+        data: { phoneE164: normalizedGuestPhone, ...(guestName ? { fullName: guestName } : {}) }
+      })
+    : await prisma.guest.upsert({
+        where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedGuestPhone } },
+        update: { ...(guestName ? { fullName: guestName } : {}) },
+        create: { hotelId: hotel.id, phoneE164: normalizedGuestPhone, ...(guestName ? { fullName: guestName } : {}) }
+      });
+
+  const conversation =
+    (await prisma.conversation.findFirst({
+      where: { hotelId: hotel.id, guestId: guest.id, state: { in: ["NEW", "QUALIFYING", "QUOTED", "PAYMENT_PENDING", "CONFIRMED"] } },
+      orderBy: { updatedAt: "desc" }
+    })) ??
+    (await prisma.conversation.create({
+      data: { hotelId: hotel.id, guestId: guest.id, state: "QUALIFYING", lastMessageAt: new Date() }
+    }));
+  const draftState = {
+    language: guest.locale || "en",
+    stage: "CONFIRMED",
+    guestName: guestName || guest.fullName || undefined,
+    checkIn: toIsoDate(checkIn),
+    checkOut: toIsoDate(checkOut),
+    guestCount: guests,
+    adultCount: adults,
+    childCount: children,
+    roomCount: rooms,
+    suggestedRoomTypeId: offer.roomTypeId,
+    suggestedRoomTypeName: offer.roomTypeName,
+    suggestedPropertyId: offer.propertyId,
+    nightlyRate: offer.nightlyTotal,
+    nights: offer.nights,
+    totalAmount: offer.total,
+    specialRequests
+  };
+  await saveConversationSession({
+    hotelId: hotel.id,
+    guestId: guest.id,
+    conversationId: conversation.id,
+    phoneE164: guest.phoneE164,
+    state: draftState,
+    ttlMs: 60 * 60 * 1000
+  });
+  await upsertBookingDraft({
+    hotelId: hotel.id,
+    guestId: guest.id,
+    conversationId: conversation.id,
+    currency: hotel.currency,
+    source: "MOBILE_BOOKING_FORM",
+    state: draftState
+  });
+
+  const booking = await createConfirmedBookingAtomic({
+    hotelId: hotel.id,
+    guestId: guest.id,
+    conversationId: conversation.id,
+    checkIn,
+    checkOut,
+    guests,
+    rooms,
+    currency: hotel.currency,
+    adults,
+    children,
+    preferredRoomTypeId: offer.roomTypeId,
+    source: ChannelProvider.WHATSAPP
+  });
+  if (token) {
+    const session = await resolveCalendarSession(token).catch(() => null);
+    if (session) await markCalendarSessionUsed(session.id);
+  }
+
+  const confirmationMessage = [
+    `Booking confirmed at ${hotel.displayName}.`,
+    `Booking ID: ${booking.bookingId}`,
+    `Room: ${booking.roomTypeName}`,
+    `Stay: ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)} (${booking.nights} night${booking.nights > 1 ? "s" : ""})`,
     `Guests: ${guests} (${adults} adults, ${children} children) | Rooms: ${rooms}`,
-    `Total: ${offer.total.toFixed(2)} ${hotel.currency}`,
-    specialRequests ? `Requests: ${specialRequests}` : "",
-    "Reply with YES to confirm or NO to edit."
+    `Total: ${booking.totalAmount.toFixed(2)} ${hotel.currency}`,
+    specialRequests ? `Requests received: ${specialRequests}` : "",
+    "Thank you. The hotel team has received your booking."
   ].filter(Boolean).join("\n");
-  if (guest) {
-    const config = loadPartnerSetupConfig(hotel.id);
-    try {
-      await sendWhatsAppButtons({
-        to: normalizePhone(guest.phoneE164),
-        body: summaryMessage,
-        buttons: [
-          { id: "confirm_booking", title: "Confirm" },
-          { id: "edit_booking", title: "Edit" }
-        ],
-        phoneNumberId: config.whatsappPhoneNumberId || undefined
-      });
-    } catch {
-      await sendWhatsAppText({
-        to: normalizePhone(guest.phoneE164),
-        body: summaryMessage,
-        phoneNumberId: config.whatsappPhoneNumberId || undefined
-      });
-    }
-  }
+  const config = loadPartnerSetupConfig(hotel.id);
+  await sendWhatsAppText({
+    to: normalizePhone(guest.phoneE164),
+    body: confirmationMessage,
+    phoneNumberId: config.whatsappPhoneNumberId || undefined,
+    conversationId: conversation.id
+  }).catch(() => undefined);
 
   const content = `
-<h1>Availability Found</h1>
-<p class="muted">Your details were saved. Confirm from WhatsApp to finish the booking.</p>
+<section class="hero-card">
+  <h1>Booking Confirmed</h1>
+  <p class="muted">Your stay is confirmed. No extra WhatsApp confirmation is needed.</p>
+</section>
 <table>
   <tbody>
+    <tr><th>Booking ID</th><td><strong>${escapeHtml(booking.bookingId)}</strong></td></tr>
     <tr><th>Hotel</th><td>${escapeHtml(hotel.displayName)}</td></tr>
     <tr><th>Check-in</th><td>${escapeHtml(toIsoDate(checkIn))}</td></tr>
     <tr><th>Check-out</th><td>${escapeHtml(toIsoDate(checkOut))}</td></tr>
     <tr><th>Guests</th><td>${guests} (${adults} adults, ${children} children)</td></tr>
     <tr><th>Rooms</th><td>${rooms}</td></tr>
-    <tr><th>Room</th><td>${escapeHtml(offer.roomTypeName)}</td></tr>
-    <tr><th>Total</th><td>${offer.total.toFixed(2)} ${escapeHtml(hotel.currency)}</td></tr>
+    <tr><th>Room</th><td>${escapeHtml(booking.roomTypeName)}</td></tr>
+    <tr><th>Total</th><td>${booking.totalAmount.toFixed(2)} ${escapeHtml(hotel.currency)}</td></tr>
   </tbody>
 </table>
-${guest ? `<p class="badge ok">Confirmation was sent to WhatsApp.</p>` : `<p class="badge pending">Enter a WhatsApp number so we can send confirmation buttons.</p>`}
-<p><a href="/guest/book?hotelId=${encodeURIComponent(hotel.id)}${token ? `&token=${encodeURIComponent(token)}` : ""}">Edit details</a></p>`;
+<p class="badge ok">A copy was sent to your WhatsApp.</p>
+<p class="muted">Please keep this booking ID for check-in.</p>`;
   res.type("html").send(guestLayout(content));
 });
 
