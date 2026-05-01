@@ -26,7 +26,7 @@ export type PendingPrebookOrder = {
   estimatedTotal: number;
 };
 
-export type WhatsAppMealPlanCode = "NONE" | "HALF_BOARD" | "FULL_BOARD";
+export type WhatsAppMealPlanCode = "NONE" | "BREAKFAST" | "HALF_BOARD" | "FULL_BOARD";
 
 /** After "View menu" from meal plan, return to meal-plan question. */
 export type BookingFlowReturnHint = "meal_plan";

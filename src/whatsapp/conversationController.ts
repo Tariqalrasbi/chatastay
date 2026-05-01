@@ -890,6 +890,7 @@ async function estimatePrebookOrderTotal(
 }
 
 function whatsAppMealPlanToPricingCode(code: WhatsAppMealPlanCode | null | undefined): MealPlanCode {
+  if (code === "BREAKFAST") return "BREAKFAST";
   if (code === "HALF_BOARD") return "HALF_BOARD";
   if (code === "FULL_BOARD") return "FULL_BOARD";
   return "NONE";

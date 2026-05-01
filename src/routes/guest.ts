@@ -1,10 +1,12 @@
 import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
-import { ChannelProvider } from "@prisma/client";
+import Stripe from "stripe";
+import { ChannelProvider, PaymentStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
+import { computeMealPlanSurchargeForStay, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
@@ -36,6 +38,95 @@ function addDays(input: Date, days: number): Date {
 
 const defaultHotelSlug = process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort";
 const offersFile = path.join(process.cwd(), "hotel-offers.json");
+const appBaseUrl = (process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
+
+function getStripeClient(): Stripe | null {
+  const apiKey = process.env.STRIPE_SECRET_KEY;
+  return apiKey ? new Stripe(apiKey) : null;
+}
+
+function toMinorUnits(amount: number, currency: string): number {
+  const upper = currency.toUpperCase();
+  const factor = ["BHD", "KWD", "OMR"].includes(upper) ? 1000 : ["JPY", "KRW"].includes(upper) ? 1 : 100;
+  return Math.max(1, Math.round(amount * factor));
+}
+
+function normalizeMealPlan(raw: unknown): MealPlanCode {
+  const value = String(raw ?? "NONE").toUpperCase();
+  return value === "BREAKFAST" || value === "HALF_BOARD" || value === "FULL_BOARD" ? value : "NONE";
+}
+
+async function createGuestPaymentLink(params: {
+  hotelId: string;
+  hotelName: string;
+  bookingId: string;
+  guestEmail?: string | null;
+  amount: number;
+  currency: string;
+  description: string;
+}): Promise<string | null> {
+  const stripe = getStripeClient();
+  if (!stripe) return null;
+  const localPaymentIntent = await prisma.paymentIntent.create({
+    data: {
+      hotelId: params.hotelId,
+      kind: "BOOKING",
+      provider: "stripe",
+      amount: params.amount,
+      currency: params.currency,
+      status: PaymentStatus.REQUIRES_ACTION,
+      bookingId: params.bookingId
+    }
+  });
+  const successUrl = `${appBaseUrl}/guest?bookingId=${encodeURIComponent(params.bookingId)}`;
+  const cancelUrl = `${appBaseUrl}/guest?bookingId=${encodeURIComponent(params.bookingId)}`;
+  const checkoutSession = await stripe.checkout.sessions.create({
+    mode: "payment",
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+    client_reference_id: localPaymentIntent.id,
+    customer_email: params.guestEmail ?? undefined,
+    metadata: {
+      paymentIntentId: localPaymentIntent.id,
+      bookingId: params.bookingId,
+      hotelId: params.hotelId
+    },
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: params.currency.toLowerCase(),
+          unit_amount: toMinorUnits(params.amount, params.currency),
+          product_data: {
+            name: `Booking ${params.bookingId} - ${params.hotelName}`,
+            description: params.description
+          }
+        }
+      }
+    ],
+    payment_intent_data: {
+      metadata: {
+        paymentIntentId: localPaymentIntent.id,
+        bookingId: params.bookingId,
+        hotelId: params.hotelId
+      }
+    }
+  });
+  await prisma.paymentIntent.update({
+    where: { id: localPaymentIntent.id },
+    data: {
+      externalIntentId: checkoutSession.id,
+      paymentLinkUrl: checkoutSession.url ?? undefined,
+      paymentLinkSentAt: new Date(),
+      metadataJson: JSON.stringify({
+        stripeCheckoutSessionId: checkoutSession.id,
+        stripePaymentIntent: checkoutSession.payment_intent,
+        source: "guest_mobile_booking"
+      })
+    }
+  });
+  return checkoutSession.url ?? null;
+}
 
 type GuestOffer = {
   id: string;
@@ -93,9 +184,10 @@ function formatMonthKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function guestLayout(content: string): string {
+function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
+  const dir = lang === "ar" ? "rtl" : "ltr";
   return `<!doctype html>
-<html lang="en">
+<html lang="${lang}" dir="${dir}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -104,6 +196,7 @@ function guestLayout(content: string): string {
     body { font-family: Inter, Arial, sans-serif; margin: 0; background: linear-gradient(180deg, #f6fbf9 0%, #eef7f4 100%); color: #0f172a; }
     main { max-width: 860px; margin: 20px auto; background: #ffffff; border: 1px solid #d8eee5; border-radius: 16px; padding: 18px; box-shadow: 0 8px 28px rgba(7, 94, 84, 0.08); }
     h1, h2 { margin-top: 0; }
+    html[dir="rtl"] body, html[dir="rtl"] th, html[dir="rtl"] td { text-align: right; }
     .muted { color: #475569; }
     .inline-link { color:#0b6e6e; font-weight: 700; text-decoration: none; padding: 6px 10px; border-radius: 999px; background: #ecfff5; border:1px solid #bbf7d0; }
     .inline-link:hover { text-decoration: underline; }
@@ -314,12 +407,14 @@ guestRouter.get("/book", async (req, res) => {
   const phone = typeof req.query.phone === "string" ? req.query.phone.trim() : "";
   const guestName = typeof req.query.guestName === "string" ? req.query.guestName.trim() : "";
   const error = typeof req.query.error === "string" ? req.query.error.trim() : "";
+  let lang: "en" | "ar" = req.query.lang === "ar" ? "ar" : "en";
 
   let resolvedHotelId = hotelIdFromQuery;
   if (token) {
     try {
       const session = await resolveCalendarSession(token);
       resolvedHotelId = session.hotelId;
+      lang = session.language === "ar" ? "ar" : lang;
     } catch (sessionError) {
       const message = sessionError instanceof Error ? sessionError.message : "Invalid booking session";
       res.redirect(`/guest/book?${new URLSearchParams({ error: message }).toString()}`);
@@ -348,6 +443,8 @@ guestRouter.get("/book", async (req, res) => {
 
   const today = formatDate(new Date());
   const tomorrow = formatDate(addDays(new Date(), 1));
+  const pricing = loadFrontDeskPricing();
+  const ar = lang === "ar";
   const roomOptions = hotel.roomTypes
     .map(
       (room) =>
@@ -356,65 +453,82 @@ guestRouter.get("/book", async (req, res) => {
     .join("");
   const content = `
 <section class="hero-card">
-  <h1>Book ${escapeHtml(hotel.displayName)}</h1>
-  <p class="muted">Fill everything in one mobile screen, confirm here, and receive your booking number immediately.</p>
+  <h1>${ar ? "احجز" : "Book"} ${escapeHtml(hotel.displayName)}</h1>
+  <p class="muted">${ar ? "أكمل تفاصيل الحجز في شاشة واحدة واحصل على رقم الحجز فوراً." : "Fill everything in one mobile screen, confirm here, and receive your booking number immediately."}</p>
 </section>
 ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
 <form method="post" action="/guest/book" style="display:grid; gap:12px; max-width:620px">
   <input type="hidden" name="hotelId" value="${escapeHtml(hotel.id)}" />
+  <input type="hidden" name="lang" value="${lang}" />
   ${token ? `<input type="hidden" name="token" value="${escapeHtml(token)}" />` : ""}
   <div class="row">
-    <label>Check-in
+    <label>${ar ? "تاريخ الوصول" : "Check-in"}
       <input type="date" name="checkIn" min="${escapeHtml(today)}" value="${escapeHtml(today)}" required />
     </label>
-    <label>Check-out
+    <label>${ar ? "تاريخ المغادرة" : "Check-out"}
       <input type="date" name="checkOut" min="${escapeHtml(tomorrow)}" value="${escapeHtml(tomorrow)}" required />
     </label>
   </div>
   <div class="row">
-    <label>Adults
+    <label>${ar ? "البالغون" : "Adults"}
       <select name="adults" required>
         ${Array.from({ length: 10 }, (_, idx) => idx + 1)
           .map((n) => `<option value="${n}" ${n === 2 ? "selected" : ""}>${n} adult${n > 1 ? "s" : ""}</option>`)
           .join("")}
       </select>
     </label>
-    <label>Children
+    <label>${ar ? "الأطفال" : "Children"}
       <select name="children">
         ${Array.from({ length: 7 }, (_, n) => `<option value="${n}">${n} child${n === 1 ? "" : "ren"}</option>`).join("")}
       </select>
     </label>
   </div>
   <div class="row">
-    <label>Rooms
+    <label>${ar ? "عدد الغرف" : "Rooms"}
       <select name="rooms" required>
         ${Array.from({ length: 6 }, (_, idx) => idx + 1)
           .map((n) => `<option value="${n}">${n} room${n > 1 ? "s" : ""}</option>`)
           .join("")}
       </select>
     </label>
-    <label>Preferred room
+    <label>${ar ? "نوع الغرفة" : "Preferred room"}
       <select name="roomTypeId">
-        <option value="">Best available</option>
+        <option value="">${ar ? "أفضل غرفة متاحة" : "Best available"}</option>
         ${roomOptions}
       </select>
     </label>
   </div>
   <div class="row">
-    <label>Your name
+    <label>${ar ? "خطة الوجبات" : "Meal plan"}
+      <select name="mealPlan">
+        <option value="NONE">${ar ? "غرفة فقط" : "Room only"}</option>
+        <option value="BREAKFAST">${ar ? "إفطار" : "Breakfast"} (+${pricing.mealPlans.BREAKFAST.perPersonPerNight.toFixed(2)} ${escapeHtml(hotel.currency)}/guest/night)</option>
+        <option value="HALF_BOARD">${ar ? "نصف إقامة" : "Half board"} (+${pricing.mealPlans.HALF_BOARD.perPersonPerNight.toFixed(2)} ${escapeHtml(hotel.currency)}/guest/night)</option>
+        <option value="FULL_BOARD">${ar ? "إقامة كاملة" : "Full board"} (+${pricing.mealPlans.FULL_BOARD.perPersonPerNight.toFixed(2)} ${escapeHtml(hotel.currency)}/guest/night)</option>
+      </select>
+    </label>
+    <label>${ar ? "الدفع" : "Payment"}
+      <select name="paymentPreference">
+        <option value="PAY_LATER">${ar ? "الدفع لاحقاً في الفندق" : "Pay later at hotel"}</option>
+        <option value="PAY_NOW">${ar ? "ادفع الآن برابط آمن" : "Pay now by secure link"}</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label>${ar ? "اسم الضيف" : "Guest name"}
       <input type="text" name="guestName" value="${escapeHtml(guestName)}" placeholder="Guest name" />
     </label>
-    <label>WhatsApp number
+    <label>${ar ? "رقم واتساب" : "WhatsApp number"}
       <input type="tel" name="phone" value="${escapeHtml(phone)}" placeholder="9689XXXXXXX" />
     </label>
   </div>
-  <label>Special requests
+  <label>${ar ? "طلبات خاصة" : "Special requests"}
     <textarea name="specialRequests" placeholder="Extra bed, late check-in, meal preference, airport transfer..."></textarea>
   </label>
-  <button type="submit">Check Availability</button>
-  <p class="muted">Prefer a calendar view? <a href="/guest/calendar?hotelId=${encodeURIComponent(hotel.id)}${token ? `&token=${encodeURIComponent(token)}` : ""}">Open calendar</a></p>
+  <button type="submit">${ar ? "تأكيد الحجز" : "Confirm Booking"}</button>
+  <p class="muted">${ar ? "تفضل التقويم؟" : "Prefer a calendar view?"} <a href="/guest/calendar?hotelId=${encodeURIComponent(hotel.id)}${token ? `&token=${encodeURIComponent(token)}` : ""}">${ar ? "افتح التقويم" : "Open calendar"}</a></p>
 </form>`;
-  res.type("html").send(guestLayout(content));
+  res.type("html").send(guestLayout(content, lang));
 });
 
 guestRouter.post("/book", async (req, res) => {
@@ -430,6 +544,10 @@ guestRouter.post("/book", async (req, res) => {
   const specialRequests = String(req.body.specialRequests ?? "").trim().slice(0, 500);
   const checkInRaw = String(req.body.checkIn ?? "").trim();
   const checkOutRaw = String(req.body.checkOut ?? "").trim();
+  const lang: "en" | "ar" = req.body.lang === "ar" ? "ar" : "en";
+  const ar = lang === "ar";
+  const mealPlan = normalizeMealPlan(req.body.mealPlan);
+  const paymentPreference = String(req.body.paymentPreference ?? "PAY_LATER") === "PAY_NOW" ? "PAY_NOW" : "PAY_LATER";
 
   let hotelId = hotelIdBody;
   let sessionGuestId: string | undefined;
@@ -523,7 +641,10 @@ guestRouter.post("/book", async (req, res) => {
     suggestedPropertyId: offer.propertyId,
     nightlyRate: offer.nightlyTotal,
     nights: offer.nights,
-    totalAmount: offer.total,
+    totalAmount: Number(
+      (offer.total + computeMealPlanSurchargeForStay({ mealPlan, adults, children, nights: offer.nights })).toFixed(2)
+    ),
+    bookingMealPlanCode: mealPlan,
     specialRequests
   };
   await saveConversationSession({
@@ -555,6 +676,7 @@ guestRouter.post("/book", async (req, res) => {
     adults,
     children,
     preferredRoomTypeId: offer.roomTypeId,
+    mealPlan,
     source: ChannelProvider.WHATSAPP
   });
   if (token) {
@@ -562,16 +684,65 @@ guestRouter.post("/book", async (req, res) => {
     if (session) await markCalendarSessionUsed(session.id);
   }
 
-  const confirmationMessage = [
-    `Booking confirmed at ${hotel.displayName}.`,
-    `Booking ID: ${booking.bookingId}`,
-    `Room: ${booking.roomTypeName}`,
-    `Stay: ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)} (${booking.nights} night${booking.nights > 1 ? "s" : ""})`,
-    `Guests: ${guests} (${adults} adults, ${children} children) | Rooms: ${rooms}`,
-    `Total: ${booking.totalAmount.toFixed(2)} ${hotel.currency}`,
-    specialRequests ? `Requests received: ${specialRequests}` : "",
-    "Thank you. The hotel team has received your booking."
-  ].filter(Boolean).join("\n");
+  let paymentLink: string | null = null;
+  if (paymentPreference === "PAY_NOW") {
+    paymentLink = await createGuestPaymentLink({
+      hotelId: hotel.id,
+      hotelName: hotel.displayName,
+      bookingId: booking.bookingId,
+      guestEmail: guest.email,
+      amount: booking.totalAmount,
+      currency: hotel.currency,
+      description: `${booking.roomCount} room(s), ${booking.roomTypeName}, ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)}`
+    }).catch(() => null);
+  }
+
+  const guestDisplayName = guestName || guest.fullName || (ar ? "الضيف" : "Guest");
+  const mealLabel =
+    mealPlan === "BREAKFAST"
+      ? ar
+        ? "إفطار"
+        : "Breakfast"
+      : mealPlan === "HALF_BOARD"
+        ? ar
+          ? "نصف إقامة"
+          : "Half board"
+        : mealPlan === "FULL_BOARD"
+          ? ar
+            ? "إقامة كاملة"
+            : "Full board"
+          : ar
+            ? "غرفة فقط"
+            : "Room only";
+  const confirmationMessage = ar
+    ? [
+        `تم تأكيد الحجز في ${hotel.displayName}.`,
+        `اسم الضيف: ${guestDisplayName}`,
+        `رقم الحجز: ${booking.bookingId}`,
+        booking.bookingIds.length > 1 ? `أرقام الغرف/الحجوزات: ${booking.bookingIds.join(", ")}` : "",
+        `نوع الغرفة: ${booking.roomTypeName}`,
+        `الإقامة: ${toIsoDate(checkIn)} إلى ${toIsoDate(checkOut)} (${booking.nights} ليلة)`,
+        `الضيوف: ${guests} (${adults} بالغ، ${children} طفل) | الغرف: ${booking.roomCount}`,
+        `الوجبات: ${mealLabel}`,
+        `الإجمالي: ${booking.totalAmount.toFixed(2)} ${hotel.currency}`,
+        paymentLink ? `رابط الدفع الآمن: ${paymentLink}` : "يمكنك الدفع لاحقاً حسب سياسة الفندق.",
+        specialRequests ? `طلباتك: ${specialRequests}` : "",
+        "شكراً لك. تم استلام الحجز من فريق الفندق."
+      ].filter(Boolean).join("\n")
+    : [
+        `Booking confirmed at ${hotel.displayName}.`,
+        `Guest name: ${guestDisplayName}`,
+        `Booking ID: ${booking.bookingId}`,
+        booking.bookingIds.length > 1 ? `Linked room bookings: ${booking.bookingIds.join(", ")}` : "",
+        `Room: ${booking.roomTypeName}`,
+        `Stay: ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)} (${booking.nights} night${booking.nights > 1 ? "s" : ""})`,
+        `Guests: ${guests} (${adults} adults, ${children} children) | Rooms: ${booking.roomCount}`,
+        `Meal plan: ${mealLabel}`,
+        `Total: ${booking.totalAmount.toFixed(2)} ${hotel.currency}`,
+        paymentLink ? `Secure payment link: ${paymentLink}` : "Payment can be completed later according to hotel policy.",
+        specialRequests ? `Requests received: ${specialRequests}` : "",
+        "Thank you. The hotel team has received your booking."
+      ].filter(Boolean).join("\n");
   const config = loadPartnerSetupConfig(hotel.id);
   await sendWhatsAppText({
     to: normalizePhone(guest.phoneE164),
@@ -582,24 +753,28 @@ guestRouter.post("/book", async (req, res) => {
 
   const content = `
 <section class="hero-card">
-  <h1>Booking Confirmed</h1>
-  <p class="muted">Your stay is confirmed. No extra WhatsApp confirmation is needed.</p>
+  <h1>${ar ? "تم تأكيد الحجز" : "Booking Confirmed"}</h1>
+  <p class="muted">${ar ? "تم تأكيد إقامتك. لا تحتاج إلى تأكيد إضافي في واتساب." : "Your stay is confirmed. No extra WhatsApp confirmation is needed."}</p>
 </section>
 <table>
   <tbody>
-    <tr><th>Booking ID</th><td><strong>${escapeHtml(booking.bookingId)}</strong></td></tr>
-    <tr><th>Hotel</th><td>${escapeHtml(hotel.displayName)}</td></tr>
-    <tr><th>Check-in</th><td>${escapeHtml(toIsoDate(checkIn))}</td></tr>
-    <tr><th>Check-out</th><td>${escapeHtml(toIsoDate(checkOut))}</td></tr>
-    <tr><th>Guests</th><td>${guests} (${adults} adults, ${children} children)</td></tr>
-    <tr><th>Rooms</th><td>${rooms}</td></tr>
-    <tr><th>Room</th><td>${escapeHtml(booking.roomTypeName)}</td></tr>
-    <tr><th>Total</th><td>${booking.totalAmount.toFixed(2)} ${escapeHtml(hotel.currency)}</td></tr>
+    <tr><th>${ar ? "اسم الضيف" : "Guest name"}</th><td>${escapeHtml(guestDisplayName)}</td></tr>
+    <tr><th>${ar ? "رقم الحجز" : "Booking ID"}</th><td><strong>${escapeHtml(booking.bookingId)}</strong></td></tr>
+    ${booking.bookingIds.length > 1 ? `<tr><th>${ar ? "الحجوزات المرتبطة" : "Linked bookings"}</th><td>${escapeHtml(booking.bookingIds.join(", "))}</td></tr>` : ""}
+    <tr><th>${ar ? "الفندق" : "Hotel"}</th><td>${escapeHtml(hotel.displayName)}</td></tr>
+    <tr><th>${ar ? "الوصول" : "Check-in"}</th><td>${escapeHtml(toIsoDate(checkIn))}</td></tr>
+    <tr><th>${ar ? "المغادرة" : "Check-out"}</th><td>${escapeHtml(toIsoDate(checkOut))}</td></tr>
+    <tr><th>${ar ? "الضيوف" : "Guests"}</th><td>${guests} (${adults} adults, ${children} children)</td></tr>
+    <tr><th>${ar ? "الغرف" : "Rooms"}</th><td>${booking.roomCount}</td></tr>
+    <tr><th>${ar ? "نوع الغرفة" : "Room"}</th><td>${escapeHtml(booking.roomTypeName)}</td></tr>
+    <tr><th>${ar ? "خطة الوجبات" : "Meal plan"}</th><td>${escapeHtml(mealLabel)}</td></tr>
+    <tr><th>${ar ? "الإجمالي" : "Total"}</th><td>${booking.totalAmount.toFixed(2)} ${escapeHtml(hotel.currency)}</td></tr>
   </tbody>
 </table>
-<p class="badge ok">A copy was sent to your WhatsApp.</p>
-<p class="muted">Please keep this booking ID for check-in.</p>`;
-  res.type("html").send(guestLayout(content));
+${paymentLink ? `<p style="margin-top:12px"><a class="inline-link" href="${escapeHtml(paymentLink)}">${ar ? "ادفع الآن" : "Pay now"}</a></p>` : `<p class="badge pending">${ar ? "تم اختيار الدفع لاحقاً." : "Pay later selected."}</p>`}
+<p class="badge ok">${ar ? "تم إرسال نسخة إلى واتساب." : "A copy was sent to your WhatsApp."}</p>
+<p class="muted">${ar ? "يرجى حفظ رقم الحجز عند الوصول." : "Please keep this booking ID for check-in."}</p>`;
+  res.type("html").send(guestLayout(content, lang));
 });
 
 guestRouter.get("/calendar", async (req, res) => {

@@ -17,6 +17,7 @@ import { ensureActiveFolio } from "./folioService";
 import { addDays, findAvailableRoomType, findAvailableRoomTypes, startOfDay } from "./availability";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
 import { trackDecisionEventSafe } from "./decisionAnalytics";
+import { computeMealPlanSurchargeForStay, type MealPlanCode } from "./frontDeskPricing";
 
 type OpsRoomStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
 
@@ -167,15 +168,21 @@ export async function createConfirmedBookingAtomic(params: {
   children?: number;
   /** Optional guest-selected room type from the mobile booking form. Falls back to best available. */
   preferredRoomTypeId?: string;
+  mealPlan?: MealPlanCode;
   /** Distinguishes WhatsApp automation from front-desk / OTA sources. */
   source?: ChannelProvider;
 }): Promise<{
   bookingId: string;
+  bookingIds: string[];
+  bookingGroupId?: string | null;
   roomTypeId: string;
   roomTypeName: string;
   propertyId: string;
   nights: number;
   totalAmount: number;
+  roomCount: number;
+  mealPlan: MealPlanCode;
+  mealSubtotal: number;
 }> {
   const existingBooking = await prisma.booking.findFirst({
     where: {
@@ -195,7 +202,12 @@ export async function createConfirmedBookingAtomic(params: {
       roomTypeName: existingBooking.roomType.name,
       propertyId: existingBooking.propertyId,
       nights: existingBooking.nights,
-      totalAmount: existingBooking.totalAmount
+      totalAmount: existingBooking.totalAmount,
+      bookingIds: [existingBooking.id],
+      bookingGroupId: existingBooking.bookingGroupId,
+      roomCount: params.rooms,
+      mealPlan: (existingBooking.mealPlan as MealPlanCode | null) ?? "NONE",
+      mealSubtotal: 0
     };
   }
 
@@ -224,8 +236,19 @@ export async function createConfirmedBookingAtomic(params: {
 
   const adults = params.adults ?? params.guests;
   const children = params.children ?? 0;
+  const mealPlan = params.mealPlan ?? "NONE";
+  const mealSubtotal = computeMealPlanSurchargeForStay({
+    mealPlan,
+    adults,
+    children,
+    nights: offer.nights
+  });
+  const totalWithMeals = Number((offer.total + mealSubtotal).toFixed(2));
+  const perRoomTotal = Number((totalWithMeals / Math.max(1, params.rooms)).toFixed(2));
 
   const bookingId = `WB-${Date.now().toString(36).toUpperCase()}`;
+  const bookingIds: string[] = [bookingId];
+  let bookingGroupId: string | null = null;
   await prisma.$transaction(async (tx) => {
     const roomType = await tx.roomType.findFirst({
       where: { id: offer.roomTypeId, hotelId: params.hotelId, isActive: true }
@@ -284,6 +307,13 @@ export async function createConfirmedBookingAtomic(params: {
       refDate: new Date()
     });
 
+    if (params.rooms > 1) {
+      const group = await tx.bookingGroup.create({
+        data: { hotelId: params.hotelId, label: bookingId }
+      });
+      bookingGroupId = group.id;
+    }
+
     await tx.booking.create({
       data: {
         id: bookingId,
@@ -298,12 +328,15 @@ export async function createConfirmedBookingAtomic(params: {
         nights: offer.nights,
         adults,
         children,
-        totalAmount: offer.total,
+        totalAmount: params.rooms > 1 ? perRoomTotal : totalWithMeals,
         currency: params.currency,
         status: BookingStatus.CONFIRMED,
         paymentStatus: PaymentStatus.PENDING,
         source: src,
-        referenceCode
+        referenceCode,
+        mealPlan,
+        bookingGroupId,
+        isPrimaryPayer: params.rooms > 1
       }
     });
 
@@ -323,6 +356,63 @@ export async function createConfirmedBookingAtomic(params: {
       currency: params.currency,
       staffId: null
     });
+
+    for (let roomIndex = 2; roomIndex <= params.rooms; roomIndex += 1) {
+      const extraBookingId = `WB-${Date.now().toString(36).toUpperCase()}-${roomIndex}`;
+      bookingIds.push(extraBookingId);
+      const extraReferenceCode = await allocateBookingReferenceCode(tx, {
+        hotelId: params.hotelId,
+        source: src,
+        refDate: new Date()
+      });
+      const extraRoomUnitId = await autoAssignRoomUnitForBookingTx({
+        tx,
+        hotelId: params.hotelId,
+        roomTypeId: offer.roomTypeId,
+        checkIn: params.checkIn,
+        checkOut: params.checkOut
+      });
+      await tx.booking.create({
+        data: {
+          id: extraBookingId,
+          hotelId: params.hotelId,
+          propertyId: offer.propertyId,
+          roomTypeId: offer.roomTypeId,
+          roomUnitId: extraRoomUnitId,
+          guestId: params.guestId,
+          conversationId: params.conversationId,
+          checkIn: params.checkIn,
+          checkOut: params.checkOut,
+          nights: offer.nights,
+          adults: 0,
+          children: 0,
+          totalAmount: perRoomTotal,
+          currency: params.currency,
+          status: BookingStatus.CONFIRMED,
+          paymentStatus: PaymentStatus.PENDING,
+          source: src,
+          referenceCode: extraReferenceCode,
+          mealPlan,
+          bookingGroupId,
+          isPrimaryPayer: false
+        }
+      });
+      await recordBookingStatusChange(tx, {
+        hotelId: params.hotelId,
+        bookingId: extraBookingId,
+        fromStatus: null,
+        toStatus: BookingStatus.CONFIRMED,
+        source: String(params.source ?? ChannelProvider.DIRECT)
+      });
+      await ensureActiveFolio(tx, {
+        hotelId: params.hotelId,
+        bookingId: extraBookingId,
+        guestId: params.guestId,
+        roomUnitId: extraRoomUnitId,
+        currency: params.currency,
+        staffId: null
+      });
+    }
 
     await reserveInventoryForBooking({
       tx,
@@ -432,11 +522,16 @@ export async function createConfirmedBookingAtomic(params: {
 
   return {
     bookingId,
+    bookingIds,
+    bookingGroupId,
     roomTypeId: offer.roomTypeId,
     roomTypeName: offer.roomTypeName,
     propertyId: offer.propertyId,
     nights: offer.nights,
-    totalAmount: offer.total
+    totalAmount: totalWithMeals,
+    roomCount: params.rooms,
+    mealPlan,
+    mealSubtotal
   };
 }
 

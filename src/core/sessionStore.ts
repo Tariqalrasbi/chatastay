@@ -206,6 +206,7 @@ export async function loadConversationSession(params: {
     totalAmount: typeof metadata.totalAmount === "number" ? metadata.totalAmount : undefined,
     bookingMealPlanCode:
       metadata.bookingMealPlanCode === "NONE" ||
+      metadata.bookingMealPlanCode === "BREAKFAST" ||
       metadata.bookingMealPlanCode === "HALF_BOARD" ||
       metadata.bookingMealPlanCode === "FULL_BOARD"
         ? metadata.bookingMealPlanCode
