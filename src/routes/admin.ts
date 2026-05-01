@@ -7140,6 +7140,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
     return;
   }
   const manualPaidAmount = paymentStatus === PaymentStatus.SUCCEEDED ? totalAmount : 0;
+  const manualPaymentPostedAt = new Date();
 
   const bookingChannelRaw = String(req.body.bookingChannel ?? "DIRECT").toUpperCase();
   const bookingSourceChannel: ChannelProvider =
@@ -7248,7 +7249,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
           amount: manualPaidAmount,
           folioPaymentMethod: paymentMethod || "CASH",
           postingTarget: parsePostingTarget("BOOKING_ACCOUNT"),
-          chargeDate: checkIn,
+          chargeDate: manualPaymentPostedAt,
           notes: "Payment recorded during manual check-in.",
           sourceType: FolioTxnSourceType.MANUAL_FRONTDESK
         });
@@ -8174,7 +8175,7 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
   const shiftWindowLabel = `${activeShift.label} (${String(activeShift.startHour).padStart(2, "0")}:${String(activeShift.startMinute).padStart(2, "0")} - ${String(activeShift.endHour).padStart(2, "0")}:${String(activeShift.endMinute).padStart(2, "0")})`;
   const selectedStaffId = typeof req.query.staffId === "string" ? req.query.staffId.trim() : "";
 
-  const [bookingActivities, paymentActivities, guestUpdates] = await Promise.all([
+  const [bookingActivities, paymentActivities, folioPaymentActivities, guestUpdates] = await Promise.all([
     prisma.booking.findMany({
       where: { hotelId: hotel.id, createdAt: { gte: windowStart, lte: uptoTime } },
       include: { guest: true, roomType: true, roomUnit: true },
@@ -8185,6 +8186,18 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
       where: { hotelId: hotel.id, createdAt: { gte: windowStart, lte: uptoTime } },
       include: { booking: { include: { guest: true, roomUnit: true, roomType: true } } },
       orderBy: { createdAt: "desc" },
+      take: 300
+    }),
+    prisma.folioTransaction.findMany({
+      where: {
+        hotelId: hotel.id,
+        transactionType: FolioTransactionType.PAYMENT,
+        isVoided: false,
+        sourceType: { not: FolioTxnSourceType.API },
+        chargeDate: { gte: windowStart, lte: uptoTime }
+      },
+      include: { booking: { include: { guest: true, roomUnit: true, roomType: true } }, createdBy: true },
+      orderBy: { chargeDate: "desc" },
       take: 300
     }),
     prisma.auditLog.findMany({
@@ -8233,6 +8246,9 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
   const filteredPaymentActivities = selectedStaffId
     ? paymentActivities.filter((p) => ((p.booking?.id ? bookingActorById.get(p.booking.id)?.staffId : undefined) || "SYSTEM") === selectedStaffId)
     : paymentActivities;
+  const filteredFolioPaymentActivities = selectedStaffId
+    ? folioPaymentActivities.filter((p) => p.createdByUserId === selectedStaffId)
+    : folioPaymentActivities;
   const filteredGuestUpdates = selectedStaffId ? guestUpdates.filter((g) => (g.actorUserId || "SYSTEM") === selectedStaffId) : guestUpdates;
 
   const statusCounts = {
@@ -8241,7 +8257,9 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
     CANCELLED: filteredBookingActivities.filter((b) => b.status === "CANCELLED").length
   };
   const paymentsSucceeded = filteredPaymentActivities.filter((p) => p.status === "SUCCEEDED");
-  const paymentTotal = paymentsSucceeded.reduce((sum, p) => sum + p.amount, 0);
+  const paymentTotal =
+    paymentsSucceeded.reduce((sum, p) => sum + p.amount, 0) +
+    filteredFolioPaymentActivities.reduce((sum, p) => sum + p.grossAmount, 0);
   const uniqueUnitsTouched = new Set(
     filteredBookingActivities
       .map((b) => b.roomUnit?.name)
@@ -8277,6 +8295,20 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
         <td>${escapeHtml((p.booking?.id ? bookingActorById.get(p.booking.id)?.staffId : undefined) || "SYSTEM")}</td>
       </tr>`
     )
+    .join("");
+  const folioPaymentActivityRows = filteredFolioPaymentActivities
+    .map((p) => {
+      const staffLabel = p.createdBy?.fullName ?? p.createdBy?.email ?? p.createdByUserId ?? "SYSTEM";
+      return `<tr>
+        <td>${formatDateTime(p.chargeDate)}</td>
+        <td>${escapeHtml(p.folioPaymentStatus)}</td>
+        <td>${escapeHtml(p.folioPaymentMethod || "Folio")}</td>
+        <td>${formatMoney(p.grossAmount, p.currency || hotel.currency)}</td>
+        <td>${escapeHtml(p.booking?.guest?.fullName || p.booking?.guest?.phoneE164 || "—")}</td>
+        <td>${escapeHtml(p.booking?.roomUnit?.name || "—")}</td>
+        <td>${escapeHtml(staffLabel)}</td>
+      </tr>`;
+    })
     .join("");
   const guestUpdateRows = filteredGuestUpdates
     .map((log) => {
@@ -8323,7 +8355,7 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
   <article class="stat"><h3>Confirmed</h3><p>${statusCounts.CONFIRMED}</p></article>
   <article class="stat"><h3>Pending</h3><p>${statusCounts.PENDING}</p></article>
   <article class="stat"><h3>Cancelled</h3><p>${statusCounts.CANCELLED}</p></article>
-  <article class="stat"><h3>Payments captured</h3><p>${paymentsSucceeded.length}</p></article>
+  <article class="stat"><h3>Payments captured</h3><p>${paymentsSucceeded.length + filteredFolioPaymentActivities.length}</p></article>
   <article class="stat"><h3>Payment value</h3><p>${formatMoney(paymentTotal, hotel.currency)}</p></article>
   <article class="stat"><h3>Units touched</h3><p>${uniqueUnitsTouched}</p></article>
   <article class="stat"><h3>Staff touched</h3><p>${uniqueStaffTouched}</p></article>
@@ -8340,7 +8372,7 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
   <h3>Payment activity log</h3>
   <table>
     <thead><tr><th>Time</th><th>Status</th><th>Method</th><th>Amount</th><th>Guest</th><th>Unit</th><th>Staff ID</th></tr></thead>
-    <tbody>${paymentActivityRows || '<tr><td colspan="7">No payment activity in this time window.</td></tr>'}</tbody>
+    <tbody>${paymentActivityRows}${folioPaymentActivityRows || (!paymentActivityRows ? '<tr><td colspan="7">No payment activity in this time window.</td></tr>' : "")}</tbody>
   </table>
 </section>
 <section style="margin-top:12px">
@@ -11991,15 +12023,49 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       ...(selectedStatus ? { status: selectedStatus } : {}),
       ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
     },
-    include: { roomType: true, guest: true, conversation: { select: { id: true } }, roomUnit: { select: { name: true } } },
+    include: {
+      roomType: true,
+      guest: true,
+      conversation: { select: { id: true } },
+      roomUnit: { select: { name: true } },
+      paymentIntents: { select: { amount: true, status: true } }
+    },
     orderBy: { checkIn: "asc" }
   });
+
+  const bookingIdsForPaymentRollup = bookings.map((booking) => booking.id);
+  const folioPaymentsForBookings = bookingIdsForPaymentRollup.length
+    ? await prisma.folioTransaction.findMany({
+        where: {
+          hotelId: hotel.id,
+          bookingId: { in: bookingIdsForPaymentRollup },
+          isVoided: false,
+          transactionType: { in: [FolioTransactionType.PAYMENT, FolioTransactionType.REFUND] },
+          sourceType: { not: FolioTxnSourceType.API }
+        },
+        select: { bookingId: true, transactionType: true, grossAmount: true }
+      })
+    : [];
+  const folioPaymentNetByBooking = new Map<string, number>();
+  for (const p of folioPaymentsForBookings) {
+    if (!p.bookingId) continue;
+    const signed = p.transactionType === FolioTransactionType.REFUND ? -p.grossAmount : p.grossAmount;
+    folioPaymentNetByBooking.set(p.bookingId, (folioPaymentNetByBooking.get(p.bookingId) ?? 0) + signed);
+  }
+  const paidForBooking = (booking: (typeof bookings)[number]) =>
+    Math.max(
+      0,
+      booking.paymentIntents
+        .filter((p) => p.status === PaymentStatus.SUCCEEDED)
+        .reduce((sum, p) => sum + p.amount, 0) + (folioPaymentNetByBooking.get(booking.id) ?? 0)
+    );
 
   const conversationsCount = await prisma.conversation.count({
     where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } }
   });
 
   const revenue = bookings.reduce((sum, booking) => sum + booking.totalAmount, 0);
+  const paidTotal = bookings.reduce((sum, booking) => sum + paidForBooking(booking), 0);
   const confirmed = bookings.filter((booking) => booking.status === "CONFIRMED").length;
   const pending = bookings.filter((booking) => booking.status === "PENDING").length;
   const cancelled = bookings.filter((booking) => booking.status === "CANCELLED").length;
@@ -12014,6 +12080,8 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
           ? '<span class="badge" style="background:#d97706;color:#fff;border:0;font-weight:700;margin-right:6px" title="VIP guest">VIP</span>'
           : "";
         const rowClass = booking.status === "CONFIRMED" && sourceLabel === "WhatsApp" ? ' class="booking-whatsapp-confirmed"' : "";
+        const paidAmount = paidForBooking(booking);
+        const balanceAmount = Math.max(0, booking.totalAmount - paidAmount);
         const unitAssignmentBadge = booking.roomUnitId
           ? `<span class="badge ok">Unit assigned${booking.roomUnit?.name ? ` (${escapeHtml(booking.roomUnit.name)})` : ""}</span>`
           : '<span class="badge pending">Pending assignment</span>';
@@ -12027,6 +12095,8 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       <td data-label="Guests">${booking.adults}</td>
       <td data-label="Nights">${booking.nights}</td>
       <td data-label="Total">${formatMoney(booking.totalAmount, hotel.currency)}</td>
+      <td data-label="Paid">${formatMoney(paidAmount, hotel.currency)}</td>
+      <td data-label="Balance">${formatMoney(balanceAmount, hotel.currency)}</td>
       <td data-label="Booking"><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td>
       <td data-label="Payment"><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td>
       <td data-label="Unit">${unitAssignmentBadge}</td>
@@ -12075,6 +12145,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   <article class="stat"><h3>WhatsApp Confirmed</h3><p>${whatsappConfirmed}</p></article>
   <article class="stat"><h3>Pending / Cancelled</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=PENDING">${pending}</a> / <a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=CANCELLED">${cancelled}</a></p></article>
   <article class="stat"><h3>Revenue</h3><p><a class="stat-link" href="/admin/billing">${formatMoney(revenue, hotel.currency)}</a></p></article>
+  <article class="stat"><h3>Paid / Balance</h3><p>${formatMoney(paidTotal, hotel.currency)} / ${formatMoney(Math.max(0, revenue - paidTotal), hotel.currency)}</p></article>
 </div>
 <p class="muted" style="margin-top:10px">Conversations in range: <strong><a class="inline-link" href="/admin/conversations?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}">${conversationsCount}</a></strong> (opens conversations filtered by this date range)</p>
 <style>
@@ -12130,8 +12201,8 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   }
 </style>
 <table class="bookings-report-table">
-  <thead><tr><th>Reference</th><th>Guest Name</th><th>Phone Number</th><th>Room Type</th><th>Check-in</th><th>Check-out</th><th>Guests</th><th>Nights</th><th>Total Amount</th><th>Booking Status</th><th>Payment Status</th><th>Unit Assignment</th><th>Source</th><th>Actions</th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="14">No bookings in selected range.</td></tr>'}</tbody>
+  <thead><tr><th>Reference</th><th>Guest Name</th><th>Phone Number</th><th>Room Type</th><th>Check-in</th><th>Check-out</th><th>Guests</th><th>Nights</th><th>Total Amount</th><th>Paid</th><th>Balance</th><th>Booking Status</th><th>Payment Status</th><th>Unit Assignment</th><th>Source</th><th>Actions</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="16">No bookings in selected range.</td></tr>'}</tbody>
 </table>`;
   res.type("html").send(renderLayout(content, true));
 });
@@ -12184,10 +12255,38 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
       guest: true,
       roomType: true,
       conversation: { select: { id: true } },
-      roomUnit: { select: { name: true } }
+      roomUnit: { select: { name: true } },
+      paymentIntents: { select: { amount: true, status: true } }
     },
     orderBy: { checkIn: "asc" }
   });
+
+  const bookingIdsForPaymentRollup = bookings.map((booking) => booking.id);
+  const folioPaymentsForBookings = bookingIdsForPaymentRollup.length
+    ? await prisma.folioTransaction.findMany({
+        where: {
+          hotelId: hotel.id,
+          bookingId: { in: bookingIdsForPaymentRollup },
+          isVoided: false,
+          transactionType: { in: [FolioTransactionType.PAYMENT, FolioTransactionType.REFUND] },
+          sourceType: { not: FolioTxnSourceType.API }
+        },
+        select: { bookingId: true, transactionType: true, grossAmount: true }
+      })
+    : [];
+  const folioPaymentNetByBooking = new Map<string, number>();
+  for (const p of folioPaymentsForBookings) {
+    if (!p.bookingId) continue;
+    const signed = p.transactionType === FolioTransactionType.REFUND ? -p.grossAmount : p.grossAmount;
+    folioPaymentNetByBooking.set(p.bookingId, (folioPaymentNetByBooking.get(p.bookingId) ?? 0) + signed);
+  }
+  const paidForBooking = (booking: (typeof bookings)[number]) =>
+    Math.max(
+      0,
+      booking.paymentIntents
+        .filter((p) => p.status === PaymentStatus.SUCCEEDED)
+        .reduce((sum, p) => sum + p.amount, 0) + (folioPaymentNetByBooking.get(booking.id) ?? 0)
+    );
 
   const header = [
     "Booking ID",
@@ -12200,6 +12299,8 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
     "Check-out",
     "Nights",
     "Total amount",
+    "Paid amount",
+    "Balance amount",
     "Currency",
     "Booking status",
     "Payment status",
@@ -12208,6 +12309,8 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
   const lines = [header.map(csvEscapeField).join(",")];
   for (const b of bookings) {
     const sourceLabel = b.conversationId ? "WhatsApp" : b.source;
+    const paidAmount = paidForBooking(b);
+    const balanceAmount = Math.max(0, b.totalAmount - paidAmount);
     lines.push(
       [
         b.id,
@@ -12220,6 +12323,8 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
         formatDateForInput(b.checkOut),
         String(b.nights),
         String(b.totalAmount),
+        String(paidAmount),
+        String(balanceAmount),
         b.currency,
         b.status,
         b.paymentStatus,
@@ -18135,7 +18240,7 @@ adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, re
   const endRaw = parseDateInput(req.query.end, defaultEnd);
   const end = endOfDay(endRaw);
 
-  const [invoices, paymentIntents] = await Promise.all([
+  const [invoices, paymentIntents, folioPayments] = await Promise.all([
     prisma.invoice.findMany({
       where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "desc" },
@@ -18144,6 +18249,17 @@ adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, re
     prisma.paymentIntent.findMany({
       where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "desc" }
+    }),
+    prisma.folioTransaction.findMany({
+      where: {
+        hotelId: hotel.id,
+        transactionType: { in: [FolioTransactionType.PAYMENT, FolioTransactionType.REFUND] },
+        isVoided: false,
+        sourceType: { not: FolioTxnSourceType.API },
+        chargeDate: { gte: start, lte: end }
+      },
+      include: { booking: { include: { guest: true, roomUnit: true } } },
+      orderBy: { chargeDate: "desc" }
     })
   ]);
 
@@ -18165,16 +18281,34 @@ adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, re
     )
     .join("");
 
-  const paymentHistoryRows = paymentIntents
-    .map(
-      (payment) => `<tr>
+  const paymentIntentRows = paymentIntents.map((payment) => ({
+    sortAt: payment.createdAt,
+    html: `<tr>
       <td>${escapeHtml(payment.id.slice(0, 12))}</td>
       <td>${formatDateTime(payment.createdAt)}</td>
       <td>${payment.amount} ${escapeHtml(payment.currency)}</td>
       <td>${escapeHtml(payment.kind)}</td>
       <td><span class="badge ${payment.status === "SUCCEEDED" ? "ok" : "pending"}">${escapeHtml(payment.status)}</span></td>
       </tr>`
-    )
+  }));
+  const folioPaymentRows = folioPayments.map((payment) => {
+    const signedAmount =
+      payment.transactionType === FolioTransactionType.REFUND ? -payment.grossAmount : payment.grossAmount;
+    const guestLabel = payment.booking?.guest?.fullName || payment.booking?.guest?.phoneE164 || "Guest folio";
+    return {
+      sortAt: payment.chargeDate,
+      html: `<tr>
+      <td>${escapeHtml(payment.id.slice(0, 12))}</td>
+      <td>${formatDateTime(payment.chargeDate)}</td>
+      <td>${formatMoney(signedAmount, payment.currency)}</td>
+      <td>${escapeHtml(payment.folioPaymentMethod || "Folio payment")} · ${escapeHtml(guestLabel)}</td>
+      <td><span class="badge ${payment.transactionType === FolioTransactionType.REFUND ? "pending" : "ok"}">${escapeHtml(payment.transactionType)}</span></td>
+      </tr>`
+    };
+  });
+  const paymentHistoryRows = [...paymentIntentRows, ...folioPaymentRows]
+    .sort((a, b) => b.sortAt.getTime() - a.sortAt.getTime())
+    .map((row) => row.html)
     .join("");
 
   const content = `
@@ -18241,7 +18375,7 @@ adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (
   const endRaw = parseDateInput(req.query.end, defaultEnd);
   const end = endOfDay(endRaw);
 
-  const [invoices, paymentIntents] = await Promise.all([
+  const [invoices, paymentIntents, folioPayments] = await Promise.all([
     prisma.invoice.findMany({
       where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "desc" },
@@ -18250,6 +18384,16 @@ adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (
     prisma.paymentIntent.findMany({
       where: { hotelId: hotel.id, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "desc" }
+    }),
+    prisma.folioTransaction.findMany({
+      where: {
+        hotelId: hotel.id,
+        transactionType: { in: [FolioTransactionType.PAYMENT, FolioTransactionType.REFUND] },
+        isVoided: false,
+        sourceType: { not: FolioTxnSourceType.API },
+        chargeDate: { gte: start, lte: end }
+      },
+      orderBy: { chargeDate: "desc" }
     })
   ]);
 
@@ -18298,6 +18442,25 @@ adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (
           .join(",") + "\n"
     )
     .join("");
+  const folioPaymentLines = folioPayments
+    .map((p) => {
+      const signedAmount = p.transactionType === FolioTransactionType.REFUND ? -p.grossAmount : p.grossAmount;
+      return [
+        "FolioPayment",
+        p.id,
+        formatDateTime(p.chargeDate),
+        signedAmount,
+        p.currency,
+        p.folioPaymentStatus,
+        p.folioPaymentMethod ?? p.transactionType,
+        "",
+        ""
+      ]
+        .map(String)
+        .map(csvCell)
+        .join(",") + "\n";
+    })
+    .join("");
 
   res
     .type("text/csv")
@@ -18305,7 +18468,7 @@ adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (
       "Content-Disposition",
       `attachment; filename="billing-${formatDateForInput(start)}-${formatDateForInput(endRaw)}.csv"`
     )
-    .send(header + invoiceLines + paymentLines);
+    .send(header + invoiceLines + paymentLines + folioPaymentLines);
 });
 
 adminRouter.get("/integrations", requireAuth, async (_req, res) => {
