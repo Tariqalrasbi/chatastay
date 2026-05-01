@@ -707,10 +707,16 @@ function loginDemoSectionHtml(): string {
   if (process.env.NODE_ENV === "production") {
     return "";
   }
+  const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
+  const adminPassword = (process.env.ADMIN_PASSWORD ?? "admin123").trim();
+  const platformAdminText =
+    adminPassword === "admin123"
+      ? `<p><strong>Platform admin</strong>: <code>${escapeHtml(adminEmail)}</code> / <code>admin123</code></p>`
+      : `<p><strong>Platform admin</strong>: <code>${escapeHtml(adminEmail)}</code> / password from <code>ADMIN_PASSWORD</code> in the server environment.</p>`;
   return `<details class="login-demo-details">
   <summary>Demo access</summary>
   <div class="login-demo-body">
-    <p><strong>Platform admin</strong>: <code>admin@chatastay.local</code> / <code>admin123</code></p>
+    ${platformAdminText}
     <p><strong>PMS demo</strong> (run <code>npm run seed</code> from project root): <code>demo.owner@pms.local</code>, <code>demo.frontdesk@pms.local</code>, <code>demo.restaurant@pms.local</code>, <code>demo.hk@pms.local</code> — password <code>PmsDemo2026!</code></p>
     <p><strong>Staff PIN demo</strong>: usernames <code>demoowner</code>, <code>demofrontdesk</code>, <code>demorestaurant</code>, <code>demohk</code> — PIN <code>4242</code></p>
   </div>
@@ -3532,7 +3538,7 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
   if (!loginHotel.id) return null;
 
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
-  const adminPassword = process.env.ADMIN_PASSWORD ?? "admin123";
+  const adminPassword = (process.env.ADMIN_PASSWORD ?? "admin123").trim();
 
   if (identifier === adminEmail && credential === adminPassword) {
     issueAdminSession(res, {
