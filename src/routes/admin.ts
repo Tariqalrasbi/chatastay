@@ -3998,8 +3998,28 @@ function parsePermissionsFromBody(body: Record<string, unknown>): PermissionMatr
   return matrix;
 }
 
+function renderPermissionBlocks(perms?: PermissionMatrix): string {
+  return permissionModules
+    .map(
+      (moduleName) => `<fieldset style="border:1px solid #d8dee6; border-radius:10px; padding:10px">
+  <legend style="padding:0 6px">${escapeHtml(permissionModuleLabels[moduleName])}</legend>
+  <label><input type="checkbox" name="${moduleName}_VIEW" ${perms?.[moduleName]?.VIEW ? "checked" : ""} /> View</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_EDIT" ${perms?.[moduleName]?.EDIT ? "checked" : ""} /> Edit</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_CREATE" ${perms?.[moduleName]?.CREATE ? "checked" : ""} /> Create</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_DELETE" ${perms?.[moduleName]?.DELETE ? "checked" : ""} /> Delete</label>
+  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_MANAGE" ${perms?.[moduleName]?.MANAGE ? "checked" : ""} /> Manage</label>
+</fieldset>`
+    )
+    .join("");
+}
+
+function hotelUserPermissionKey(user: { email?: string | null; username?: string | null }): string {
+  return String(user.email || user.username || "").trim().toLowerCase();
+}
+
 adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) => {
   let users: Array<{
+    id: string;
     fullName: string | null;
     email: string | null;
     username: string | null;
@@ -4016,6 +4036,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
       where: { hotelId: hotel.id },
       orderBy: { createdAt: "desc" },
       select: {
+        id: true,
         fullName: true,
         email: true,
         username: true,
@@ -4039,45 +4060,64 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
   }
   const store = readPermissionStore();
   const created = req.query.created ? '<p class="badge ok">User created with permissions.</p>' : "";
+  const updated = req.query.updated ? '<p class="badge ok">User details updated.</p>' : "";
+  const resetSent = req.query.resetSent ? '<p class="badge ok">Password reset link sent to the registered email.</p>' : "";
 
   const rows = users
     .map((user) => {
       const safeEmail = typeof user.email === "string" ? user.email : "";
       const safeUsername = typeof user.username === "string" ? user.username : "";
-      const permKey = (safeEmail || safeUsername).toLowerCase();
+      const permKey = hotelUserPermissionKey(user);
       const roleKey = typeof user.role === "string" ? user.role : "MANAGER";
       const perms = normalizePermissionMatrix(store[permKey] ?? defaultPermissionsForRole(roleKey));
       const modulesSummary = permissionModules
         .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
         .map((m) => permissionModuleLabels[m])
         .join(", ");
+      const roleOptions = ["OWNER", "MANAGER", "STAFF", "FRONTDESK", "FINANCE", "HOUSEKEEPING"]
+        .map((role) => `<option value="${role}" ${role === roleKey ? "selected" : ""}>${role}</option>`)
+        .join("");
+      const editFormId = `edit-user-${escapeHtml(user.id)}`;
       return `<tr>
       <td>${escapeHtml(typeof user.fullName === "string" ? user.fullName : "—")}</td>
       <td>${escapeHtml((typeof user.email === "string" && user.email) || (typeof user.username === "string" && user.username) || "—")}</td>
       <td>${escapeHtml(roleKey)}</td>
       <td>${user.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
       <td>${escapeHtml(modulesSummary || "No permissions set")}</td>
+      <td><button type="button" class="btn-link" onclick="var el=document.getElementById('${editFormId}'); if(el) el.hidden=!el.hidden;">Edit</button></td>
+      </tr>
+      <tr id="${editFormId}" hidden>
+        <td colspan="6">
+          <form method="post" action="/admin/users/${encodeURIComponent(user.id)}" style="display:grid;gap:10px;padding:12px;border:1px solid #d8dee6;border-radius:12px;background:#f8fafc">
+            <div class="grid-2">
+              <label>Full name<br /><input type="text" name="fullName" value="${escapeHtml(user.fullName ?? "")}" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+              <label>Email<br /><input type="email" name="email" value="${escapeHtml(safeEmail)}" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+              <label>Username<br /><input type="text" name="username" value="${escapeHtml(safeUsername)}" maxlength="64" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+              <label>Role
+                <select name="role" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">${roleOptions}</select>
+              </label>
+              <label>New password (leave blank to keep current)<br /><input type="password" name="password" minlength="8" autocomplete="new-password" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+              <label>New PIN (leave blank to keep current)<br /><input type="password" name="pin" minlength="4" maxlength="12" autocomplete="new-password" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+              <label style="align-self:end"><input type="checkbox" name="isActive" value="1" ${user.isActive ? "checked" : ""} /> Active user</label>
+            </div>
+            <h4 style="margin:6px 0 0">Permissions</h4>
+            <div style="display:grid; gap:8px">${renderPermissionBlocks(perms)}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Save user details</button>
+              ${safeEmail ? `<button type="submit" formaction="/admin/users/${encodeURIComponent(user.id)}/send-reset" style="padding:9px 13px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Send password reset email</button>` : ""}
+            </div>
+          </form>
+        </td>
       </tr>`;
     })
     .join("");
 
-  const modulePermissionBlocks = permissionModules
-    .map(
-      (moduleName) => `<fieldset style="border:1px solid #d8dee6; border-radius:10px; padding:10px">
-  <legend style="padding:0 6px">${escapeHtml(permissionModuleLabels[moduleName])}</legend>
-  <label><input type="checkbox" name="${moduleName}_VIEW" /> View</label>
-  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_EDIT" /> Edit</label>
-  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_CREATE" /> Create</label>
-  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_DELETE" /> Delete</label>
-  <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_MANAGE" /> Manage</label>
-</fieldset>`
-    )
-    .join("");
+  const modulePermissionBlocks = renderPermissionBlocks();
 
   const content = `
 <h2>Users &amp; permissions</h2>
-<p class="muted">Create hotel staff accounts. Use <strong>database role</strong> (MANAGER / STAFF / FRONTDESK / FINANCE / HOUSEKEEPING) for defaults, then tune <strong>module permissions</strong> for operational roles — e.g. <em>Restaurant &amp; café</em> for KOT/outlet, <em>Housekeeping</em> for cleaning tasks. Platform owner retains full access.</p>
-${created}
+<p class="muted">Create and edit hotel staff accounts. Best practice is password reset by registered email, but management can also directly update username, role, permissions, active status, password, or PIN when operations need an immediate fix.</p>
+${created}${updated}${resetSent}
 <div class="actions">
   <a class="btn-link primary" href="/admin/profile">Back to profile</a>
 </div>
@@ -4153,8 +4193,8 @@ ${created}
 <section style="margin-top:14px">
   <h3>Existing users</h3>
   <table>
-    <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permission modules</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="5">No users yet.</td></tr>'}</tbody>
+    <thead><tr><th>Name</th><th>Email / username</th><th>Role</th><th>Status</th><th>Permission modules</th><th>Actions</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6">No users yet.</td></tr>'}</tbody>
   </table>
 </section>`;
   res.type("html").send(renderLayout(content, true));
@@ -4342,6 +4382,125 @@ adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res
     console.error("[admin] POST /users failed:", err instanceof Error ? err.message : String(err));
     jsonErr(500, "Could not create the user. Please try again.");
   }
+});
+
+adminRouter.post("/users/:id", requirePermission("USERS", "EDIT"), async (req, res) => {
+  try {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+    if (!hotel) {
+      res.redirect("/admin/users?error=hotel");
+      return;
+    }
+    const userId = String(req.params.id ?? "");
+    const existing = await prisma.hotelUser.findFirst({ where: { id: userId, hotelId: hotel.id } });
+    if (!existing) {
+      res.redirect("/admin/users?error=user");
+      return;
+    }
+
+    const fullName = String(req.body.fullName ?? "").trim();
+    const email = String(req.body.email ?? "").trim().toLowerCase() || null;
+    const username = String(req.body.username ?? "").trim().toLowerCase() || null;
+    const password = String(req.body.password ?? "");
+    const pin = String(req.body.pin ?? "").trim();
+    const roleRaw = String(req.body.role ?? String(existing.role));
+    const isActive = req.body.isActive === "1" || req.body.isActive === "on";
+    const roleMap: Record<string, UserRole> = {
+      OWNER: UserRole.OWNER,
+      MANAGER: UserRole.MANAGER,
+      STAFF: UserRole.STAFF,
+      FRONTDESK: UserRole.FRONTDESK,
+      FINANCE: UserRole.FINANCE,
+      HOUSEKEEPING: UserRole.HOUSEKEEPING
+    };
+    const roleSafe = roleMap[roleRaw] ?? existing.role;
+
+    if (!fullName || (!email && !username)) {
+      res.redirect("/admin/users?error=missing");
+      return;
+    }
+    if (password && password.length < 8) {
+      res.redirect("/admin/users?error=password");
+      return;
+    }
+    if (pin && pin.length < 4) {
+      res.redirect("/admin/users?error=pin");
+      return;
+    }
+
+    const updateData: Prisma.HotelUserUpdateInput = {
+      fullName,
+      email,
+      username,
+      role: roleSafe,
+      isActive
+    };
+    if (password) {
+      updateData.passwordHash = hashPassword(password);
+      updateData.passwordResetTokenHash = null;
+      updateData.passwordResetExpiresAt = null;
+      updateData.passwordResetRequestedAt = null;
+    }
+    if (pin) updateData.pinHash = hashPassword(pin);
+
+    await prisma.hotelUser.update({ where: { id: existing.id }, data: updateData });
+
+    const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
+    const oldKey = hotelUserPermissionKey(existing);
+    const newKey = hotelUserPermissionKey({ email, username });
+    const store = readPermissionStore();
+    if (oldKey && oldKey !== newKey) delete store[oldKey];
+    if (newKey) store[newKey] = permissions;
+    writePermissionStore(store);
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "HOTEL_USER_UPDATED",
+      entityType: "HotelUser",
+      entityId: existing.id,
+      metadata: {
+        emailChanged: existing.email !== email,
+        usernameChanged: existing.username !== username,
+        role: String(roleSafe),
+        isActive,
+        passwordResetByManager: Boolean(password),
+        pinResetByManager: Boolean(pin)
+      }
+    });
+    res.redirect("/admin/users?updated=1");
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      res.redirect("/admin/users?error=duplicate");
+      return;
+    }
+    console.error("[admin] POST /users/:id failed:", err instanceof Error ? err.message : String(err));
+    res.redirect("/admin/users?error=update");
+  }
+});
+
+adminRouter.post("/users/:id/send-reset", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/users?error=hotel");
+    return;
+  }
+  const user = await prisma.hotelUser.findFirst({
+    where: { id: String(req.params.id ?? ""), hotelId: hotel.id },
+    select: { id: true, email: true, isActive: true }
+  });
+  if (!user?.email || !user.isActive) {
+    res.redirect("/admin/users?error=reset");
+    return;
+  }
+  await createPasswordResetForEmail(user.email, req);
+  await logAudit({
+    hotelId: hotel.id,
+    action: "HOTEL_USER_PASSWORD_RESET_SENT_BY_MANAGER",
+    entityType: "HotelUser",
+    entityId: user.id,
+    metadata: { email: user.email }
+  });
+  res.redirect("/admin/users?resetSent=1");
 });
 
 adminRouter.get("/dashboard", requireAuth, (_req, res) => {
