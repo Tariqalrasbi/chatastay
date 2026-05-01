@@ -791,14 +791,9 @@ function loginPageHtml(hotel?: LoginHotelContext): string {
   return readView("login.html")
     .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
     .replace('action="/admin/login"', `action="/admin/login?hotel=${encodeURIComponent(hotelAccountKey)}"`)
-    .replace('action="/auth/staff-login"', `action="/auth/staff-login"`)
     .replace(
-      '<fieldset class="login-fieldset" id="loginFieldsetMgmt">',
-      `<fieldset class="login-fieldset" id="loginFieldsetMgmt">${invalidHotelNotice}${hotelSlugField}`
-    )
-    .replace(
-      '<fieldset class="login-fieldset" id="loginFieldsetStaff">',
-      `<fieldset class="login-fieldset" id="loginFieldsetStaff">${hotelSlugField}`
+      '<fieldset class="login-fieldset" id="loginFieldsetUnified">',
+      `<fieldset class="login-fieldset" id="loginFieldsetUnified">${invalidHotelNotice}${hotelSlugField}`
     )
     .replaceAll('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelAccountKey)}"`)
     .replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
@@ -3179,6 +3174,8 @@ adminRouter.get("/login", async (req, res) => {
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
   const authErrorNotice =
     req.query.auth === "error" ? '<p class="badge alert">Sign in is temporarily unavailable. Please try again.</p>' : "";
+  const loginFailedNotice =
+    req.query.auth === "failed" ? '<p class="badge alert">Sign in failed. Check the hotel account number, email/username, and password/PIN.</p>' : "";
   const staffNotice =
     req.query.staff === "failed"
       ? '<p class="badge alert">Staff sign in failed. Check your staff email/username and PIN/password.</p>'
@@ -3189,7 +3186,7 @@ adminRouter.get("/login", async (req, res) => {
     req.query.onboard === "1" ? '<p class="badge ok">Property onboarding complete. You can sign in now.</p>' : "";
   const onboardLink =
     '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
-  const content = resetNotice + authErrorNotice + staffNotice + staffErrorNotice + onboardNotice + loginPageHtml(loginHotel) + onboardLink;
+  const content = resetNotice + authErrorNotice + loginFailedNotice + staffNotice + staffErrorNotice + onboardNotice + loginPageHtml(loginHotel) + onboardLink;
   res.type("html").send(
     renderLayout(content, false, {
       hotelName: loginHotel.displayName,
@@ -3529,20 +3526,20 @@ async function consumePasswordResetToken(rawToken: string, newPassword: string):
 }
 
 async function authenticateEmailLogin(req: Request, res: Response): Promise<string | null> {
-  const email = String(req.body.email ?? "").trim().toLowerCase();
-  const password = String(req.body.password ?? "");
+  const identifier = String(req.body.email ?? req.body.username ?? "").trim().toLowerCase();
+  const credential = String(req.body.password ?? req.body.pin ?? "").trim();
   const loginHotel = await resolveLoginHotel(req);
   if (!loginHotel.id) return null;
 
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD ?? "admin123";
 
-  if (email === adminEmail && password === adminPassword) {
+  if (identifier === adminEmail && credential === adminPassword) {
     issueAdminSession(res, {
       staffId: "STAFF-SUPERADMIN",
-      email,
+      email: identifier,
       role: "MANAGER",
-      permissions: getPermissionsForEmail(email),
+      permissions: getPermissionsForEmail(identifier),
       hotelId: loginHotel.id || undefined,
       hotelSlug: loginHotel.id ? loginHotel.slug : undefined,
       hotelName: loginHotel.id ? loginHotel.displayName : undefined
@@ -3552,15 +3549,21 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
   try {
     const hotel = await prisma.hotel.findUnique({ where: { id: loginHotel.id } });
     if (hotel) {
-      const hotelUser = await prisma.hotelUser.findUnique({
-        where: { hotelId_email: { hotelId: hotel.id, email } }
+      const hotelUser = await prisma.hotelUser.findFirst({
+        where: {
+          hotelId: hotel.id,
+          OR: [{ email: identifier }, { username: identifier }]
+        }
       });
-      if (hotelUser?.isActive && hotelUser.passwordHash) {
-        if (await verifySecret(password, hotelUser.passwordHash)) {
-          const effectivePermissions = effectivePermissionsForHotelUser(email, hotelUser.role);
+      if (hotelUser?.isActive && (hotelUser.passwordHash || hotelUser.pinHash)) {
+        const passwordOk = hotelUser.passwordHash ? await verifySecret(credential, hotelUser.passwordHash) : false;
+        const pinOk = hotelUser.pinHash ? await verifyPin(credential, hotelUser.pinHash) : false;
+        if (passwordOk || pinOk) {
+          const principal = hotelUser.email ?? hotelUser.username ?? identifier;
+          const effectivePermissions = effectivePermissionsForHotelUser(principal, hotelUser.role);
           issueAdminSession(res, {
             staffId: hotelUser.id,
-            email,
+            email: principal,
             role: String(hotelUser.role),
             permissions: effectivePermissions,
             hotelId: hotel.id,
@@ -3570,6 +3573,17 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
           await prisma.hotelUser.update({
             where: { id: hotelUser.id },
             data: { lastLoginAt: new Date() }
+          });
+          await prisma.auditLog.create({
+            data: {
+              hotelId: hotel.id,
+              actorUserId: hotelUser.id,
+              actorEmail: principal,
+              action: "UNIFIED_LOGIN_SUCCESS",
+              entityType: "Auth",
+              entityId: hotelUser.id,
+              metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
+            }
           });
           return String(hotelUser.role);
         }
@@ -3696,13 +3710,7 @@ adminRouter.post("/login", async (req, res) => {
       res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/profile");
       return;
     }
-    res.status(401).type("html").send(
-      renderLayout(loginPageHtml(loginHotel), false, {
-        hotelName: loginHotel.displayName,
-        hotelSign: hotelSignForLogin(loginHotel),
-        hotelSlug: loginHotel.slug
-      })
-    );
+    res.redirect(`/admin/login?auth=failed&hotel=${encodeURIComponent(hotelAccountKeyForLogin(loginHotel))}`);
   } catch (err) {
     console.error("[Auth] /admin/login unexpected error:", err instanceof Error ? err.message : err);
     res.redirect("/admin/login?auth=error");
