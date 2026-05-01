@@ -175,6 +175,28 @@ export async function createConfirmedBookingAtomic(params: {
   nights: number;
   totalAmount: number;
 }> {
+  const existingBooking = await prisma.booking.findFirst({
+    where: {
+      hotelId: params.hotelId,
+      guestId: params.guestId,
+      conversationId: params.conversationId,
+      checkIn: params.checkIn,
+      checkOut: params.checkOut,
+      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] }
+    },
+    include: { roomType: true }
+  });
+  if (existingBooking) {
+    return {
+      bookingId: existingBooking.id,
+      roomTypeId: existingBooking.roomTypeId,
+      roomTypeName: existingBooking.roomType.name,
+      propertyId: existingBooking.propertyId,
+      nights: existingBooking.nights,
+      totalAmount: existingBooking.totalAmount
+    };
+  }
+
   const offer = await findAvailableRoomType({
     hotelId: params.hotelId,
     checkIn: params.checkIn,

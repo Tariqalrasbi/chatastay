@@ -97,7 +97,7 @@ function guestLayout(content: string): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ChatAstay Guest Portal</title>
+  <title>ChatStay Guest Portal</title>
   <style>
     body { font-family: Inter, Arial, sans-serif; margin: 0; background: linear-gradient(180deg, #f6fbf9 0%, #eef7f4 100%); color: #0f172a; }
     main { max-width: 860px; margin: 20px auto; background: #ffffff; border: 1px solid #d8eee5; border-radius: 16px; padding: 18px; box-shadow: 0 8px 28px rgba(7, 94, 84, 0.08); }

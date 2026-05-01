@@ -29,6 +29,10 @@ type InvoicePdfInput = {
   /** Optional F&B folio lines posted to the same guest account */
   fbLines?: Array<{ description: string; quantity: number; unitPrice: number; lineTotal: number }>;
   fbSubtotal?: number;
+  /** Other desk-posted folio charges/adjustments not represented by FbOrder lines. */
+  folioChargesNet?: number;
+  amountPaid?: number;
+  outstandingBalance?: number;
   /** Accommodation + F&B; defaults to totalAmount when no F&B */
   grandTotal?: number;
 };
@@ -94,6 +98,7 @@ export async function buildBookingInvoicePdf(input: InvoicePdfInput): Promise<Bu
 
   const fbSub = input.fbSubtotal ?? 0;
   const hasFb = (input.fbLines?.length ?? 0) > 0 && fbSub > 0;
+  const folioChargesNet = input.folioChargesNet ?? 0;
   if (hasFb && input.fbLines) {
     doc.font("Helvetica-Bold").fontSize(12).text("Food & beverage (restaurant / coffee shop)");
     doc.font("Helvetica").fontSize(9);
@@ -107,7 +112,19 @@ export async function buildBookingInvoicePdf(input: InvoicePdfInput): Promise<Bu
     doc.moveDown(0.4);
   }
 
-  const grand = input.grandTotal ?? (hasFb ? Number((input.totalAmount + fbSub).toFixed(2)) : input.totalAmount);
+  if (Math.abs(folioChargesNet) > 0.004) {
+    doc.font("Helvetica-Bold").fontSize(12).text("Other folio charges / adjustments");
+    doc
+      .font("Helvetica")
+      .fontSize(10)
+      .text(`Posted folio net: ${formatMoney(folioChargesNet, input.currency)} (${input.currency})`, { indent: 8 });
+    doc.moveDown(0.4);
+  }
+
+  const grand =
+    input.grandTotal ?? Number((input.totalAmount + fbSub + folioChargesNet).toFixed(2));
+  const amountPaid = input.amountPaid ?? 0;
+  const outstandingBalance = input.outstandingBalance ?? Math.max(0, Number((grand - amountPaid).toFixed(2)));
   const totalLabel =
     kind === "quotation"
       ? "Quoted total (proposed)"
@@ -115,6 +132,10 @@ export async function buildBookingInvoicePdf(input: InvoicePdfInput): Promise<Bu
         ? "Total (this receipt)"
         : "Amount due (total folio)";
   doc.font("Helvetica-Bold").fontSize(13).text(`${totalLabel}: ${formatMoney(grand, input.currency)} (${input.currency})`);
+  if (kind !== "quotation") {
+    doc.font("Helvetica").fontSize(11).text(`Amount paid: ${formatMoney(amountPaid, input.currency)} (${input.currency})`);
+    doc.font("Helvetica-Bold").fontSize(11).text(`Outstanding balance: ${formatMoney(outstandingBalance, input.currency)} (${input.currency})`);
+  }
   doc.moveDown(0.8);
 
   const noteTitle = "Important information";
@@ -123,14 +144,14 @@ export async function buildBookingInvoicePdf(input: InvoicePdfInput): Promise<Bu
       ? "This quotation is for planning purposes. Final charges and availability are confirmed by the hotel when you complete your booking."
       : kind === "receipt"
         ? "This receipt reflects payment and folio details at the time of issue. If anything changes, the hotel may send an updated document."
-        : "This document reflects accommodation charges and any posted food & beverage orders on the guest folio at the time of issue. " +
+        : "This document reflects accommodation, posted food & beverage, desk charges, adjustments, and payments on the guest folio at the time of issue. " +
           "If payment status or charges change, the hotel may send an updated copy.";
   doc.font("Helvetica-Bold").fontSize(12).text(noteTitle);
   doc.font("Helvetica").fontSize(10).fillColor("#000").text(noteBody, { align: "left" });
 
   doc.moveDown(1);
   doc.font("Helvetica").fontSize(9).fillColor("#444").text(`Issued by ${input.hotelName}.`);
-  doc.font("Helvetica").fontSize(8).fillColor("#666").text("Document prepared using ChatAstay.");
+  doc.font("Helvetica").fontSize(8).fillColor("#666").text("Document prepared using ChatStay.");
 
   return await new Promise<Buffer>((resolve, reject) => {
     doc.on("end", () => resolve(Buffer.concat(chunks)));

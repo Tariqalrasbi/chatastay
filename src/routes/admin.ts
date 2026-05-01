@@ -242,11 +242,13 @@ const idCardUpload = multer({
 type AdminSession = {
   staffId: string;
   email: string;
+  staffName?: string;
   role: string;
   permissions: PermissionMatrix;
   hotelId?: string;
   hotelSlug?: string;
   hotelName?: string;
+  hotelAccountNumber?: number | null;
   activePropertyId?: string | null;
   /** Active PMS workspace for nav + notification feed (not used for dedicated HK portal sessions). */
   activeWorkspace?: PmsWorkspaceId;
@@ -479,9 +481,11 @@ function issueAdminSession(
     email: string;
     role: string;
     permissions: PermissionMatrix;
+    staffName?: string;
     hotelId?: string;
     hotelSlug?: string;
     hotelName?: string;
+    hotelAccountNumber?: number | null;
   }
 ): string {
   const token = crypto.randomUUID();
@@ -492,11 +496,13 @@ function issueAdminSession(
   activeSessions.set(token, {
     staffId: params.staffId,
     email: params.email,
+    staffName: params.staffName,
     role: params.role,
     permissions: params.permissions,
     hotelId: params.hotelId,
     hotelSlug: params.hotelSlug,
     hotelName: params.hotelName,
+    hotelAccountNumber: params.hotelAccountNumber,
     activeWorkspace
   });
   res.setHeader(
@@ -557,7 +563,7 @@ async function sendPasswordResetEmail(to: string, resetLink: string): Promise<bo
     const message = buildPasswordResetEmail({ resetLink, expiresMinutes: 15 });
     await sendEmail({
       to,
-      subject: "Reset your ChatAstay password",
+      subject: "Reset your ChatStay password",
       html: message.html,
       text: message.text
     });
@@ -747,7 +753,7 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
     return {
       id: "",
       slug: "",
-      displayName: "ChatAstay Hotel Portal",
+      displayName: "ChatStay Hotel Portal",
       city: "Enter your hotel account number",
       country: null
     };
@@ -772,7 +778,7 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
       id: "",
       slug: raw,
       requestedKey: raw,
-      displayName: "ChatAstay Hotel Portal",
+      displayName: "ChatStay Hotel Portal",
       city: "Hotel account not found",
       country: null
     };
@@ -783,7 +789,7 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
 function loginPageHtml(hotel?: LoginHotelContext): string {
   const hotelSlug = hotel?.slug ?? "";
   const hotelAccountKey = hotel ? hotelAccountKeyForLogin(hotel) : hotelSlug;
-  const hotelDisplayName = hotel?.displayName ?? "ChatAstay Hotel Portal";
+  const hotelDisplayName = hotel?.displayName ?? "ChatStay Hotel Portal";
   const isKnownHotel = Boolean(hotel?.id);
   const hotelSlugField = isKnownHotel
     ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelAccountKey)}" />`
@@ -1266,6 +1272,14 @@ function renderLayout(
     authenticated && workspaces.length > 1
       ? '<a href="/admin/workspaces" style="margin-right:10px;font-size:12px;font-weight:700;color:#0f172a;text-decoration:none;border:1px solid #d8dee6;padding:6px 10px;border-radius:8px;background:#fff">Workspaces</a>'
       : "";
+  const userIdentityHtml =
+    authenticated && sess
+      ? `<div class="user-card" title="Signed-in staff identity">
+          <strong>${escapeHtml(sess.staffName || sess.email)}</strong>
+          <span>${escapeHtml(String(sess.role))} · ${escapeHtml(sess.email)}</span>
+          <span>Hotel account: ${escapeHtml(sess.hotelAccountNumber ? `#${sess.hotelAccountNumber}` : "not assigned")}</span>
+        </div>`
+      : "";
   const logoutHtml = authenticated
     ? `${moduleSwitchHtml}<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
     : "";
@@ -1395,11 +1409,12 @@ function renderLayout(
     .replace("{{uiErrorContextAttrs}}", uiErrorContextAttrs)
     .replaceAll("{{lang}}", "en")
     .replaceAll("{{dir}}", "ltr")
-    .replaceAll("{{adminTitle}}", "ChatAstay Admin")
+    .replaceAll("{{adminTitle}}", "ChatStay Admin")
     .replace("{{brandTagline}}", "WhatsApp-first booking ops")
     .replace("{{langSwitcher}}", langSwitcherHtml)
     .replace("{{hotelName}}", escapeHtml(resolvedHotelName))
     .replace("{{hotelSign}}", escapeHtml(resolvedHotelSign))
+    .replace("{{userIdentity}}", userIdentityHtml)
     .replace("{{navLinks}}", navHtml)
     .replace("{{sectionTabs}}", sectionTabsHtml)
     .replace("{{logoutAction}}", logoutHtml)
@@ -1905,8 +1920,23 @@ async function sendInvoicePdfForBooking(params: {
   }
 
   const selectedUnitCode = await getBookingUnitCode(booking.id);
-  const fbFolio = await getFbFolioForBooking(booking.id);
-  const grandTotal = Number((booking.totalAmount + fbFolio.subtotal).toFixed(2));
+  const paymentIntentsSucceededTotal = await prisma.paymentIntent
+    .findMany({
+      where: { hotelId: hotel.id, bookingId: booking.id, status: PaymentStatus.SUCCEEDED },
+      select: { amount: true }
+    })
+    .then((rows) => rows.reduce((sum, p) => sum + p.amount, 0));
+  const [fbFolio, folioSummary] = await Promise.all([
+    getFbFolioForBooking(booking.id),
+    getFolioSummary({
+      hotelId: hotel.id,
+      bookingId: booking.id,
+      bookingTotalAmount: booking.totalAmount,
+      currency: booking.currency,
+      paymentIntentsSucceededTotal
+    })
+  ]);
+  const grandTotal = folioSummary.totalCharges;
   const refPrefix = documentKind === "quotation" ? "QUO" : documentKind === "receipt" ? "RCP" : "INV";
   const invoiceNumber = `${refPrefix}-${booking.id}`;
   const filename = `${booking.id}-${documentKind}-${formatDate(new Date())}.pdf`;
@@ -1934,6 +1964,9 @@ async function sendInvoicePdfForBooking(params: {
     currency: booking.currency,
     fbLines: fbFolio.lines,
     fbSubtotal: fbFolio.subtotal,
+    folioChargesNet: folioSummary.folioChargesNet,
+    amountPaid: folioSummary.paidBalance,
+    outstandingBalance: folioSummary.outstandingBalance,
     grandTotal
   });
 
@@ -1947,8 +1980,8 @@ async function sendInvoicePdfForBooking(params: {
     documentKind === "quotation"
       ? `${hotelLead}: here is your stay quotation (${invoiceNumber}). This is not a booking confirmation—our team will confirm details with you.`
       : documentKind === "receipt"
-        ? `${hotelLead}: receipt ${invoiceNumber} for booking ${booking.id}. Payment status: ${booking.paymentStatus}.`
-        : `${hotelLead}: invoice ${invoiceNumber} for booking ${booking.id}. Payment status: ${booking.paymentStatus}.`;
+        ? `${hotelLead}: receipt ${invoiceNumber} for booking ${booking.id}. Paid ${formatMoney(folioSummary.paidBalance, booking.currency)}. Balance ${formatMoney(folioSummary.outstandingBalance, booking.currency)}.`
+        : `${hotelLead}: invoice ${invoiceNumber} for booking ${booking.id}. Total ${formatMoney(folioSummary.totalCharges, booking.currency)}. Paid ${formatMoney(folioSummary.paidBalance, booking.currency)}. Balance ${formatMoney(folioSummary.outstandingBalance, booking.currency)}.`;
 
   const partner = loadPartnerSetupConfig(hotel.id);
   try {
@@ -2149,78 +2182,100 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
   if (!hotel || !booking) return { sent: false, skipped: false, error: "Booking or hotel not found." };
   if (booking.status !== BookingStatus.CONFIRMED) return { sent: false, skipped: true };
 
-  const stripe = getStripeClient();
-  if (!stripe) return { sent: false, skipped: false, error: "Stripe is not configured." };
-
-  const localPaymentIntent = await prisma.paymentIntent.create({
-    data: {
+  const reusablePaymentIntent = await prisma.paymentIntent.findFirst({
+    where: {
       hotelId: hotel.id,
+      bookingId: booking.id,
       kind: "BOOKING",
       provider: "stripe",
-      amount: booking.totalAmount,
-      currency: hotel.currency,
-      status: "REQUIRES_ACTION",
-      bookingId: booking.id
-    }
+      status: { in: [PaymentStatus.REQUIRES_ACTION, PaymentStatus.PENDING] },
+      paymentLinkUrl: { not: null }
+    },
+    orderBy: { createdAt: "desc" }
   });
+  if (reusablePaymentIntent?.paymentLinkSentAt && reusablePaymentIntent.paymentLinkUrl) {
+    return { sent: false, skipped: true, url: reusablePaymentIntent.paymentLinkUrl };
+  }
 
   const successUrl =
     process.env.STRIPE_CHECKOUT_SUCCESS_URL ??
     `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`;
   const cancelUrl = process.env.STRIPE_CHECKOUT_CANCEL_URL ?? `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`;
 
-  let checkoutSession: Stripe.Checkout.Session;
-  try {
-    checkoutSession = await stripe.checkout.sessions.create({
-      mode: "payment",
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      client_reference_id: localPaymentIntent.id,
-      customer_email: booking.guest.email ?? undefined,
-      metadata: {
-        paymentIntentId: localPaymentIntent.id,
-        bookingId: booking.id,
-        hotelId: hotel.id
-      },
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: hotel.currency.toLowerCase(),
-            unit_amount: toMinorUnits(booking.totalAmount, hotel.currency),
-            product_data: {
-              name: `Booking ${booking.id} - ${hotel.displayName}`,
-              description: `${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}`
-            }
-          }
-        }
-      ],
-      payment_intent_data: {
+  let paymentIntent = reusablePaymentIntent;
+  let checkoutSessionId = "";
+  if (!paymentIntent?.paymentLinkUrl) {
+    const stripe = getStripeClient();
+    if (!stripe) return { sent: false, skipped: false, error: "Stripe is not configured." };
+
+    const localPaymentIntent = await prisma.paymentIntent.create({
+      data: {
+        hotelId: hotel.id,
+        kind: "BOOKING",
+        provider: "stripe",
+        amount: booking.totalAmount,
+        currency: hotel.currency,
+        status: "REQUIRES_ACTION",
+        bookingId: booking.id
+      }
+    });
+
+    let checkoutSession: Stripe.Checkout.Session;
+    try {
+      checkoutSession = await stripe.checkout.sessions.create({
+        mode: "payment",
+        success_url: successUrl,
+        cancel_url: cancelUrl,
+        client_reference_id: localPaymentIntent.id,
+        customer_email: booking.guest.email ?? undefined,
         metadata: {
           paymentIntentId: localPaymentIntent.id,
           bookingId: booking.id,
           hotelId: hotel.id
+        },
+        line_items: [
+          {
+            quantity: 1,
+            price_data: {
+              currency: hotel.currency.toLowerCase(),
+              unit_amount: toMinorUnits(booking.totalAmount, hotel.currency),
+              product_data: {
+                name: `Booking ${booking.id} - ${hotel.displayName}`,
+                description: `${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}`
+              }
+            }
+          }
+        ],
+        payment_intent_data: {
+          metadata: {
+            paymentIntentId: localPaymentIntent.id,
+            bookingId: booking.id,
+            hotelId: hotel.id
+          }
         }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to create payment link.";
+      return { sent: false, skipped: false, error: message };
+    }
+
+    checkoutSessionId = checkoutSession.id;
+    paymentIntent = await prisma.paymentIntent.update({
+      where: { id: localPaymentIntent.id },
+      data: {
+        externalIntentId: checkoutSession.id,
+        paymentLinkUrl: checkoutSession.url ?? undefined,
+        metadataJson: JSON.stringify({
+          stripeCheckoutSessionId: checkoutSession.id,
+          stripePaymentIntent: checkoutSession.payment_intent
+        })
       }
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to create payment link.";
-    return { sent: false, skipped: false, error: message };
+  } else {
+    checkoutSessionId = paymentIntent.externalIntentId ?? "";
   }
 
-  const paymentIntent = await prisma.paymentIntent.update({
-    where: { id: localPaymentIntent.id },
-    data: {
-      externalIntentId: checkoutSession.id,
-      paymentLinkUrl: checkoutSession.url ?? undefined,
-      metadataJson: JSON.stringify({
-        stripeCheckoutSessionId: checkoutSession.id,
-        stripePaymentIntent: checkoutSession.payment_intent
-      })
-    }
-  });
-
-  const link = paymentIntent.paymentLinkUrl;
+  const link = paymentIntent?.paymentLinkUrl;
   if (!link) return { sent: false, skipped: false, error: "Payment link URL is unavailable." };
   const to = normalizePhoneForWhatsApp(booking.guest.phoneE164);
   if (!to) return { sent: false, skipped: false, error: "Guest phone number is invalid." };
@@ -2258,7 +2313,7 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
     entityId: booking.id,
     metadata: {
       paymentIntentId: paymentIntent.id,
-      checkoutSessionId: checkoutSession.id,
+      checkoutSessionId,
       sentTo: to
     }
   });
@@ -3546,9 +3601,11 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
       email: identifier,
       role: "MANAGER",
       permissions: getPermissionsForEmail(identifier),
+      staffName: "Platform admin",
       hotelId: loginHotel.id || undefined,
       hotelSlug: loginHotel.id ? loginHotel.slug : undefined,
-      hotelName: loginHotel.id ? loginHotel.displayName : undefined
+      hotelName: loginHotel.id ? loginHotel.displayName : undefined,
+      hotelAccountNumber: loginHotel.accountNumber ?? null
     });
     return "MANAGER";
   }
@@ -3572,9 +3629,11 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
             email: principal,
             role: String(hotelUser.role),
             permissions: effectivePermissions,
+            staffName: hotelUser.fullName,
             hotelId: hotel.id,
             hotelSlug: hotel.slug,
-            hotelName: hotel.displayName
+            hotelName: hotel.displayName,
+            hotelAccountNumber: loginHotel.accountNumber ?? null
           });
           await prisma.hotelUser.update({
             where: { id: hotelUser.id },
@@ -3692,9 +3751,11 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
       email: hotelUser.email ?? identifier,
       role: String(hotelUser.role),
       permissions: effectivePermissions,
+      staffName: hotelUser.fullName,
       hotelId: hotel.id,
       hotelSlug: hotel.slug,
-      hotelName: hotel.displayName
+      hotelName: hotel.displayName,
+      hotelAccountNumber: loginHotel.accountNumber ?? null
     });
     await prisma.hotelUser.update({
       where: { id: hotelUser.id },
@@ -8627,11 +8688,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         .filter((p) => p.status === PaymentStatus.SUCCEEDED)
         .reduce((sum, p) => sum + p.amount, 0)
     : 0;
-  const bookingBalance = booking ? Math.max(0, booking.totalAmount - paidAmount) : 0;
   const latestPaymentIntent = booking?.paymentIntents[0];
   const effectivePaymentMethod = manualDetails?.paymentMethod || latestPaymentIntent?.kind || "";
-  const effectivePaymentAmount = manualDetails?.paymentAmount ?? (booking ? paidAmount : null);
-  const effectiveBalanceAmount = manualDetails?.balanceAmount ?? (booking ? bookingBalance : null);
   const effectiveTransactionNumber = manualDetails?.transactionNumber || latestPaymentIntent?.id || "";
   const effectiveBookedBy = manualDetails?.bookedBy || (booking?.source ? String(booking.source) : "");
   const effectiveTourCompany = manualDetails?.tourCompany || "";
@@ -8664,6 +8722,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       paymentIntentsSucceededTotal: paidAmount
     })
   ]);
+  const effectivePaymentAmount = manualDetails?.paymentAmount ?? (booking ? folioSummary.totalPaid : null);
+  const effectiveBalanceAmount = manualDetails?.balanceAmount ?? (booking ? folioSummary.outstandingBalance : null);
 
   const now = new Date();
   const p2 = (n: number) => String(n).padStart(2, "0");

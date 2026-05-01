@@ -78,6 +78,25 @@
         font-size: 12px;
         opacity: 0.92;
       }
+      .user-card {
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 12px;
+        padding: 9px 12px;
+        margin: -8px 0 16px;
+      }
+      .user-card strong,
+      .user-card span {
+        display: block;
+      }
+      .user-card strong {
+        font-size: 13px;
+      }
+      .user-card span {
+        font-size: 11px;
+        opacity: 0.9;
+        margin-top: 2px;
+      }
       .lang-switcher {
         display: flex;
         gap: 6px;
@@ -726,7 +745,7 @@
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-logo">WS</div>
+          <div class="brand-logo">CS</div>
           <div>
             <h1>{{adminTitle}}</h1>
             <p>{{brandTagline}}</p>
@@ -737,6 +756,7 @@
           <strong>{{hotelName}}</strong>
           <span>{{hotelSign}}</span>
         </div>
+        {{userIdentity}}
         <nav class="sidebar-nav">{{navLinks}}</nav>
         <div class="sidebar-logout">{{logoutAction}}</div>
       </aside>
@@ -949,7 +969,7 @@
 
         if (lang === "ar") {
           const dictionary = {
-            "ChatAstay Admin": "تشاتا ستاي - لوحة التحكم",
+            "ChatStay Admin": "تشاتا ستاي - لوحة التحكم",
             "WhatsApp-first booking ops": "إدارة الحجوزات عبر واتساب",
             "Dashboard": "لوحة التحكم",
             "Today": "اليوم",

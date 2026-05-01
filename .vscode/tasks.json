@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "ChatAStay: dev server (port 3000)",
+      "label": "ChatStay: dev server (port 3000)",
       "type": "npm",
       "script": "dev",
       "path": "package.json",
@@ -23,7 +23,7 @@
       }
     },
     {
-      "label": "ChatAStay: dev server (port 3001 — if 3000 is busy)",
+      "label": "ChatStay: dev server (port 3001 — if 3000 is busy)",
       "type": "npm",
       "script": "dev:3001",
       "path": "package.json",

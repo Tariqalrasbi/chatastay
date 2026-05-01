@@ -206,7 +206,7 @@ function verifyTotpCode(secret: string, code: string, now = Date.now()): boolean
 }
 
 function getTotpProvisioningUri(email: string, secret: string): string {
-  const issuer = "ChatAstay";
+  const issuer = "ChatStay";
   const label = `${issuer}:${email}`;
   const params = new URLSearchParams({
     secret,
@@ -671,7 +671,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ChatAstay Platform Console</title>
+    <title>ChatStay Platform Console</title>
     <style>
       :root {
         --brand: #0b6e6e;
@@ -845,7 +845,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <h1>ChatAstay Platform</h1>
+          <h1>ChatStay Platform</h1>
           <p>Platform operations console</p>
         </div>
         <nav>${navHtml}</nav>
@@ -884,7 +884,7 @@ ownerRouter.get("/login", (req, res) => {
   }
   const content = `
 <h2>Platform Console Login</h2>
-<p class="muted">Sign in as the ChatAstay platform operator.</p>
+<p class="muted">Sign in as the ChatStay platform operator.</p>
 <form method="post" action="/owner/login" style="max-width: 420px">
   <label for="email">Email</label><br />
   <input id="email" type="email" name="email" required style="width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 12px; border: 1px solid #d8dee6; border-radius: 10px" />
@@ -1703,7 +1703,7 @@ ACT | ACTIVITY | Activities | ACT-TOUR | Local Tour | Activity | 10`;
           : "";
   const content = `
 <h2>Add New Hotel</h2>
-<p class="muted">Create a partner hotel tenant with the same ChatAstay PMS structure. The numeric account number is assigned automatically in sequence and is used for Extranet login.</p>
+<p class="muted">Create a partner hotel tenant with the same ChatStay PMS structure. The numeric account number is assigned automatically in sequence and is used for Extranet login.</p>
 <div class="grid-4" style="margin:12px 0">
   <article class="stat"><h3>1. Account</h3><p>Tenant + subscription</p></article>
   <article class="stat"><h3>2. Rooms</h3><p>Types, counts, unit names</p></article>

@@ -65,7 +65,7 @@ async function start(): Promise<void> {
 
   const server = app.listen(port, host, () => {
     const urlHost = host === "0.0.0.0" ? "localhost" : host;
-    console.log(`ChatAstay server listening on http://${urlHost}:${port}`);
+    console.log(`ChatStay server listening on http://${urlHost}:${port}`);
     console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
     console.log(`(Keep this terminal open while you use the app.)`);
     logWhatsAppStartupHints();

@@ -1,6 +1,6 @@
-# WhatsStay Architecture Rules
+# ChatStay Architecture Rules
 
-WhatsStay contains two subsystems:
+ChatStay contains two subsystems:
 
 1. WhatsApp Booking Engine
 2. Admin Dashboard

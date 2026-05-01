@@ -2,7 +2,7 @@ export type Language = "en" | "ar";
 
 const messages: Record<Language, Record<string, string>> = {
   en: {
-    welcome: "Welcome to ChatAstay! Please share your check-in and check-out dates.",
+    welcome: "Welcome to ChatStay! Please share your check-in and check-out dates.",
     missingDates: "Please send your dates in this format: YYYY-MM-DD to YYYY-MM-DD.",
     quoteReady: "Great! Here is your quote.",
     noAvailability: "Sorry, no rooms are available for those dates."
