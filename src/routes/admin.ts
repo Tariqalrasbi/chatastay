@@ -3999,10 +3999,16 @@ function parsePermissionsFromBody(body: Record<string, unknown>): PermissionMatr
 }
 
 function renderPermissionBlocks(perms?: PermissionMatrix): string {
-  return permissionModules
+  const blocks = permissionModules
     .map(
       (moduleName) => `<fieldset style="border:1px solid #d8dee6; border-radius:10px; padding:10px">
   <legend style="padding:0 6px">${escapeHtml(permissionModuleLabels[moduleName])}</legend>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+    <button type="button" class="btn-link" data-permission-module="${moduleName}" data-permission-level="none">None</button>
+    <button type="button" class="btn-link" data-permission-module="${moduleName}" data-permission-level="view">View</button>
+    <button type="button" class="btn-link" data-permission-module="${moduleName}" data-permission-level="operate">Operate</button>
+    <button type="button" class="btn-link" data-permission-module="${moduleName}" data-permission-level="admin">Admin</button>
+  </div>
   <label><input type="checkbox" name="${moduleName}_VIEW" ${perms?.[moduleName]?.VIEW ? "checked" : ""} /> View</label>
   <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_EDIT" ${perms?.[moduleName]?.EDIT ? "checked" : ""} /> Edit</label>
   <label style="margin-left:10px"><input type="checkbox" name="${moduleName}_CREATE" ${perms?.[moduleName]?.CREATE ? "checked" : ""} /> Create</label>
@@ -4011,6 +4017,16 @@ function renderPermissionBlocks(perms?: PermissionMatrix): string {
 </fieldset>`
     )
     .join("");
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+  <button type="button" class="btn-link primary" data-permission-preset="FRONTDESK">Front desk preset</button>
+  <button type="button" class="btn-link" data-permission-preset="HOUSEKEEPING">Housekeeping preset</button>
+  <button type="button" class="btn-link" data-permission-preset="RESTAURANT">Restaurant/cafe preset</button>
+  <button type="button" class="btn-link" data-permission-preset="FINANCE">Finance preset</button>
+  <button type="button" class="btn-link" data-permission-preset="MANAGER">Manager full access</button>
+  <button type="button" class="btn-link" data-permission-preset="NONE">Clear all</button>
+</div>
+<p class="muted" style="font-size:12px;margin-top:-4px">Fast setup: apply a role preset first. Use module buttons for exceptions: View = read only, Operate = normal daily work, Admin = full control for that module.</p>
+${blocks}`;
 }
 
 function hotelUserPermissionKey(user: { email?: string | null; username?: string | null }): string {
@@ -4186,6 +4202,71 @@ ${created}${updated}${resetSent}
           if (errEl) { errEl.textContent = msg; errEl.style.display = "block"; }
           else { alert(msg); }
         });
+    });
+  })();
+  (function () {
+    var modules = ${JSON.stringify(permissionModules)};
+    var actions = ${JSON.stringify(permissionActions)};
+    function setChecked(form, moduleName, action, value) {
+      var input = form.querySelector('input[name="' + moduleName + '_' + action + '"]');
+      if (input) input.checked = Boolean(value);
+    }
+    function setModuleLevel(form, moduleName, level) {
+      var enabled = {
+        none: [],
+        view: ["VIEW"],
+        operate: ["VIEW", "EDIT", "CREATE"],
+        admin: ["VIEW", "EDIT", "CREATE", "DELETE", "MANAGE"]
+      }[level] || [];
+      actions.forEach(function (action) {
+        setChecked(form, moduleName, action, enabled.indexOf(action) !== -1);
+      });
+    }
+    function clearAll(form) {
+      modules.forEach(function (moduleName) { setModuleLevel(form, moduleName, "none"); });
+    }
+    function applyPreset(form, preset) {
+      clearAll(form);
+      if (preset === "MANAGER") {
+        modules.forEach(function (moduleName) { setModuleLevel(form, moduleName, "admin"); });
+        return;
+      }
+      if (preset === "FRONTDESK") {
+        setModuleLevel(form, "ROOMS", "operate");
+        setModuleLevel(form, "BOOKINGS", "operate");
+        setModuleLevel(form, "CONVERSATIONS", "operate");
+        setModuleLevel(form, "REPORTS", "view");
+        setModuleLevel(form, "BILLING", "view");
+        return;
+      }
+      if (preset === "HOUSEKEEPING") {
+        setModuleLevel(form, "HOUSEKEEPING", "operate");
+        setModuleLevel(form, "ROOMS", "operate");
+        return;
+      }
+      if (preset === "RESTAURANT") {
+        setModuleLevel(form, "OUTLET", "admin");
+        setModuleLevel(form, "BOOKINGS", "view");
+        setModuleLevel(form, "ROOMS", "view");
+        return;
+      }
+      if (preset === "FINANCE") {
+        setModuleLevel(form, "BILLING", "operate");
+        setModuleLevel(form, "REPORTS", "view");
+        setModuleLevel(form, "BOOKINGS", "view");
+      }
+    }
+    document.addEventListener("click", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest("[data-permission-preset], [data-permission-module]") : null;
+      if (!btn) return;
+      var form = btn.closest("form");
+      if (!form) return;
+      ev.preventDefault();
+      var preset = btn.getAttribute("data-permission-preset");
+      if (preset) applyPreset(form, preset);
+      var moduleName = btn.getAttribute("data-permission-module");
+      var level = btn.getAttribute("data-permission-level");
+      if (moduleName && level) setModuleLevel(form, moduleName, level);
     });
   })();
   </script>
