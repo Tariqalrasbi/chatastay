@@ -1203,6 +1203,7 @@ ownerRouter.get("/dashboard", requireOwnerAuth, async (req, res) => {
               ? '<span class="badge ok">Normal</span>'
               : '<span class="badge">No feedback</span>';
       return `<tr>
+  <td><strong>#${h.accountNumber ?? "—"}</strong></td>
   <td><a href="/owner/hotels/${encodeURIComponent(h.hotelId)}">${escapeHtml(h.displayName)}</a><div class="muted" style="font-size:11px">${escapeHtml(h.slug)}</div></td>
   <td>${statusBadge}</td>
   <td>${escapeHtml(h.planName ?? "—")}<div style="margin-top:4px">${subBadge}</div></td>
@@ -1348,8 +1349,8 @@ ${attentionBlock}
 
 <h3 style="margin-top:22px">Hotel comparison</h3>
 <table>
-  <thead><tr><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Feedback alert</th><th>Public</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
-  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="12" class="muted">No hotels</td></tr>`}</tbody>
+  <thead><tr><th>Account #</th><th>Hotel</th><th>Status</th><th>Plan / subscription</th><th>Bookings</th><th>Room revenue</th><th>F&amp;B posted</th><th>Conversations</th><th>Rating</th><th>Feedback alert</th><th>Public</th><th>Campaigns</th><th>Open invoices</th></tr></thead>
+  <tbody>${hotelTableRows.length ? hotelTableRows : `<tr><td colspan="13" class="muted">No hotels</td></tr>`}</tbody>
 </table>`;
 
   res.type("html").send(ownerLayout(content, true));
@@ -1615,7 +1616,7 @@ ownerRouter.get("/hotels", requireOwnerAuth, async (req, res) => {
 
   const content = `
 <h2>Hotels</h2>
-<p class="muted">Manage all partner hotels, status, and subscriptions. Use <strong>Activate</strong> to reactivate a suspended hotel.</p>
+<p class="muted">Manage all partner hotels, status, and subscriptions. The <strong>Account #</strong> is the hotel user number for Extranet login. Use <strong>Activate</strong> to reactivate a suspended hotel.</p>
 <div class="actions" style="margin-bottom:12px">
   <a class="btn-link primary" href="/owner/hotels/new">Add New Hotel</a>
   <a class="btn-link" href="/owner/subscriptions">Manage subscriptions</a>

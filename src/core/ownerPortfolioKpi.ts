@@ -8,6 +8,7 @@ import { prisma } from "../db";
 
 export type OwnerHotelKpiRow = {
   hotelId: string;
+  accountNumber: number | null;
   displayName: string;
   slug: string;
   isActive: boolean;
@@ -82,6 +83,7 @@ export async function loadOwnerPortfolioKpis(params: {
     orderBy: { displayName: "asc" },
     select: {
       id: true,
+      accountNumber: true,
       displayName: true,
       slug: true,
       isActive: true,
@@ -313,6 +315,7 @@ export async function loadOwnerPortfolioKpis(params: {
     const cm = campMap.get(h.id);
     return {
       hotelId: h.id,
+      accountNumber: h.accountNumber,
       displayName: h.displayName,
       slug: h.slug,
       isActive: h.isActive,
