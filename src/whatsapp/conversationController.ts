@@ -28,6 +28,7 @@ import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import {
   type BookingStep,
   type ConversationMode,
+  createCalendarSessionLink,
   loadConversationSession,
   saveConversationSession,
   upsertBookingDraft
@@ -50,7 +51,7 @@ import {
   getOffersForBookingSubmenu,
   getRoomTypesForBookingSubmenu
 } from "./knowledgeBase";
-import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send";
+import { sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppList, sendWhatsAppText, trySendWhatsAppFlow } from "./send";
 import { guestReceptionistHandoffMessage } from "./guestNotifications";
 import { handleGuestJourneyInboundReply, type GuestJourneyOperationalReply } from "./preArrivalGuestReplyNotify";
 import { buildGuestJourneyOrchestratedReply } from "./guestMessageOrchestration";
@@ -319,6 +320,7 @@ const LANGUAGE_BUTTONS: Array<{ id: string; title: string }> = [
 
 const BOOKING_MODE_ENTRY =
   "I'll help you book a stay. You can ask about room types or check availability. To get started, share your preferred dates and number of guests—e.g. 10–12 April for 2 guests.";
+const APP_BASE_URL = (process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 const BOOKING_SUBMENU_BODY = "What would you like to do?";
 const BOOKING_SUBMENU_LIST = {
   buttonText: "Choose an option",
@@ -416,6 +418,59 @@ function isMenuChoiceAskQuestion(text: string): boolean {
 function isMenuChoiceTalkToAgent(text: string): boolean {
   const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "talk_to_agent" || t === "talk to an agent" || t === "chat with a receptionist" || t === "agent" || t === "reception";
+}
+
+async function sendMobileBookingEntry(params: {
+  hotel: { id: string; displayName: string; phoneNumberId?: string };
+  guestId: string;
+  to: string;
+  language: string;
+  conversationId: string;
+}): Promise<{ body: string; channel: "flow" | "link" }> {
+  const link = await createCalendarSessionLink({
+    appBaseUrl: APP_BASE_URL,
+    hotelId: params.hotel.id,
+    guestId: params.guestId,
+    phoneE164: params.to,
+    language: params.language || "en",
+    metadata: { source: "whatsapp_book_now" }
+  });
+  const bookingUrl = link.url.replace("/guest/calendar?", "/guest/book?");
+  const body = [
+    `Book ${params.hotel.displayName} faster from one mobile screen.`,
+    "Choose dates, rooms, adults/children, preferred room, and special requests in one place.",
+    "After you submit, I will send the confirmation here on WhatsApp."
+  ].join("\n");
+  const flowId = process.env.WHATSAPP_BOOKING_FLOW_ID?.trim();
+  if (flowId) {
+    const flow = await trySendWhatsAppFlow({
+      to: params.to,
+      body,
+      flowId,
+      flowToken: link.token,
+      flowCta: "Book Now",
+      screen: process.env.WHATSAPP_BOOKING_FLOW_SCREEN?.trim() || "BOOKING_FORM",
+      data: {
+        hotel_id: params.hotel.id,
+        hotel_name: params.hotel.displayName,
+        booking_url: bookingUrl,
+        fallback_url: bookingUrl
+      },
+      phoneNumberId: params.hotel.phoneNumberId,
+      conversationId: params.conversationId
+    });
+    if (flow.ok) return { body, channel: "flow" };
+    console.warn("[WhatsApp] Booking Flow send failed; falling back to mobile booking link:", flow.errorMessage.slice(0, 320));
+  }
+  await sendWhatsAppCtaUrl({
+    to: params.to,
+    body,
+    displayText: "Book Now",
+    url: bookingUrl,
+    phoneNumberId: params.hotel.phoneNumberId,
+    conversationId: params.conversationId
+  });
+  return { body: `${body}\n${bookingUrl}`, channel: "link" };
 }
 
 /** Normalize button/title text from WhatsApp (NFC, strip invisible) so language taps match reliably. */
@@ -2523,64 +2578,20 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (isMenuChoiceBookStay(input.text)) {
-    if (persisted.bookingStep) {
-      const lang = effectiveLang(persisted.language);
-      const body =
-        lang === "ar"
-          ? "أنت في منتصف خطوات الحجز. تابع بإجابة السؤال الحالي، أو اكتب *قائمة* أو *menu* للعودة للقائمة الرئيسية وبدء حجز جديد."
-          : "You're already in the booking flow. Reply with what this step asks for, or type *menu* to return to the main menu and start over.";
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-      await prisma.message.create({
-        data: {
-          hotelId: hotel.id,
-          conversationId: conversation.id,
-          direction: MessageDirection.OUTBOUND,
-          body,
-          aiIntent: "BOOKING_STEP_IGNORE_DUPLICATE_BOOK_TAP",
-          aiConfidence: 0.95
-        }
-      });
-      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-      return;
-    }
-    try {
-      await sendWhatsAppList({
-        to: normalizedPhone,
-        body: BOOKING_SUBMENU_BODY,
-        buttonText: BOOKING_SUBMENU_LIST.buttonText,
-        sections: BOOKING_SUBMENU_LIST.sections,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    } catch (err) {
-      console.error("WhatsApp booking sub-menu list send failed, using text fallback:", err instanceof Error ? err.message : String(err));
-      const fallbackBody = [
-        BOOKING_SUBMENU_BODY,
-        "1) Check availability",
-        "2) View room types",
-        "3) View offers",
-        "4) View location and hotel information"
-      ].join("\n");
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body: fallbackBody,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    }
-    const sentBody = BOOKING_SUBMENU_BODY;
+    const bookingEntry = await sendMobileBookingEntry({
+      hotel,
+      guestId: guest.id,
+      to: normalizedPhone,
+      language: persisted.language || "en",
+      conversationId: conversation.id
+    });
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: sentBody,
-        aiIntent: "MENU_BOOKING_SUBMENU",
+        body: bookingEntry.body,
+        aiIntent: bookingEntry.channel === "flow" ? "MENU_BOOKING_FLOW" : "MENU_BOOKING_MOBILE_FORM",
         aiConfidence: 0.95
       }
     });
@@ -2597,6 +2608,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         awaitingGuestName: false,
         awaitingBookingLookup: false,
         myBookingCandidateIds: [],
+        bookingStep: null,
         phoneNumberId: hotel.phoneNumberId,
         checkIn: persisted.checkIn,
         checkOut: persisted.checkOut,

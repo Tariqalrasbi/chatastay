@@ -2,7 +2,7 @@ import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "../db";
-import { findAvailableRoomType, getDayAvailability, toIsoDate } from "../core/availability";
+import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
@@ -112,10 +112,13 @@ function guestLayout(content: string): string {
     table { width:100%; border-collapse: collapse; margin-top: 12px; }
     th, td { text-align:left; border-bottom: 1px solid #e2e8f0; padding: 9px 8px; }
     form { display:grid; gap: 8px; max-width: 460px; }
-    input { padding: 9px; border:1px solid #cbd5e1; border-radius: 8px; }
+    input, select, textarea { padding: 9px; border:1px solid #cbd5e1; border-radius: 8px; font: inherit; }
+    textarea { min-height: 78px; resize: vertical; }
     button { border:0; background:#075e54; color:#fff; padding:10px 14px; border-radius: 10px; font-weight: 700; cursor: pointer; }
     button:disabled { opacity:.45; cursor:not-allowed; }
     .row { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .hero-card { background: linear-gradient(135deg, #075e54 0%, #128c7e 100%); color: #fff; border-radius: 18px; padding: 18px; margin-bottom: 14px; }
+    .hero-card .muted { color: rgba(255,255,255,.82); }
     @media (max-width: 700px) {
       .row { grid-template-columns: 1fr; }
       main { margin: 0; min-height: 100vh; border-radius: 0; border: 0; padding: 14px; }
@@ -300,7 +303,273 @@ guestRouter.get("/book-now", async (req, res) => {
   if (hotelId) query.set("hotelId", hotelId);
   if (phone) query.set("phone", phone);
   if (token) query.set("token", token);
-  res.redirect(`/guest/calendar?${query.toString()}`);
+  res.redirect(`/guest/book?${query.toString()}`);
+});
+
+guestRouter.get("/book", async (req, res) => {
+  const token = typeof req.query.token === "string" ? req.query.token.trim() : "";
+  const hotelIdFromQuery = typeof req.query.hotelId === "string" ? req.query.hotelId.trim() : "";
+  const phone = typeof req.query.phone === "string" ? req.query.phone.trim() : "";
+  const guestName = typeof req.query.guestName === "string" ? req.query.guestName.trim() : "";
+  const error = typeof req.query.error === "string" ? req.query.error.trim() : "";
+
+  let resolvedHotelId = hotelIdFromQuery;
+  if (token) {
+    try {
+      const session = await resolveCalendarSession(token);
+      resolvedHotelId = session.hotelId;
+    } catch (sessionError) {
+      const message = sessionError instanceof Error ? sessionError.message : "Invalid booking session";
+      res.redirect(`/guest/book?${new URLSearchParams({ error: message }).toString()}`);
+      return;
+    }
+  }
+
+  const hotel =
+    (resolvedHotelId
+      ? await prisma.hotel.findUnique({
+          where: { id: resolvedHotelId },
+          include: { roomTypes: { where: { isActive: true }, orderBy: { baseNightlyRate: "asc" } } }
+        })
+      : await prisma.hotel.findUnique({
+          where: { slug: defaultHotelSlug },
+          include: { roomTypes: { where: { isActive: true }, orderBy: { baseNightlyRate: "asc" } } }
+        })) ??
+    (await prisma.hotel.findFirst({
+      orderBy: { createdAt: "asc" },
+      include: { roomTypes: { where: { isActive: true }, orderBy: { baseNightlyRate: "asc" } } }
+    }));
+  if (!hotel) {
+    res.type("html").send(guestLayout("<h1>Book Your Stay</h1><p class=\"badge alert\">No hotel found.</p>"));
+    return;
+  }
+
+  const today = formatDate(new Date());
+  const tomorrow = formatDate(addDays(new Date(), 1));
+  const roomOptions = hotel.roomTypes
+    .map(
+      (room) =>
+        `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)} · max ${room.capacity} · ${room.baseNightlyRate.toFixed(2)} ${escapeHtml(hotel.currency)}/night</option>`
+    )
+    .join("");
+  const content = `
+<section class="hero-card">
+  <h1>Book ${escapeHtml(hotel.displayName)}</h1>
+  <p class="muted">Fill everything in one mobile screen. We will check availability and send confirmation back to WhatsApp.</p>
+</section>
+${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/guest/book" style="display:grid; gap:12px; max-width:620px">
+  <input type="hidden" name="hotelId" value="${escapeHtml(hotel.id)}" />
+  ${token ? `<input type="hidden" name="token" value="${escapeHtml(token)}" />` : ""}
+  <div class="row">
+    <label>Check-in
+      <input type="date" name="checkIn" min="${escapeHtml(today)}" value="${escapeHtml(today)}" required />
+    </label>
+    <label>Check-out
+      <input type="date" name="checkOut" min="${escapeHtml(tomorrow)}" value="${escapeHtml(tomorrow)}" required />
+    </label>
+  </div>
+  <div class="row">
+    <label>Adults
+      <input type="number" name="adults" min="1" max="16" value="2" required />
+    </label>
+    <label>Children
+      <input type="number" name="children" min="0" max="12" value="0" />
+    </label>
+  </div>
+  <div class="row">
+    <label>Rooms
+      <input type="number" name="rooms" min="1" max="6" value="1" required />
+    </label>
+    <label>Preferred room
+      <select name="roomTypeId">
+        <option value="">Best available</option>
+        ${roomOptions}
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label>Your name
+      <input type="text" name="guestName" value="${escapeHtml(guestName)}" placeholder="Guest name" />
+    </label>
+    <label>WhatsApp number
+      <input type="tel" name="phone" value="${escapeHtml(phone)}" placeholder="9689XXXXXXX" />
+    </label>
+  </div>
+  <label>Special requests
+    <textarea name="specialRequests" placeholder="Extra bed, late check-in, meal preference, airport transfer..."></textarea>
+  </label>
+  <button type="submit">Check Availability</button>
+  <p class="muted">Prefer a calendar view? <a href="/guest/calendar?hotelId=${encodeURIComponent(hotel.id)}${token ? `&token=${encodeURIComponent(token)}` : ""}">Open calendar</a></p>
+</form>`;
+  res.type("html").send(guestLayout(content));
+});
+
+guestRouter.post("/book", async (req, res) => {
+  const token = String(req.body.token ?? "").trim();
+  const hotelIdBody = String(req.body.hotelId ?? "").trim();
+  const adults = parseIntSafe(req.body.adults, 2, 1, 16);
+  const children = parseIntSafe(req.body.children, 0, 0, 12);
+  const guests = adults + children;
+  const rooms = parseIntSafe(req.body.rooms, 1, 1, 6);
+  const roomTypeId = String(req.body.roomTypeId ?? "").trim();
+  const guestName = String(req.body.guestName ?? "").trim();
+  const phone = String(req.body.phone ?? "").trim();
+  const specialRequests = String(req.body.specialRequests ?? "").trim().slice(0, 500);
+  const checkInRaw = String(req.body.checkIn ?? "").trim();
+  const checkOutRaw = String(req.body.checkOut ?? "").trim();
+
+  let hotelId = hotelIdBody;
+  let sessionGuestId: string | undefined;
+  let sessionPhone = normalizePhone(phone);
+  try {
+    if (token) {
+      const session = await resolveCalendarSession(token);
+      hotelId = session.hotelId;
+      sessionGuestId = session.guestId ?? undefined;
+      if (!sessionPhone) sessionPhone = normalizePhone(session.phoneE164);
+    }
+  } catch (calendarError) {
+    const message = calendarError instanceof Error ? calendarError.message : "Invalid booking session";
+    res.redirect(`/guest/book?${new URLSearchParams({ hotelId, error: message }).toString()}`);
+    return;
+  }
+
+  const hotel = hotelId
+    ? await prisma.hotel.findUnique({ where: { id: hotelId } })
+    : await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug } });
+  if (!hotel) {
+    res.redirect("/guest/book?error=Hotel+not+found");
+    return;
+  }
+
+  const checkIn = new Date(`${checkInRaw}T00:00:00.000Z`);
+  const checkOut = new Date(`${checkOutRaw}T00:00:00.000Z`);
+  if (!checkInRaw || !checkOutRaw || Number.isNaN(checkIn.getTime()) || Number.isNaN(checkOut.getTime()) || checkOut <= checkIn) {
+    const query = new URLSearchParams({ hotelId: hotel.id, error: "Please select valid check-in and check-out dates." });
+    if (token) query.set("token", token);
+    if (phone) query.set("phone", phone);
+    if (guestName) query.set("guestName", guestName);
+    res.redirect(`/guest/book?${query.toString()}`);
+    return;
+  }
+
+  const offers = await findAvailableRoomTypes({ hotelId: hotel.id, checkIn, checkOut, guests, rooms, adults, children });
+  const offer = (roomTypeId ? offers.find((item) => item.roomTypeId === roomTypeId) : undefined) ?? offers[0];
+  if (!offer) {
+    const query = new URLSearchParams({ hotelId: hotel.id, error: "Selected dates are not available. Please choose different dates." });
+    if (token) query.set("token", token);
+    if (phone) query.set("phone", phone);
+    if (guestName) query.set("guestName", guestName);
+    res.redirect(`/guest/book?${query.toString()}`);
+    return;
+  }
+
+  const normalizedGuestPhone = sessionPhone || normalizePhone(phone);
+  const guest =
+    (sessionGuestId
+      ? await prisma.guest.findUnique({ where: { id: sessionGuestId } })
+      : normalizedGuestPhone
+        ? await prisma.guest.upsert({
+            where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedGuestPhone } },
+            update: { ...(guestName ? { fullName: guestName } : {}) },
+            create: { hotelId: hotel.id, phoneE164: normalizedGuestPhone, ...(guestName ? { fullName: guestName } : {}) }
+          })
+        : null) ?? null;
+
+  let conversationId: string | undefined;
+  if (guest) {
+    const conversation =
+      (await prisma.conversation.findFirst({
+        where: { hotelId: hotel.id, guestId: guest.id, state: { in: ["NEW", "QUALIFYING", "QUOTED", "PAYMENT_PENDING", "CONFIRMED"] } },
+        orderBy: { updatedAt: "desc" }
+      })) ??
+      (await prisma.conversation.create({
+        data: { hotelId: hotel.id, guestId: guest.id, state: "QUALIFYING", lastMessageAt: new Date() }
+      }));
+    conversationId = conversation.id;
+    const draftState = {
+      language: guest.locale || "en",
+      stage: "WAITING_CONFIRMATION",
+      guestName: guestName || guest.fullName || undefined,
+      checkIn: toIsoDate(checkIn),
+      checkOut: toIsoDate(checkOut),
+      guestCount: guests,
+      adultCount: adults,
+      childCount: children,
+      roomCount: rooms,
+      suggestedRoomTypeId: offer.roomTypeId,
+      suggestedRoomTypeName: offer.roomTypeName,
+      suggestedPropertyId: offer.propertyId,
+      nightlyRate: offer.nightlyTotal,
+      nights: offer.nights,
+      totalAmount: offer.total,
+      specialRequests
+    };
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId,
+      phoneE164: guest.phoneE164,
+      state: draftState,
+      ttlMs: 60 * 60 * 1000
+    });
+    await upsertBookingDraft({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId,
+      currency: hotel.currency,
+      source: "MOBILE_BOOKING_FORM",
+      state: draftState
+    });
+  }
+
+  const summaryMessage = [
+    `I found availability for ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)}.`,
+    `Room: ${offer.roomTypeName}`,
+    `Guests: ${guests} (${adults} adults, ${children} children) | Rooms: ${rooms}`,
+    `Total: ${offer.total.toFixed(2)} ${hotel.currency}`,
+    specialRequests ? `Requests: ${specialRequests}` : "",
+    "Reply with YES to confirm or NO to edit."
+  ].filter(Boolean).join("\n");
+  if (guest) {
+    const config = loadPartnerSetupConfig(hotel.id);
+    try {
+      await sendWhatsAppButtons({
+        to: normalizePhone(guest.phoneE164),
+        body: summaryMessage,
+        buttons: [
+          { id: "confirm_booking", title: "Confirm" },
+          { id: "edit_booking", title: "Edit" }
+        ],
+        phoneNumberId: config.whatsappPhoneNumberId || undefined
+      });
+    } catch {
+      await sendWhatsAppText({
+        to: normalizePhone(guest.phoneE164),
+        body: summaryMessage,
+        phoneNumberId: config.whatsappPhoneNumberId || undefined
+      });
+    }
+  }
+
+  const content = `
+<h1>Availability Found</h1>
+<p class="muted">Your details were saved. Confirm from WhatsApp to finish the booking.</p>
+<table>
+  <tbody>
+    <tr><th>Hotel</th><td>${escapeHtml(hotel.displayName)}</td></tr>
+    <tr><th>Check-in</th><td>${escapeHtml(toIsoDate(checkIn))}</td></tr>
+    <tr><th>Check-out</th><td>${escapeHtml(toIsoDate(checkOut))}</td></tr>
+    <tr><th>Guests</th><td>${guests} (${adults} adults, ${children} children)</td></tr>
+    <tr><th>Rooms</th><td>${rooms}</td></tr>
+    <tr><th>Room</th><td>${escapeHtml(offer.roomTypeName)}</td></tr>
+    <tr><th>Total</th><td>${offer.total.toFixed(2)} ${escapeHtml(hotel.currency)}</td></tr>
+  </tbody>
+</table>
+${guest ? `<p class="badge ok">Confirmation was sent to WhatsApp.</p>` : `<p class="badge pending">Enter a WhatsApp number so we can send confirmation buttons.</p>`}
+<p><a href="/guest/book?hotelId=${encodeURIComponent(hotel.id)}${token ? `&token=${encodeURIComponent(token)}` : ""}">Edit details</a></p>`;
+  res.type("html").send(guestLayout(content));
 });
 
 guestRouter.get("/calendar", async (req, res) => {

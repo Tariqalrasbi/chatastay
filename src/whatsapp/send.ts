@@ -45,6 +45,27 @@ interface SendListInput {
   conversationId?: string;
 }
 
+interface SendCtaUrlInput {
+  to: string;
+  body: string;
+  displayText: string;
+  url: string;
+  phoneNumberId?: string;
+  conversationId?: string;
+}
+
+interface SendFlowInput {
+  to: string;
+  body: string;
+  flowId: string;
+  flowToken: string;
+  flowCta: string;
+  screen?: string;
+  data?: Record<string, unknown>;
+  phoneNumberId?: string;
+  conversationId?: string;
+}
+
 function getWhatsAppConfig(phoneNumberIdOverride?: string): { token: string; phoneNumberId: string } | null {
   const token = process.env.WHATSAPP_TOKEN?.trim();
   const phoneNumberId =
@@ -350,6 +371,121 @@ export async function sendWhatsAppButtons({ to, body, buttons, phoneNumberId, co
     direction: "outgoing",
     messageText: body
   });
+}
+
+export async function sendWhatsAppCtaUrl({
+  to,
+  body,
+  displayText,
+  url,
+  phoneNumberId,
+  conversationId
+}: SendCtaUrlInput): Promise<void> {
+  const cfg = getWhatsAppConfig(phoneNumberId);
+  if (!cfg) {
+    whatsAppFail("WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be configured");
+    return;
+  }
+  const { token, phoneNumberId: resolvedPhoneNumberId } = cfg;
+  const payload = {
+    messaging_product: "whatsapp" as const,
+    recipient_type: "individual" as const,
+    to: to.replace(/^0+/, "") || to,
+    type: "interactive" as const,
+    interactive: {
+      type: "cta_url" as const,
+      body: { text: body.slice(0, 1024) },
+      action: {
+        name: "cta_url" as const,
+        parameters: {
+          display_text: displayText.slice(0, 20),
+          url
+        }
+      }
+    }
+  };
+  const response = await fetch(`https://graph.facebook.com/v21.0/${resolvedPhoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    const hint = formatWhatsAppHttpError(response.status, errorText);
+    console.warn("[WhatsApp] CTA URL rejected; sending plain-text link fallback. Cause:", hint.slice(0, 320));
+    await sendWhatsAppText({ to, body: `${body}\n\n${displayText}: ${url}`, phoneNumberId, conversationId });
+    return;
+  }
+  await logWhatsAppMessage({
+    conversationId,
+    phoneNumber: to,
+    direction: "outgoing",
+    messageText: `${body}\n${displayText}: ${url}`
+  });
+}
+
+export async function trySendWhatsAppFlow({
+  to,
+  body,
+  flowId,
+  flowToken,
+  flowCta,
+  screen,
+  data,
+  phoneNumberId,
+  conversationId
+}: SendFlowInput): Promise<{ ok: true } | { ok: false; errorMessage: string }> {
+  const cfg = getWhatsAppConfig(phoneNumberId);
+  if (!cfg) {
+    return { ok: false, errorMessage: "WhatsApp is not configured." };
+  }
+  const { token, phoneNumberId: resolvedPhoneNumberId } = cfg;
+  const payload = {
+    messaging_product: "whatsapp" as const,
+    recipient_type: "individual" as const,
+    to: to.replace(/^0+/, "") || to,
+    type: "interactive" as const,
+    interactive: {
+      type: "flow" as const,
+      body: { text: body.slice(0, 1024) },
+      action: {
+        name: "flow" as const,
+        parameters: {
+          flow_message_version: "3",
+          flow_id: flowId,
+          flow_token: flowToken,
+          flow_cta: flowCta.slice(0, 20),
+          flow_action: "navigate",
+          flow_action_payload: {
+            screen: screen || "BOOKING_FORM",
+            data: data ?? {}
+          }
+        }
+      }
+    }
+  };
+  const response = await fetch(`https://graph.facebook.com/v21.0/${resolvedPhoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    return { ok: false, errorMessage: formatWhatsAppHttpError(response.status, errorText) };
+  }
+  await logWhatsAppMessage({
+    conversationId,
+    phoneNumber: to,
+    direction: "outgoing",
+    messageText: `[whatsapp-flow:${flowId}] ${body}`
+  });
+  return { ok: true };
 }
 
 export async function sendWhatsAppList({ to, body, buttonText, sections, phoneNumberId, conversationId }: SendListInput): Promise<void> {
