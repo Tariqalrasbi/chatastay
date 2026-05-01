@@ -65,23 +65,28 @@ export function initialFbOrderList(purpose: FbCartPurpose): FoodFlowOutbound {
 }
 
 function buildCategoryList(purpose: FbCartPurpose): FoodFlowOutbound {
-  const rows = getAbrCategories().map((c) => ({
+  const categoryRows = getAbrCategories().map((c) => ({
     id: `${PREFIX_CAT}${c.id}`,
     title: c.label.slice(0, 24),
     description: `${c.items.length} items`.slice(0, 72)
   }));
+  const rows = purpose === "meal_plan_view" || purpose === "browse_only" ? categoryRows.slice(0, 9) : categoryRows.slice(0, 10);
   if (purpose === "meal_plan_view") {
     rows.push({ id: "fb_view_done", title: "Back to meal plans", description: "Return" });
+  } else if (purpose === "browse_only") {
+    rows.push({ id: "fb_view_done", title: "Close menu", description: "Return to main services" });
   }
   const body =
     purpose === "meal_plan_view"
       ? "Browse our menu by category. When finished, tap *Back to meal plans*."
+      : purpose === "browse_only"
+        ? "Browse the restaurant and cafe menu by category. Tap *Close menu* when finished."
       : "Pick a category:";
   return {
     kind: "list",
     body,
-    buttonText: purpose === "meal_plan_view" ? "Menu" : "Categories",
-    sections: [{ title: "ABR menu", rows: rows.slice(0, 10) }]
+    buttonText: purpose === "meal_plan_view" || purpose === "browse_only" ? "Menu" : "Categories",
+    sections: [{ title: "ABR menu", rows }]
   };
 }
 
@@ -179,8 +184,8 @@ export async function advanceFbCartDraft(params: {
   };
   const raw = text.trim();
 
-  // --- browse-only (meal plan "View menu") ---
-  if (draft.purpose === "meal_plan_view") {
+  // --- browse-only (meal plan "View menu" or standalone guest menu stream) ---
+  if (draft.purpose === "meal_plan_view" || draft.purpose === "browse_only") {
     if (raw === "fb_view_done" || raw.includes("fb_view_done")) {
       return { draft: null, outbound: [], viewFinished: true };
     }

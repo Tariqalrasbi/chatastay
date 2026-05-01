@@ -187,27 +187,31 @@ function effectiveLang(lang: string | undefined): "ar" | "en" {
 
 function getMainMenuBody(hotelName: string, lang: "ar" | "en"): string {
   if (lang === "ar") {
-    return `أهلاً بك في ${hotelName}.\nيرجى اختيار خيار:\n• حجز إقامة\n• طرح سؤال\n• التحدث مع موظف الاستقبال`;
+    return `أهلاً بك في ${hotelName}.\nاختر الخدمة المطلوبة:`;
   }
-  return `Welcome to ${hotelName}.\nPlease choose an option:\n• Book a stay\n• Ask a question\n• Chat with a receptionist`;
+  return `Welcome to ${hotelName}.\nChoose what you need:`;
 }
 
 function buildMainMenuMessage(hotelName: string, lang: "ar" | "en"): string {
   if (lang === "ar") {
     return [
       `أهلاً بك في ${hotelName}.`,
-      "يرجى اختيار خيار:",
-      "• حجز إقامة",
-      "• طرح سؤال",
-      "• التحدث مع موظف الاستقبال"
+      "اختر الخدمة المطلوبة:",
+      "1) حجز إقامة",
+      "2) معلومات الفندق والموقع",
+      "3) تصفح قائمة المطعم",
+      "4) طلب طعام للنزلاء داخل الفندق",
+      "5) التحدث مع الاستقبال"
     ].join("\n");
   }
   return [
     `Welcome to ${hotelName}.`,
-    "Please choose an option:",
-    "• Book a stay",
-    "• Ask a question",
-    "• Chat with a receptionist"
+    "Choose what you need:",
+    "1) Book a stay",
+    "2) Hotel info & location",
+    "3) Browse restaurant menu",
+    "4) Order food in-house",
+    "5) Chat with reception"
   ].join("\n");
 }
 
@@ -231,7 +235,7 @@ function personalizeMainMenuBodies(
 
 const MENU_BUTTONS: Array<{ id: string; title: string }> = [
   { id: "book_a_stay", title: "Book" },
-  { id: "ask_question", title: "Questions" },
+  { id: "hotel_info", title: "Info" },
   { id: "talk_to_agent", title: "Reception" }
 ];
 
@@ -247,67 +251,61 @@ async function sendMainMenuForGuest(params: {
   fallbackBody: string;
 }): Promise<{ recordedBody: string }> {
   const stay = await findGuestActiveStayBooking(params.hotel.id, params.guestId);
-  if (stay) {
-    try {
-      await sendWhatsAppList({
-        to: params.to,
-        body: params.menuBody,
-        buttonText: MAIN_MENU_LIST_CTA,
-        sections: [
-          {
-            title: "Choose",
-            rows: [
-              { id: "book_a_stay", title: "Book", description: "New reservation" },
-              { id: "order_food_stay", title: "Order food / drinks", description: "Restaurant / room service" },
-              { id: "ask_question", title: "Questions", description: "Hotel information" },
-              { id: "talk_to_agent", title: "Reception", description: "Speak with staff" }
-            ]
-          }
-        ],
-        phoneNumberId: params.hotel.phoneNumberId,
-        conversationId: params.conversationId
-      });
-      return { recordedBody: params.menuBody };
-    } catch (err) {
-      console.error("WhatsApp main menu list send failed:", err instanceof Error ? err.message : String(err));
-      try {
-        await sendWhatsAppButtons({
-          to: params.to,
-          body: params.menuBody,
-          buttons: MENU_BUTTONS,
-          phoneNumberId: params.hotel.phoneNumberId,
-          conversationId: params.conversationId
-        });
-        return { recordedBody: params.menuBody };
-      } catch {
-        await sendWhatsAppText({
-          to: params.to,
-          body: params.fallbackBody,
-          phoneNumberId: params.hotel.phoneNumberId,
-          conversationId: params.conversationId
-        });
-        return { recordedBody: params.fallbackBody };
-      }
-    }
-  }
+  const isArabic = /[\u0600-\u06FF]/.test(params.menuBody);
+  const rows = isArabic
+    ? [
+        { id: "book_a_stay", title: "حجز إقامة", description: "التواريخ، الغرف، الوجبات، الدفع" },
+        { id: "hotel_info", title: "معلومات الفندق", description: "الموقع، إنستغرام، التواصل" },
+        { id: "browse_menu", title: "تصفح القائمة", description: "المطعم والمقهى" },
+        stay
+          ? { id: "order_food_stay", title: "طلب طعام", description: "خدمة الغرف / أمر مطبخ KOT" }
+          : { id: "ask_question", title: "اسأل سؤال", description: "الغرف، السياسات، المرافق" },
+        { id: "talk_to_agent", title: "الاستقبال", description: "التحدث مع موظف" }
+      ]
+    : [
+        { id: "book_a_stay", title: "Book a stay", description: "Dates, rooms, meals, payment" },
+        { id: "hotel_info", title: "Hotel info", description: "Location, Instagram, contacts" },
+        { id: "browse_menu", title: "Browse menu", description: "Restaurant / cafe items" },
+        stay
+          ? { id: "order_food_stay", title: "Order food", description: "Room service / restaurant KOT" }
+          : { id: "ask_question", title: "Ask question", description: "Rooms, policy, amenities" },
+        { id: "talk_to_agent", title: "Reception", description: "Speak with staff" }
+      ];
   try {
-    await sendWhatsAppButtons({
+    await sendWhatsAppList({
       to: params.to,
       body: params.menuBody,
-      buttons: MENU_BUTTONS,
+      buttonText: isArabic ? "الخدمات" : MAIN_MENU_LIST_CTA,
+      sections: [
+        {
+          title: isArabic ? "خدمات الضيف" : "Guest services",
+          rows
+        }
+      ],
       phoneNumberId: params.hotel.phoneNumberId,
       conversationId: params.conversationId
     });
     return { recordedBody: params.menuBody };
   } catch (err) {
-    console.error("WhatsApp main menu buttons send failed:", err instanceof Error ? err.message : String(err));
-    await sendWhatsAppText({
-      to: params.to,
-      body: params.fallbackBody,
-      phoneNumberId: params.hotel.phoneNumberId,
-      conversationId: params.conversationId
-    });
-    return { recordedBody: params.fallbackBody };
+    console.error("WhatsApp main menu list send failed:", err instanceof Error ? err.message : String(err));
+    try {
+      await sendWhatsAppButtons({
+        to: params.to,
+        body: params.menuBody,
+        buttons: MENU_BUTTONS,
+        phoneNumberId: params.hotel.phoneNumberId,
+        conversationId: params.conversationId
+      });
+      return { recordedBody: params.menuBody };
+    } catch {
+      await sendWhatsAppText({
+        to: params.to,
+        body: params.fallbackBody,
+        phoneNumberId: params.hotel.phoneNumberId,
+        conversationId: params.conversationId
+      });
+      return { recordedBody: params.fallbackBody };
+    }
   }
 }
 
@@ -415,9 +413,30 @@ function isMenuChoiceAskQuestion(text: string): boolean {
   const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "ask_question" || t === "ask a question" || t === "ask the chatbot" || t === "ask" || t === "questions";
 }
+function isMenuChoiceHotelInfo(text: string): boolean {
+  const t = normalizeMenuButtonInput(text).toLowerCase();
+  return t === "hotel_info" || t === "hotel info" || t === "location" || t === "instagram" || t === "contacts";
+}
+function isMenuChoiceBrowseMenu(text: string): boolean {
+  const t = normalizeMenuButtonInput(text).toLowerCase();
+  return t === "browse_menu" || t === "browse menu" || t === "restaurant menu" || t === "food menu";
+}
 function isMenuChoiceTalkToAgent(text: string): boolean {
   const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "talk_to_agent" || t === "talk to an agent" || t === "chat with a receptionist" || t === "agent" || t === "reception";
+}
+
+function buildHotelInfoHubMessage(hotelName: string, lang: string): string {
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(hotelName)}`;
+  const linksHeading = lang === "ar" ? "روابط مفيدة:" : "Useful links:";
+  const mapsLabel = lang === "ar" ? "الموقع على خرائط Google" : "Google Maps";
+  return [
+    getLocationAndHotelInfoForSubmenu(),
+    "",
+    linksHeading,
+    `${mapsLabel}: ${mapsUrl}`,
+    answerFromKnowledge("instagram contact").answer ?? ""
+  ].filter(Boolean).join("\n");
 }
 
 async function sendMobileBookingEntry(params: {
@@ -1960,6 +1979,68 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     return;
   }
 
+  if (!persisted.fbCartDraft && isMenuChoiceHotelInfo(input.text)) {
+    const body = buildHotelInfoHubMessage(hotel.displayName, persisted.language || "en");
+    await sendWhatsAppText({
+      to: normalizedPhone,
+      body,
+      phoneNumberId: hotel.phoneNumberId,
+      conversationId: conversation.id
+    });
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body,
+        aiIntent: "HOTEL_INFO_HUB",
+        aiConfidence: 0.95
+      }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  if (!persisted.fbCartDraft && isMenuChoiceBrowseMenu(input.text)) {
+    const initDraft = { purpose: "browse_only" as const, step: "category" as const, cart: [] };
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId: conversation.id,
+      phoneE164: normalizedPhone,
+      state: {
+        language: persisted.language || "en",
+        stage: persisted.stage || "new",
+        lastActivityAt: new Date().toISOString(),
+        conversationMode,
+        awaitingGuestName: false,
+        awaitingBookingLookup: persisted.awaitingBookingLookup,
+        myBookingCandidateIds: persisted.myBookingCandidateIds,
+        phoneNumberId: hotel.phoneNumberId,
+        checkIn: persisted.checkIn,
+        checkOut: persisted.checkOut,
+        guestCount: persisted.guestCount,
+        roomCount: persisted.roomCount,
+        suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+        suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+        suggestedPropertyId: persisted.suggestedPropertyId,
+        nights: persisted.nights,
+        totalAmount: persisted.totalAmount,
+        fbCartDraft: initDraft,
+        bookingFlowReturn: null
+      }
+    });
+    await sendFoodFlowOutbounds({
+      hotelId: hotel.id,
+      to: normalizedPhone,
+      phoneNumberId: hotel.phoneNumberId,
+      conversationId: conversation.id,
+      outbounds: [initialFbOrderList("browse_only")]
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
   const orderFoodStayTap = normalizeMenuButtonInput(input.text).toLowerCase() === "order_food_stay";
   if (
     !persisted.fbCartDraft &&
@@ -2129,6 +2210,21 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         outbounds: adv.outbound
       });
+    }
+
+    if (adv.viewFinished && persisted.bookingFlowReturn !== "meal_plan") {
+      const body =
+        (persisted.language || "en") === "ar"
+          ? "تم إغلاق تصفح القائمة. اكتب *menu* للعودة إلى الخدمات الرئيسية."
+          : "Menu browsing closed. Type *menu* to return to the main services.";
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
     }
 
     if (adv.prebookFinished && nextPrebook !== undefined && nextPrebook !== null) {

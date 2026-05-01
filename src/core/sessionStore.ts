@@ -225,7 +225,8 @@ function parseFbCartDraft(raw: unknown): FbCartDraftState | undefined {
   if (
     purpose !== "booking_prebook" &&
     purpose !== "stay" &&
-    purpose !== "meal_plan_view"
+    purpose !== "meal_plan_view" &&
+    purpose !== "browse_only"
   ) {
     return undefined;
   }

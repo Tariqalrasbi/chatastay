@@ -1,6 +1,6 @@
 import type { FbServiceMode } from "@prisma/client";
 
-export type FbCartPurpose = "booking_prebook" | "stay" | "meal_plan_view";
+export type FbCartPurpose = "booking_prebook" | "stay" | "meal_plan_view" | "browse_only";
 
 export type FbCartStep = "category" | "item" | "qty" | "add_more" | "service" | "time" | "confirm";
 
