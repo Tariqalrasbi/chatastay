@@ -15,11 +15,7 @@ jobs:
           username: ${{ secrets.DROPLET_USER }}
           key: ${{ secrets.DROPLET_SSH_KEY }}
           script: |
+            set -Eeuo pipefail
             cd /var/www/chatastay
-            git pull origin main
-            npm install
-            npx prisma generate
-            npx prisma migrate deploy
-            npm run build
-            pm2 restart chatastay || pm2 start npm --name chatastay -- start
-            pm2 save
+            git pull --ff-only origin main
+            npm run deploy:production
