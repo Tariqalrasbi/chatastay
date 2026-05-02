@@ -2675,20 +2675,30 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (isMenuChoiceBookStay(input.text)) {
-    const bookingEntry = await sendMobileBookingEntry({
-      hotel,
-      guestId: guest.id,
+    const bookingEntryBody = [
+      `Let's book your stay at ${hotel.displayName} here in WhatsApp.`,
+      "I will collect the details, show live room options, confirm the reservation, and keep all follow-up messages in this chat.",
+      "",
+      "First, how many adults will be staying?"
+    ].join("\n");
+    await sendCountSelectionListWithFallback({
       to: normalizedPhone,
-      language: persisted.language || "en",
-      conversationId: conversation.id
+      conversationId: conversation.id,
+      phoneNumberId: hotel.phoneNumberId,
+      body: bookingEntryBody,
+      buttonText: "Adults",
+      rowPrefix: "adults",
+      min: 1,
+      max: 8,
+      fallbackPrompt: bookingEntryBody + "\n\nReply with a number, e.g. 2."
     });
     await prisma.message.create({
       data: {
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: bookingEntry.body,
-        aiIntent: bookingEntry.channel === "flow" ? "MENU_BOOKING_FLOW" : "MENU_BOOKING_MOBILE_FORM",
+        body: bookingEntryBody,
+        aiIntent: "MENU_BOOKING_NATIVE_WHATSAPP_START",
         aiConfidence: 0.95
       }
     });
@@ -2705,17 +2715,30 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         awaitingGuestName: false,
         awaitingBookingLookup: false,
         myBookingCandidateIds: [],
-        bookingStep: null,
+        bookingStep: "adults",
         phoneNumberId: hotel.phoneNumberId,
-        checkIn: persisted.checkIn,
-        checkOut: persisted.checkOut,
-        guestCount: persisted.guestCount,
-        roomCount: persisted.roomCount,
-        suggestedRoomTypeId: persisted.suggestedRoomTypeId,
-        suggestedRoomTypeName: persisted.suggestedRoomTypeName,
-        suggestedPropertyId: persisted.suggestedPropertyId,
-        nights: persisted.nights,
-        totalAmount: persisted.totalAmount
+        checkIn: undefined,
+        checkOut: undefined,
+        checkInOptions: [],
+        checkOutOptions: [],
+        manualCheckInDate: false,
+        manualCheckOutDate: false,
+        guestCount: undefined,
+        roomCount: undefined,
+        adultCount: undefined,
+        childCount: undefined,
+        capacityPickRoomTypes: undefined,
+        bookingRoomOffers: undefined,
+        suggestedRoomTypeId: undefined,
+        suggestedRoomTypeName: undefined,
+        suggestedPropertyId: undefined,
+        nightlyRate: undefined,
+        nights: undefined,
+        totalAmount: undefined,
+        bookingMealPlanCode: null,
+        fbCartDraft: null,
+        pendingPrebookOrder: null,
+        bookingFlowReturn: null
       }
     });
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
