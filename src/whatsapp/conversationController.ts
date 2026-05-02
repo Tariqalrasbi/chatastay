@@ -29,6 +29,7 @@ import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import {
   type BookingStep,
   type ConversationMode,
+  type PersistentSessionState,
   createCalendarSessionLink,
   loadConversationSession,
   saveConversationSession,
@@ -683,6 +684,18 @@ function parseStepNumber(text: string, max: number, allowZero = false): number |
   return Number.isFinite(n) && n >= min && n <= max ? n : null;
 }
 
+function parseCountSelection(text: string, prefix: string, max: number, allowZero = false): number | null {
+  const trimmed = text.trim().toLowerCase();
+  const min = allowZero ? 0 : 1;
+  const prefixed = trimmed.match(new RegExp(`^${prefix}_(\\d{1,2})$`));
+  if (prefixed) {
+    const n = parseInt(prefixed[1] ?? "", 10);
+    return Number.isFinite(n) && n >= min && n <= max ? n : null;
+  }
+  if (/^[a-z]+_\d{1,2}$/.test(trimmed)) return null;
+  return parseStepNumber(trimmed, max, allowZero);
+}
+
 function bookingLang(lang: string | undefined): "ar" | "en" {
   return effectiveLang(lang);
 }
@@ -707,6 +720,23 @@ function bookingCopy(langRaw: string | undefined) {
     noSplitAvailability: ar
       ? "عذرًا، لا توجد غرف كافية لهذه التواريخ. جرّب عدد غرف مختلف أو تواريخ أخرى."
       : "Sorry, there are not enough rooms for those dates. Try a different room count or dates.",
+    noSingleRoomChoiceBody: ar
+      ? "لا توجد غرفة واحدة تناسب هذا العدد من الضيوف. ماذا تفضل؟"
+      : "No single room fits this group. What would you like to do?",
+    splitNow: ar ? "قسّم الغرف الآن" : "Split rooms now",
+    splitNowDesc: ar ? "اختر غرفتين أو أكثر واكمل الحجز" : "Choose 2+ rooms and continue booking",
+    talkReception: ar ? "تحدث مع الاستقبال" : "Talk to reception",
+    talkReceptionDesc: ar ? "يساعدك الموظف مباشرة" : "A staff member will help directly",
+    noAvailabilityBody: ar
+      ? "لا توجد غرف متاحة لهذا الاختيار. اختر ما تريد تغييره:"
+      : "No rooms are available for this choice. What would you like to change?",
+    availabilityRecoveryButton: ar ? "تعديل الطلب" : "Change request",
+    changeDates: ar ? "تغيير التواريخ" : "Change dates",
+    changeDatesDesc: ar ? "اختر وصول ومغادرة جديدة" : "Pick new check-in/out dates",
+    changeRooms: ar ? "تغيير عدد الغرف" : "Change room count",
+    changeRoomsDesc: ar ? "جرّب غرفة أكثر أو أقل" : "Try more or fewer rooms",
+    changeRoomType: ar ? "تغيير نوع الغرفة" : "Change room type",
+    changeRoomTypeDesc: ar ? "اختر نوع غرفة آخر" : "Choose another room type",
     checkInBody: ar
       ? "اختر تاريخ *الوصول*:\n\nافتح القائمة واختر التاريخ، أو اختر *تاريخ آخر* واكتب YYYY-MM-DD."
       : "Choose your *check-in* date:\n\nOpen the list below and tap a date, or choose *Other date* to type YYYY-MM-DD.",
@@ -773,6 +803,57 @@ async function buildLiveRoomTypesForBookingSubmenu(hotelId: string, currency: st
   );
 }
 
+async function sendNoSingleRoomChoiceMenu(params: {
+  hotelId: string;
+  conversationId: string;
+  to: string;
+  phoneNumberId?: string;
+  language?: string;
+  largest: Array<{ name: string; capacity: number }>;
+}): Promise<void> {
+  const copy = bookingCopy(params.language);
+  const hint =
+    params.largest.length > 0
+      ? "\n\n" + copy.largestOptions + "\n" + params.largest.map((r) => `• ${r.name} (${r.capacity})`).join("\n")
+      : "";
+  const body = `${copy.noSingleRoomChoiceBody}${hint}`;
+  try {
+    await sendWhatsAppList({
+      to: params.to,
+      body,
+      buttonText: copy.splitButton,
+      sections: [
+        {
+          title: copy.splitSection,
+          rows: [
+            { id: "split_rooms_now", title: copy.splitNow.slice(0, 24), description: copy.splitNowDesc.slice(0, 72) },
+            { id: "talk_to_reception", title: copy.talkReception.slice(0, 24), description: copy.talkReceptionDesc.slice(0, 72) }
+          ]
+        }
+      ],
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  } catch {
+    await sendWhatsAppText({
+      to: params.to,
+      body: `${body}\n\nReply *split* to split rooms, or *reception* to talk to reception.`,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  }
+  await prisma.message.create({
+    data: {
+      hotelId: params.hotelId,
+      conversationId: params.conversationId,
+      direction: MessageDirection.OUTBOUND,
+      body,
+      aiIntent: "BOOKING_NO_SINGLE_ROOM_CHOICE",
+      aiConfidence: 0.95
+    }
+  });
+}
+
 async function sendSplitRoomOptions(params: {
   hotelId: string;
   conversationId: string;
@@ -830,6 +911,98 @@ async function sendSplitRoomOptions(params: {
       body,
       aiIntent: "BOOKING_STEP_SPLIT_ROOMS",
       aiConfidence: 0.95
+    }
+  });
+}
+
+async function sendNoAvailabilityRecoveryMenu(params: {
+  hotelId: string;
+  conversationId: string;
+  to: string;
+  phoneNumberId?: string;
+  language?: string;
+  includeRoomType: boolean;
+}): Promise<void> {
+  const copy = bookingCopy(params.language);
+  const rows = [
+    { id: "no_avail_change_dates", title: copy.changeDates.slice(0, 24), description: copy.changeDatesDesc.slice(0, 72) },
+    { id: "no_avail_change_rooms", title: copy.changeRooms.slice(0, 24), description: copy.changeRoomsDesc.slice(0, 72) },
+    ...(params.includeRoomType
+      ? [{ id: "no_avail_change_room_type", title: copy.changeRoomType.slice(0, 24), description: copy.changeRoomTypeDesc.slice(0, 72) }]
+      : []),
+    { id: "no_avail_change_guests", title: copy.changeGuests.slice(0, 24), description: copy.changeGuestsDesc.slice(0, 72) },
+    { id: "talk_to_reception", title: copy.talkReception.slice(0, 24), description: copy.talkReceptionDesc.slice(0, 72) }
+  ];
+  try {
+    await sendWhatsAppList({
+      to: params.to,
+      body: copy.noAvailabilityBody,
+      buttonText: copy.availabilityRecoveryButton,
+      sections: [{ title: copy.availabilityRecoveryButton, rows }],
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  } catch {
+    await sendWhatsAppText({
+      to: params.to,
+      body: `${copy.noAvailabilityBody}\n\nReply: dates, rooms, guests,${params.includeRoomType ? " room type," : ""} or reception.`,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  }
+  await prisma.message.create({
+    data: {
+      hotelId: params.hotelId,
+      conversationId: params.conversationId,
+      direction: MessageDirection.OUTBOUND,
+      body: copy.noAvailabilityBody,
+      aiIntent: "BOOKING_NO_AVAILABILITY_RECOVERY",
+      aiConfidence: 0.95
+    }
+  });
+}
+
+async function switchBookingConversationToReception(params: {
+  hotelId: string;
+  guestId: string;
+  conversationId: string;
+  phoneE164: string;
+  to: string;
+  hotelDisplayName: string;
+  phoneNumberId?: string;
+  state: PersistentSessionState;
+}): Promise<void> {
+  await prisma.conversation.update({
+    where: { id: params.conversationId },
+    data: { agentHandoffAt: new Date(), lastMessageAt: new Date() }
+  });
+  const handoffBody = guestReceptionistHandoffMessage(params.hotelDisplayName);
+  await sendWhatsAppText({
+    to: params.to,
+    body: handoffBody,
+    phoneNumberId: params.phoneNumberId,
+    conversationId: params.conversationId
+  });
+  await prisma.message.create({
+    data: {
+      hotelId: params.hotelId,
+      conversationId: params.conversationId,
+      direction: MessageDirection.OUTBOUND,
+      body: handoffBody,
+      aiIntent: "AGENT_HANDOFF",
+      aiConfidence: 0.98
+    }
+  });
+  await saveConversationSession({
+    hotelId: params.hotelId,
+    guestId: params.guestId,
+    conversationId: params.conversationId,
+    phoneE164: params.phoneE164,
+    state: {
+      ...params.state,
+      conversationMode: "AGENT_MODE",
+      preHandoffConversationMode: "BOOKING_MODE",
+      lastActivityAt: new Date().toISOString()
     }
   });
 }
@@ -3726,6 +3899,152 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     }
 
+    const recoveryAction = normalizeText(input.text).replace(/\s+/g, "_");
+    if (
+      recoveryAction === "no_avail_change_dates" ||
+      recoveryAction === "change_dates" ||
+      recoveryAction === "dates"
+    ) {
+      await sendBookingCheckInPrompt({
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId,
+        language: persisted.language
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseState, stage: "new", bookingStep: "checkin", checkIn: undefined, checkOut: undefined }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (
+      recoveryAction === "no_avail_change_rooms" ||
+      recoveryAction === "change_room_count" ||
+      recoveryAction === "rooms"
+    ) {
+      await sendCountSelectionListWithFallback({
+        to: normalizedPhone,
+        conversationId: conversation.id,
+        phoneNumberId: hotel.phoneNumberId,
+        body: bookingLang(persisted.language) === "ar" ? "كم غرفة تحتاج؟" : "How many rooms do you need?",
+        buttonText: bookingLang(persisted.language) === "ar" ? "الغرف" : "Rooms",
+        rowPrefix: "rooms",
+        min: 1,
+        max: 6,
+        fallbackPrompt: bookingLang(persisted.language) === "ar" ? "اكتب عدد الغرف، مثل 1 أو 2." : "How many rooms do you need? Reply with a number, e.g. 1 or 2."
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseState, stage: "new", bookingStep: "rooms", checkOut: undefined }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (
+      recoveryAction === "no_avail_change_guests" ||
+      recoveryAction === "change_guests" ||
+      recoveryAction === "guests"
+    ) {
+      const copy = bookingCopy(persisted.language);
+      await sendCountSelectionListWithFallback({
+        to: normalizedPhone,
+        conversationId: conversation.id,
+        phoneNumberId: hotel.phoneNumberId,
+        body: copy.adultsPrompt,
+        buttonText: copy.adultsButton,
+        rowPrefix: "adults",
+        min: 1,
+        max: 8,
+        fallbackPrompt: copy.adultsFallback
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseState, stage: "new", bookingStep: "adults", adultCount: undefined, childCount: undefined, guestCount: undefined, roomCount: undefined, checkOut: undefined }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (
+      recoveryAction === "no_avail_change_room_type" ||
+      recoveryAction === "change_room_type" ||
+      recoveryAction === "room_type"
+    ) {
+      const adults = persisted.adultCount ?? 1;
+      const children = persisted.childCount ?? 0;
+      const totalGuests = adults + children;
+      const eligible = await getEligibleRoomTypesForBookingFlow(hotel.id, adults, children);
+      if (eligible.length > 0) {
+        await sendCapacityRoomTypePickList({
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          to: normalizedPhone,
+          phoneNumberId: hotel.phoneNumberId,
+          currency: hotel.currency,
+          adults,
+          children,
+          types: eligible
+        });
+        await saveConversationSession({
+          hotelId: hotel.id,
+          guestId: guest.id,
+          conversationId: conversation.id,
+          phoneE164: normalizedPhone,
+          state: {
+            ...baseState,
+            stage: "new",
+            bookingStep: "capacity_room_pick",
+            adultCount: adults,
+            childCount: children,
+            guestCount: totalGuests,
+            roomCount: 1,
+            checkOut: undefined,
+            capacityPickRoomTypes: eligible.map((t) => ({
+              roomTypeId: t.id,
+              name: t.name,
+              capacity: t.capacity,
+              baseNightlyRate: t.baseNightlyRate,
+              propertyId: t.propertyId
+            }))
+          }
+        });
+      } else {
+        await sendNoSingleRoomChoiceMenu({
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          to: normalizedPhone,
+          phoneNumberId: hotel.phoneNumberId,
+          language: persisted.language,
+          largest: await getLargestRoomTypesForFallback(hotel.id, 3)
+        });
+      }
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (recoveryAction === "talk_to_reception" || recoveryAction === "reception") {
+      await switchBookingConversationToReception({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        to: normalizedPhone,
+        hotelDisplayName: hotel.displayName,
+        phoneNumberId: hotel.phoneNumberId,
+        state: { ...baseState, stage: "new", bookingStep: step, adultCount: persisted.adultCount, childCount: persisted.childCount }
+      });
+      return;
+    }
+
     if (isBackOneStepText(input.text)) {
       const prev = previousBookingStep(step);
       if (prev === "submenu") {
@@ -3929,15 +4248,12 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         }));
         if (eligible.length === 0) {
           const largest = await getLargestRoomTypesForFallback(hotel.id, 3);
-          await sendSplitRoomOptions({
+          await sendNoSingleRoomChoiceMenu({
             hotelId: hotel.id,
             conversationId: conversation.id,
             to: normalizedPhone,
             phoneNumberId: hotel.phoneNumberId,
             language: persisted.language,
-            totalGuests: adults + children,
-            adults,
-            children,
             largest
           });
           await saveConversationSession({
@@ -4191,7 +4507,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
     if (step === "adults") {
       const copy = bookingCopy(persisted.language);
-      const num = parseStepNumber(input.text, 20);
+      const num = parseCountSelection(input.text, "adults", 20);
       if (num === null) {
         await sendCountSelectionListWithFallback({
           to: normalizedPhone,
@@ -4256,7 +4572,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
     if (step === "children") {
       const copy = bookingCopy(persisted.language);
-      const num = parseStepNumber(input.text, 20, true);
+      const num = parseCountSelection(input.text, "children", 20, true);
       if (num === null) {
         await sendCountSelectionListWithFallback({
           to: normalizedPhone,
@@ -4292,15 +4608,12 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         }));
         if (eligible.length === 0) {
           const largest = await getLargestRoomTypesForFallback(hotel.id, 3);
-          await sendSplitRoomOptions({
+          await sendNoSingleRoomChoiceMenu({
             hotelId: hotel.id,
             conversationId: conversation.id,
             to: normalizedPhone,
             phoneNumberId: hotel.phoneNumberId,
             language: persisted.language,
-            totalGuests,
-            adults,
-            children: num,
             largest
           });
           await saveConversationSession({
@@ -4355,9 +4668,39 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     if (step === "split_rooms") {
       const copy = bookingCopy(persisted.language);
       const raw = input.text.trim();
+      const normalizedRaw = normalizeText(raw).replace(/\s+/g, "_");
       const adults = persisted.adultCount ?? 1;
       const children = persisted.childCount ?? 0;
       const totalGuests = adults + children;
+      if (raw === "talk_to_reception" || normalizedRaw === "reception" || normalizedRaw === "talk_to_reception") {
+        await switchBookingConversationToReception({
+          hotelId: hotel.id,
+          guestId: guest.id,
+          conversationId: conversation.id,
+          phoneE164: normalizedPhone,
+          to: normalizedPhone,
+          hotelDisplayName: hotel.displayName,
+          phoneNumberId: hotel.phoneNumberId,
+          state: { ...baseState, stage: "new", bookingStep: "split_rooms", adultCount: adults, childCount: children, guestCount: totalGuests }
+        });
+        return;
+      }
+      if (raw === "split_rooms_now" || normalizedRaw === "split" || normalizedRaw === "split_rooms") {
+        const largest = await getLargestRoomTypesForFallback(hotel.id, 3);
+        await sendSplitRoomOptions({
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          to: normalizedPhone,
+          phoneNumberId: hotel.phoneNumberId,
+          language: persisted.language,
+          totalGuests,
+          adults,
+          children,
+          largest
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
       if (raw === "split_change_guests" || isBackOneStepText(raw)) {
         await sendCountSelectionListWithFallback({
           to: normalizedPhone,
@@ -4517,7 +4860,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
 
     if (step === "rooms") {
-      const num = parseStepNumber(input.text, 10);
+      const num = parseCountSelection(input.text, "rooms", 10);
       if (num === null) {
         await sendCountSelectionListWithFallback({
           to: normalizedPhone,
@@ -4836,23 +5179,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             : {})
         });
         if (offers.length === 0) {
-          const copy = bookingCopy(persisted.language);
-          const noAvailabilityBody = rooms > 1 ? copy.noSplitAvailability : "Sorry, no rooms are available for these dates. Please try different dates.";
-          await sendWhatsAppText({
+          await sendNoAvailabilityRecoveryMenu({
+            hotelId: hotel.id,
+            conversationId: conversation.id,
             to: normalizedPhone,
-            body: noAvailabilityBody,
             phoneNumberId: hotel.phoneNumberId,
-            conversationId: conversation.id
-          });
-          await prisma.message.create({
-            data: {
-              hotelId: hotel.id,
-              conversationId: conversation.id,
-              direction: MessageDirection.OUTBOUND,
-              body: noAvailabilityBody,
-              aiIntent: "BOOKING_STEP_NO_AVAILABILITY",
-              aiConfidence: 0.95
-            }
+            language: persisted.language,
+            includeRoomType: Boolean(persisted.suggestedRoomTypeId || persisted.capacityPickRoomTypes?.length)
           });
           await saveConversationSession({
             hotelId: hotel.id,
@@ -5578,6 +5911,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
     let paymentLink: string | null = null;
     let paymentLinkError: string | null = null;
+    let paymentLinkMissingSetup = false;
     try {
       const payment = await createBookingPaymentLink({
         hotelId: hotel.id,
@@ -5595,6 +5929,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     } catch (err) {
       if (err instanceof BookingPaymentLinkUnavailableError) {
         paymentLinkError = err.message;
+        paymentLinkMissingSetup = true;
         console.warn("[whatsapp booking] payment link skipped:", err.message);
       } else {
         paymentLinkError = err instanceof Error ? err.message : String(err);
@@ -5607,7 +5942,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         propertyId: booking.propertyId,
         roles: [UserRole.FRONTDESK, UserRole.FINANCE, UserRole.MANAGER, UserRole.OWNER],
         title: "WhatsApp booking needs payment follow-up",
-        body: `Booking ${booking.bookingId} was confirmed, but an automatic payment link was not sent.${paymentLinkError ? ` Reason: ${paymentLinkError}` : ""}`,
+        body: `Booking ${booking.bookingId} was confirmed, but an automatic payment link was not sent. ${
+          paymentLinkMissingSetup ? "Stripe is not enabled on this server. Set STRIPE_SECRET_KEY to enable automatic links." : "Stripe link creation failed during checkout."
+        }${paymentLinkError ? ` Reason: ${paymentLinkError}` : ""}`,
         category: "payments",
         severity: "high",
         link: `/admin/bookings/${encodeURIComponent(booking.bookingId)}`,
@@ -5659,7 +5996,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             `Booking ID: ${booking.bookingId}`,
             paymentLink
               ? `Secure payment link: ${paymentLink}`
-              : "Payment: the automatic payment link is not available right now. You can pay according to the hotel policy, and reception will follow up if needed."
+              : paymentLinkMissingSetup
+                ? "Payment: online payment is not enabled by the hotel yet. Your booking is received, and reception will follow up with the payment method."
+                : "Payment: the secure payment link could not be generated right now. Your booking is received, and reception will follow up with the payment method."
           ]
             .filter((x): x is string => typeof x === "string" && x.length > 0)
             .join("\n");
