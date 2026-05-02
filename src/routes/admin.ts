@@ -923,7 +923,7 @@ function getAdminLiveScript(): string {
       .catch(function () {});
   }
   function maybeReloadList() {
-    var p = (window.location.pathname || "").replace(/\/+$/, "") || "/";
+    var p = (window.location.pathname || "").replace(/\\/+$/, "") || "/";
     if (p !== "/admin/conversations") return;
     if (listReloadTimer) window.clearTimeout(listReloadTimer);
     listReloadTimer = window.setTimeout(function () {
