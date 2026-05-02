@@ -821,6 +821,8 @@ function getAdminLiveScript(): string {
   var pendingBadge = 0;
   var listReloadTimer = null;
   var audioCtx = null;
+  var detailRefreshInFlight = false;
+  var renderedMessageIds = new Set();
 
   function esc(s) {
     return String(s || "")
@@ -885,6 +887,12 @@ function getAdminLiveScript(): string {
     var n = document.querySelector("[data-chat-conversation-id]");
     return n ? n.getAttribute("data-chat-conversation-id") : null;
   }
+  function rememberRenderedMessages() {
+    document.querySelectorAll("[data-chat-message-id]").forEach(function (el) {
+      var id = el.getAttribute("data-chat-message-id");
+      if (id) renderedMessageIds.add(id);
+    });
+  }
   function buildBubble(m) {
     var inbound = m.direction === "INBOUND";
     var sender = inbound ? "Guest" : (m.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI");
@@ -893,16 +901,19 @@ function getAdminLiveScript(): string {
       intentHtml = '<p class="bubble-meta">Intent: ' + esc(m.aiIntent) + "</p>";
     }
     return (
-      '<article class="bubble ' + (inbound ? "inbound" : "outbound") + '">' +
+      '<article class="bubble ' + (inbound ? "inbound" : "outbound") + '" data-chat-message-id="' + esc(m.id) + '">' +
       '<div class="bubble-head"><span><strong>' + esc(sender) + '</strong></span><span>' + formatDt(m.createdAt) + "</span></div>" +
       '<p class="bubble-body">' + esc(m.body) + "</p>" + intentHtml + "</article>"
     );
   }
   function refreshDetailMessages(cid) {
+    if (detailRefreshInFlight) return;
     var wrap = document.querySelector("[data-chat-conversation-id]");
     if (!wrap || wrap.getAttribute("data-chat-conversation-id") !== cid) return;
+    rememberRenderedMessages();
     var since = wrap.getAttribute("data-chat-last-msg-at") || "";
     var url = "/admin/conversations/live/" + encodeURIComponent(cid) + "/messages?since=" + encodeURIComponent(since);
+    detailRefreshInFlight = true;
     fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (r) {
         if (r.status === 401 || r.status === 403) return null;
@@ -913,14 +924,17 @@ function getAdminLiveScript(): string {
         var timeline = document.querySelector(".chat-messages .timeline");
         if (!timeline) return;
         data.messages.forEach(function (m) {
+          if (m.id && renderedMessageIds.has(m.id)) return;
           timeline.insertAdjacentHTML("beforeend", buildBubble(m));
+          if (m.id) renderedMessageIds.add(m.id);
         });
         var last = data.messages[data.messages.length - 1];
         if (last && last.createdAt) wrap.setAttribute("data-chat-last-msg-at", last.createdAt);
         var cm = document.querySelector(".chat-messages");
         if (cm) cm.scrollTop = cm.scrollHeight;
       })
-      .catch(function () {});
+      .catch(function () {})
+      .finally(function () { detailRefreshInFlight = false; });
   }
   function maybeReloadList() {
     var p = (window.location.pathname || "").replace(/\\/+$/, "") || "/";
@@ -17796,7 +17810,7 @@ adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW")
       (message) => {
         const isInbound = message.direction === MessageDirection.INBOUND;
         const senderLabel = isInbound ? "Guest" : (message.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI");
-        return `<article class="bubble ${isInbound ? "inbound" : "outbound"}">
+        return `<article class="bubble ${isInbound ? "inbound" : "outbound"}" data-chat-message-id="${escapeHtml(message.id)}">
       <div class="bubble-head">
         <span><strong>${escapeHtml(senderLabel)}</strong></span>
         <span>${formatDateTime(message.createdAt)}</span>
@@ -17922,6 +17936,57 @@ ${replyError}
   res.type("html").send(renderLayout(content, true));
 });
 
+type StaffConversationMode = "IDLE" | "BOOKING_MODE" | "QUESTION_MODE" | "AGENT_MODE";
+
+function parseConversationMetadata(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isConversationMode(raw: unknown): raw is StaffConversationMode {
+  return raw === "IDLE" || raw === "BOOKING_MODE" || raw === "QUESTION_MODE" || raw === "AGENT_MODE";
+}
+
+function inferResumeConversationMode(meta: Record<string, unknown>): Exclude<StaffConversationMode, "AGENT_MODE"> {
+  if (meta.preHandoffConversationMode === "BOOKING_MODE" || meta.preHandoffConversationMode === "QUESTION_MODE" || meta.preHandoffConversationMode === "IDLE") {
+    return meta.preHandoffConversationMode;
+  }
+  if (typeof meta.bookingStep === "string" || Boolean(meta.awaitingGuestName)) return "BOOKING_MODE";
+  if (meta.conversationMode === "QUESTION_MODE") return "QUESTION_MODE";
+  return "IDLE";
+}
+
+function buildResumePromptForConversation(hotelName: string, meta: Record<string, unknown>): string {
+  const mode = inferResumeConversationMode(meta);
+  if (mode !== "BOOKING_MODE") return guestChatbotResumeMessage(hotelName);
+
+  const step = typeof meta.bookingStep === "string" ? meta.bookingStep : "";
+  const suffix =
+    step === "adults"
+      ? "Please continue with the number of adults."
+      : step === "children"
+        ? "Please continue with the number of children."
+        : step === "split_rooms"
+          ? "Please continue by choosing how many rooms to split the guests into."
+          : step === "checkin"
+            ? "Please continue with your check-in date."
+            : step === "checkout"
+              ? "Please continue with your check-out date."
+              : step === "room_choice"
+                ? "Please continue by selecting one of the live room options I showed."
+                : step === "meal_plan"
+                  ? "Please continue by choosing your meal package."
+                  : Boolean(meta.awaitingGuestName)
+                    ? "Please continue with the full guest name for the reservation."
+                    : "Please continue your booking from where you left off.";
+  return `${guestChatbotResumeMessage(hotelName)}\n\n${suffix}`;
+}
+
 adminRouter.post("/conversations/:id/switch-to-receptionist", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
@@ -17944,17 +18009,20 @@ adminRouter.post("/conversations/:id/switch-to-receptionist", requirePermission(
   const session = await prisma.conversationSession.findUnique({
     where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } }
   });
-  if (session?.metadataJson) {
-    try {
-      const meta = JSON.parse(session.metadataJson) as Record<string, unknown>;
-      meta.conversationMode = "AGENT_MODE";
-      await prisma.conversationSession.update({
-        where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
-        data: { metadataJson: JSON.stringify(meta) }
-      });
-    } catch {
-      // ignore parse error
+  if (session) {
+    const meta = parseConversationMetadata(session.metadataJson);
+    const currentMode = isConversationMode(meta.conversationMode) ? meta.conversationMode : undefined;
+    if (currentMode && currentMode !== "AGENT_MODE") {
+      meta.preHandoffConversationMode = currentMode;
+    } else if (!meta.preHandoffConversationMode && (typeof meta.bookingStep === "string" || Boolean(meta.awaitingGuestName))) {
+      meta.preHandoffConversationMode = "BOOKING_MODE";
     }
+    meta.conversationMode = "AGENT_MODE";
+    meta.lastActivityAt = new Date().toISOString();
+    await prisma.conversationSession.update({
+      where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
+      data: { metadataJson: JSON.stringify(meta), expiresAt: new Date(Date.now() + 20 * 60 * 1000) }
+    });
   }
   const handoffBody = guestReceptionistHandoffMessage(hotel.displayName);
   const toPhone = normalizePhoneForWhatsApp(conversation.guest.phoneE164);
@@ -18012,19 +18080,19 @@ adminRouter.post("/conversations/:id/end-agent-handoff", requirePermission("CONV
   const session = await prisma.conversationSession.findUnique({
     where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } }
   });
+  let resumeBody = guestChatbotResumeMessage(hotel.displayName);
   if (session?.metadataJson) {
-    try {
-      const meta = JSON.parse(session.metadataJson) as Record<string, unknown>;
-      meta.conversationMode = "IDLE";
-      await prisma.conversationSession.update({
-        where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
-        data: { metadataJson: JSON.stringify(meta) }
-      });
-    } catch {
-      // ignore parse error
-    }
+    const meta = parseConversationMetadata(session.metadataJson);
+    const resumeMode = inferResumeConversationMode(meta);
+    resumeBody = buildResumePromptForConversation(hotel.displayName, meta);
+    meta.conversationMode = resumeMode;
+    meta.preHandoffConversationMode = null;
+    meta.lastActivityAt = new Date().toISOString();
+    await prisma.conversationSession.update({
+      where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
+      data: { metadataJson: JSON.stringify(meta), expiresAt: new Date(Date.now() + 20 * 60 * 1000) }
+    });
   }
-  const resumeBody = guestChatbotResumeMessage(hotel.displayName);
   const toPhone = normalizePhoneForWhatsApp(conversation.guest.phoneE164);
   const partner = loadPartnerSetupConfig(hotel.id);
   if (toPhone) {

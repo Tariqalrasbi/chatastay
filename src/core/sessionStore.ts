@@ -9,6 +9,7 @@ export type BookingStep =
   | "adults"
   | "children"
   | "capacity_room_pick"
+  | "split_rooms"
   | "rooms"
   | "checkin"
   | "checkout"
@@ -21,6 +22,7 @@ export type PersistentSessionState = {
   stage: string;
   lastActivityAt?: string;
   conversationMode?: ConversationMode;
+  preHandoffConversationMode?: Exclude<ConversationMode, "AGENT_MODE">;
   awaitingGuestName?: boolean;
   quoteConfirmedAt?: string;
   quoteConfirmedActionKey?: string;
@@ -131,6 +133,12 @@ export async function loadConversationSession(params: {
     stage: persisted.stage,
     lastActivityAt: persistedLastActivityRaw ?? persisted.updatedAt.toISOString(),
     conversationMode: (metadata.conversationMode as ConversationMode) || "IDLE",
+    preHandoffConversationMode:
+      metadata.preHandoffConversationMode === "BOOKING_MODE" ||
+      metadata.preHandoffConversationMode === "QUESTION_MODE" ||
+      metadata.preHandoffConversationMode === "IDLE"
+        ? metadata.preHandoffConversationMode
+        : undefined,
     awaitingGuestName: Boolean(metadata.awaitingGuestName),
     quoteConfirmedAt: typeof metadata.quoteConfirmedAt === "string" ? metadata.quoteConfirmedAt : undefined,
     quoteConfirmedActionKey:
@@ -155,6 +163,7 @@ export async function loadConversationSession(params: {
         "adults",
         "children",
         "capacity_room_pick",
+        "split_rooms",
         "rooms",
         "checkin",
         "checkout",
@@ -297,6 +306,7 @@ export async function saveConversationSession(params: {
   const metadata = {
     lastActivityAt: params.state.lastActivityAt ?? nowIso,
     conversationMode: params.state.conversationMode ?? "IDLE",
+    preHandoffConversationMode: params.state.preHandoffConversationMode ?? null,
     awaitingGuestName: Boolean(params.state.awaitingGuestName),
     quoteConfirmedAt: params.state.quoteConfirmedAt ?? null,
     quoteConfirmedActionKey: params.state.quoteConfirmedActionKey ?? null,
