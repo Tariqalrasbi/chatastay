@@ -751,7 +751,9 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
   const queryHotel = typeof req.query.hotel === "string" ? req.query.hotel.trim() : "";
   const bodyHotelSlug = typeof req.body?.hotelSlug === "string" ? req.body.hotelSlug.trim() : "";
   const bodyHotel = typeof req.body?.hotel === "string" ? req.body.hotel.trim() : "";
-  const raw = queryHotel || bodyHotelSlug || bodyHotel;
+  const bodyLoginId = typeof req.body?.loginId === "string" ? req.body.loginId.trim() : "";
+  const bodyLoginHotelKey = /^\d+$/.test(bodyLoginId) || bodyLoginId.includes("-") ? bodyLoginId : "";
+  const raw = queryHotel || bodyHotelSlug || bodyHotel || bodyLoginHotelKey;
   if (!raw) {
     return {
       id: "",
@@ -790,25 +792,20 @@ async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
 }
 
 function loginPageHtml(hotel?: LoginHotelContext): string {
-  const hotelSlug = hotel?.slug ?? "";
-  const hotelAccountKey = hotel ? hotelAccountKeyForLogin(hotel) : hotelSlug;
+  const hotelAccountKey = hotel?.id ? hotelAccountKeyForLogin(hotel) : "";
   const hotelDisplayName = hotel?.displayName ?? "ChatStay Hotel Portal";
   const isKnownHotel = Boolean(hotel?.id);
-  const hotelSlugField = isKnownHotel
-    ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelAccountKey)}" />`
-    : `<label class="login-label" for="loginHotelSlug">Hotel account number</label><input class="login-input" id="loginHotelSlug" type="text" name="hotelSlug" value="${escapeHtml(
-        hotelAccountKey
-      )}" required autocomplete="organization" inputmode="numeric" placeholder="1" />`;
+  const hotelContextField = isKnownHotel ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelAccountKey)}" />` : "";
   const invalidHotelNotice =
     hotel?.requestedKey && !hotel.id
       ? `<p class="badge alert">No hotel account found for <code>${escapeHtml(hotel.requestedKey)}</code>. Use the numeric account number from the Owner Console.</p>`
       : "";
   return readView("login.html")
     .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
-    .replace('action="/admin/login"', `action="/admin/login?hotel=${encodeURIComponent(hotelAccountKey)}"`)
+    .replace("{{LOGIN_ID_VALUE}}", escapeHtml(hotelAccountKey))
     .replace(
       '<fieldset class="login-fieldset" id="loginFieldsetUnified">',
-      `<fieldset class="login-fieldset" id="loginFieldsetUnified">${invalidHotelNotice}${hotelSlugField}`
+      `<fieldset class="login-fieldset" id="loginFieldsetUnified">${invalidHotelNotice}${hotelContextField}`
     )
     .replaceAll('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelAccountKey)}"`)
     .replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
@@ -3644,11 +3641,134 @@ async function consumePasswordResetToken(rawToken: string, newPassword: string):
   return { ok: true };
 }
 
+type LoginHotelRecord = {
+  id: string;
+  slug: string;
+  displayName: string;
+  accountNumber?: number | null;
+};
+
+type LoginHotelUserRecord = {
+  id: string;
+  fullName: string;
+  email: string | null;
+  username: string | null;
+  role: UserRole;
+  isActive: boolean;
+  passwordHash: string | null;
+  pinHash: string | null;
+};
+
+function loginIdentifierFromRequest(req: Request): string {
+  return String(req.body.loginId ?? req.body.email ?? req.body.username ?? "").trim().toLowerCase();
+}
+
+function loginCredentialFromRequest(req: Request): string {
+  return String(req.body.password ?? req.body.pin ?? "").trim();
+}
+
+function identifierLooksLikeHotelKey(identifier: string, hotel: LoginHotelContext | LoginHotelRecord): boolean {
+  const key = identifier.trim().toLowerCase();
+  return key === String(hotel.accountNumber ?? "") || key === hotel.slug.toLowerCase();
+}
+
+async function verifyHotelUserCredential(user: LoginHotelUserRecord, credential: string): Promise<boolean> {
+  const passwordOk = user.passwordHash ? await verifySecret(credential, user.passwordHash) : false;
+  const pinOk = user.pinHash ? await verifyPin(credential, user.pinHash) : false;
+  return passwordOk || pinOk;
+}
+
+async function findHotelUserByIdentifier(hotelId: string, identifier: string): Promise<LoginHotelUserRecord | null> {
+  if (!identifier) return null;
+  return prisma.hotelUser.findFirst({
+    where: {
+      hotelId,
+      OR: [{ email: identifier }, { username: identifier }]
+    },
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+      username: true,
+      role: true,
+      isActive: true,
+      passwordHash: true,
+      pinHash: true
+    }
+  });
+}
+
+async function findSingleHotelUserByCredential(hotelId: string, credential: string): Promise<LoginHotelUserRecord | null> {
+  if (!credential) return null;
+  const users = await prisma.hotelUser.findMany({
+    where: {
+      hotelId,
+      isActive: true,
+      OR: [{ passwordHash: { not: "" } }, { pinHash: { not: null } }]
+    },
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+      username: true,
+      role: true,
+      isActive: true,
+      passwordHash: true,
+      pinHash: true
+    }
+  });
+  const matches: LoginHotelUserRecord[] = [];
+  for (const user of users) {
+    if (await verifyHotelUserCredential(user, credential)) matches.push(user);
+    if (matches.length > 1) return null;
+  }
+  return matches[0] ?? null;
+}
+
+async function issueHotelUserLogin(
+  req: Request,
+  res: Response,
+  hotel: LoginHotelRecord,
+  hotelUser: LoginHotelUserRecord,
+  loginHotel: LoginHotelContext,
+  action: "UNIFIED_LOGIN_SUCCESS" | "STAFF_LOGIN_SUCCESS" = "UNIFIED_LOGIN_SUCCESS"
+): Promise<string> {
+  const principal = hotelUser.email ?? hotelUser.username ?? hotelUser.id;
+  const effectivePermissions = effectivePermissionsForHotelUser(principal, hotelUser.role);
+  issueAdminSession(res, {
+    staffId: hotelUser.id,
+    email: principal,
+    role: String(hotelUser.role),
+    permissions: effectivePermissions,
+    staffName: hotelUser.fullName,
+    hotelId: hotel.id,
+    hotelSlug: hotel.slug,
+    hotelName: hotel.displayName,
+    hotelAccountNumber: hotel.accountNumber ?? loginHotel.accountNumber ?? null
+  });
+  await prisma.hotelUser.update({
+    where: { id: hotelUser.id },
+    data: { lastLoginAt: new Date() }
+  });
+  await prisma.auditLog.create({
+    data: {
+      hotelId: hotel.id,
+      actorUserId: hotelUser.id,
+      actorEmail: principal,
+      action,
+      entityType: "Auth",
+      entityId: hotelUser.id,
+      metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
+    }
+  });
+  return String(hotelUser.role);
+}
+
 async function authenticateEmailLogin(req: Request, res: Response): Promise<string | null> {
-  const identifier = String(req.body.email ?? req.body.username ?? "").trim().toLowerCase();
-  const credential = String(req.body.password ?? req.body.pin ?? "").trim();
+  const identifier = loginIdentifierFromRequest(req);
+  const credential = loginCredentialFromRequest(req);
   const loginHotel = await resolveLoginHotel(req);
-  if (!loginHotel.id) return null;
+  if (!identifier || !credential) return null;
 
   const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@chatastay.local").trim().toLowerCase();
   const adminPassword = (process.env.ADMIN_PASSWORD ?? "admin123").trim();
@@ -3668,48 +3788,51 @@ async function authenticateEmailLogin(req: Request, res: Response): Promise<stri
     return "MANAGER";
   }
   try {
-    const hotel = await prisma.hotel.findUnique({ where: { id: loginHotel.id } });
+    const hotel = loginHotel.id
+      ? await prisma.hotel.findUnique({
+          where: { id: loginHotel.id },
+          select: { id: true, slug: true, displayName: true }
+        })
+        .then((h) => (h ? { ...h, accountNumber: loginHotel.accountNumber ?? null } : null))
+      : null;
     if (hotel) {
-      const hotelUser = await prisma.hotelUser.findFirst({
+      const hotelUser = identifierLooksLikeHotelKey(identifier, hotel)
+        ? await findSingleHotelUserByCredential(hotel.id, credential)
+        : await findHotelUserByIdentifier(hotel.id, identifier);
+      if (hotelUser?.isActive && (await verifyHotelUserCredential(hotelUser, credential))) {
+        return issueHotelUserLogin(req, res, hotel, hotelUser, loginHotel);
+      }
+    }
+    if (!loginHotel.id && !/^\d+$/.test(identifier)) {
+      const users = await prisma.hotelUser.findMany({
         where: {
-          hotelId: hotel.id,
+          isActive: true,
           OR: [{ email: identifier }, { username: identifier }]
+        },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          username: true,
+          role: true,
+          isActive: true,
+          passwordHash: true,
+          pinHash: true,
+          hotelId: true
         }
       });
-      if (hotelUser?.isActive && (hotelUser.passwordHash || hotelUser.pinHash)) {
-        const passwordOk = hotelUser.passwordHash ? await verifySecret(credential, hotelUser.passwordHash) : false;
-        const pinOk = hotelUser.pinHash ? await verifyPin(credential, hotelUser.pinHash) : false;
-        if (passwordOk || pinOk) {
-          const principal = hotelUser.email ?? hotelUser.username ?? identifier;
-          const effectivePermissions = effectivePermissionsForHotelUser(principal, hotelUser.role);
-          issueAdminSession(res, {
-            staffId: hotelUser.id,
-            email: principal,
-            role: String(hotelUser.role),
-            permissions: effectivePermissions,
-            staffName: hotelUser.fullName,
-            hotelId: hotel.id,
-            hotelSlug: hotel.slug,
-            hotelName: hotel.displayName,
-            hotelAccountNumber: loginHotel.accountNumber ?? null
-          });
-          await prisma.hotelUser.update({
-            where: { id: hotelUser.id },
-            data: { lastLoginAt: new Date() }
-          });
-          await prisma.auditLog.create({
-            data: {
-              hotelId: hotel.id,
-              actorUserId: hotelUser.id,
-              actorEmail: principal,
-              action: "UNIFIED_LOGIN_SUCCESS",
-              entityType: "Auth",
-              entityId: hotelUser.id,
-              metadataJson: JSON.stringify({ role: String(hotelUser.role), ip: getRequestIp(req) })
-            }
-          });
-          return String(hotelUser.role);
-        }
+      const matches = [];
+      for (const user of users) {
+        if (await verifyHotelUserCredential(user, credential)) matches.push(user);
+        if (matches.length > 1) return null;
+      }
+      const matched = matches[0];
+      if (matched) {
+        const matchedHotel = await prisma.hotel.findUnique({
+          where: { id: matched.hotelId },
+          select: { id: true, slug: true, displayName: true }
+        });
+        if (matchedHotel) return issueHotelUserLogin(req, res, matchedHotel, matched, loginHotel);
       }
     }
   } catch (err) {
@@ -4187,7 +4310,6 @@ adminRouter.post("/logout", (req, res) => {
     "Set-Cookie",
     `${sessionCookieName}=; HttpOnly; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax`
   );
-  res.setHeader("Clear-Site-Data", '"cache"');
   res.redirect(303, "/admin/login");
 });
 

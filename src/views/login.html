@@ -4,22 +4,22 @@
     <p class="muted login-card-sub">Al Ashkhara Beach Resort — one portal for management and operations.</p>
 
     <p class="login-mode-hint" id="loginModeHint" aria-live="polite">
-      Enter your hotel account number and your own credentials. Your workspace opens automatically based on your role.
+      Enter your hotel ID or staff username, then your password/PIN. Your workspace opens automatically based on your role.
     </p>
 
     <div id="loginPanelUnified" class="login-panel">
       <form method="post" action="/admin/login" id="loginFormUnified">
         <fieldset class="login-fieldset" id="loginFieldsetUnified">
-          <label class="login-label" for="loginEmail">Email or username</label>
+          <label class="login-label" for="loginId">Hotel ID / username</label>
           <input
             class="login-input"
-            id="loginEmail"
+            id="loginId"
             type="text"
-            name="email"
+            name="loginId"
             required
             autocomplete="username"
-            inputmode="email"
-            placeholder="you@hotel.com or frontdesk"
+            value="{{LOGIN_ID_VALUE}}"
+            placeholder="1 or jaweed"
           />
           <label class="login-label" for="loginPassword">Password or PIN</label>
           <input
@@ -205,7 +205,7 @@
 
     wireSubmitLoading(form, btn, LABEL_MGMT_LOADING, LABEL_MGMT_DEFAULT);
     requestAnimationFrame(function () {
-      var e = document.getElementById("loginEmail");
+      var e = document.getElementById("loginId");
       if (e && !e.disabled) e.focus({ preventScroll: true });
     });
   })();
