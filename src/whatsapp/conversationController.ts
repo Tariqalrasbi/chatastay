@@ -526,12 +526,13 @@ function isBookingSummaryReturnText(text: string): boolean {
     t === "booking summary" ||
     t === "final confirmation" ||
     t === "return to summary" ||
-    t === "resume booking"
+    t === "resume booking" ||
+    t === "resume_booking"
   );
 }
 
 type QuoteReplyAction = "cancel" | "change_details" | "confirm" | null;
-type QuoteEditTarget = "dates" | "guests" | "rooms" | "meal_plan";
+type QuoteEditTarget = "dates" | "guests" | "rooms" | "meal_plan" | "payment";
 
 function parseQuoteReplyAction(text: string): QuoteReplyAction {
   const normalized = normalizeText(text);
@@ -615,6 +616,9 @@ function parseQuoteEditTarget(text: string): QuoteEditTarget | null {
   ) {
     return "meal_plan";
   }
+  if (compact === "edit_payment" || compact === "change_payment" || compact === "payment" || normalized.includes("payment")) {
+    return "payment";
+  }
   return null;
 }
 
@@ -696,6 +700,31 @@ function parseCountSelection(text: string, prefix: string, max: number, allowZer
   return parseStepNumber(trimmed, max, allowZero);
 }
 
+function addCalendarDays(input: Date, days: number): Date {
+  const next = new Date(input);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function isUniversalChangeBookingRequest(text: string): boolean {
+  const normalized = normalizeText(text);
+  const compact = normalized.replace(/\s+/g, "_");
+  return [
+    "change",
+    "edit",
+    "change_booking",
+    "edit_booking",
+    "change_details",
+    "edit_details",
+    "modify_booking",
+    "update_booking",
+    "تغيير",
+    "تعديل",
+    "تعديل_الحجز",
+    "تغيير_الحجز"
+  ].includes(compact);
+}
+
 function bookingLang(lang: string | undefined): "ar" | "en" {
   return effectiveLang(lang);
 }
@@ -737,6 +766,19 @@ function bookingCopy(langRaw: string | undefined) {
     changeRoomsDesc: ar ? "جرّب غرفة أكثر أو أقل" : "Try more or fewer rooms",
     changeRoomType: ar ? "تغيير نوع الغرفة" : "Change room type",
     changeRoomTypeDesc: ar ? "اختر نوع غرفة آخر" : "Choose another room type",
+    changeMenuBody: ar ? "ما الذي تريد تغييره في الحجز؟" : "What would you like to change in the booking?",
+    changeMenuButton: ar ? "تعديل الحجز" : "Change booking",
+    changeMealPlan: ar ? "تغيير الوجبات" : "Change meal plan",
+    changeMealPlanDesc: ar ? "غرفة فقط أو نصف/كامل إقامة" : "Room only or board options",
+    changePayment: ar ? "تغيير الدفع" : "Change payment",
+    changePaymentDesc: ar ? "الدفع الآن أو لاحقاً" : "Pay now or pay later",
+    paymentChoiceBody: ar ? "كيف تفضل إكمال الدفع؟" : "How would you like to handle payment?",
+    payOnline: ar ? "الدفع الإلكتروني" : "Pay online",
+    payOnlineDesc: ar ? "إرسال رابط دفع آمن عند التأكيد" : "Send a secure link after confirmation",
+    payAtHotel: ar ? "الدفع في الفندق" : "Pay at hotel",
+    payAtHotelDesc: ar ? "يكمل الاستقبال الدفع لاحقاً" : "Reception can follow up later",
+    nearestDatesIntro: ar ? "أقرب خيارات متاحة:" : "Nearest available options:",
+    tryDate: (date: string) => (ar ? `جرّب ${date}` : `Try ${date}`),
     checkInBody: ar
       ? "اختر تاريخ *الوصول*:\n\nافتح القائمة واختر التاريخ، أو اختر *تاريخ آخر* واكتب YYYY-MM-DD."
       : "Choose your *check-in* date:\n\nOpen the list below and tap a date, or choose *Other date* to type YYYY-MM-DD.",
@@ -922,9 +964,15 @@ async function sendNoAvailabilityRecoveryMenu(params: {
   phoneNumberId?: string;
   language?: string;
   includeRoomType: boolean;
+  nearestDates?: string[];
 }): Promise<void> {
   const copy = bookingCopy(params.language);
   const rows = [
+    ...(params.nearestDates ?? []).slice(0, 3).map((date) => ({
+      id: `try_checkin_${date}`,
+      title: copy.tryDate(date).slice(0, 24),
+      description: copy.changeDatesDesc.slice(0, 72)
+    })),
     { id: "no_avail_change_dates", title: copy.changeDates.slice(0, 24), description: copy.changeDatesDesc.slice(0, 72) },
     { id: "no_avail_change_rooms", title: copy.changeRooms.slice(0, 24), description: copy.changeRoomsDesc.slice(0, 72) },
     ...(params.includeRoomType
@@ -936,7 +984,9 @@ async function sendNoAvailabilityRecoveryMenu(params: {
   try {
     await sendWhatsAppList({
       to: params.to,
-      body: copy.noAvailabilityBody,
+      body:
+        copy.noAvailabilityBody +
+        ((params.nearestDates ?? []).length ? `\n\n${copy.nearestDatesIntro} ${(params.nearestDates ?? []).slice(0, 3).join(", ")}` : ""),
       buttonText: copy.availabilityRecoveryButton,
       sections: [{ title: copy.availabilityRecoveryButton, rows }],
       phoneNumberId: params.phoneNumberId,
@@ -945,7 +995,9 @@ async function sendNoAvailabilityRecoveryMenu(params: {
   } catch {
     await sendWhatsAppText({
       to: params.to,
-      body: `${copy.noAvailabilityBody}\n\nReply: dates, rooms, guests,${params.includeRoomType ? " room type," : ""} or reception.`,
+      body: `${copy.noAvailabilityBody}${
+        (params.nearestDates ?? []).length ? `\n${copy.nearestDatesIntro} ${(params.nearestDates ?? []).slice(0, 3).join(", ")}` : ""
+      }\n\nReply: dates, rooms, guests,${params.includeRoomType ? " room type," : ""} or reception.`,
       phoneNumberId: params.phoneNumberId,
       conversationId: params.conversationId
     });
@@ -955,11 +1007,93 @@ async function sendNoAvailabilityRecoveryMenu(params: {
       hotelId: params.hotelId,
       conversationId: params.conversationId,
       direction: MessageDirection.OUTBOUND,
-      body: copy.noAvailabilityBody,
+      body:
+        copy.noAvailabilityBody +
+        ((params.nearestDates ?? []).length ? `\n${copy.nearestDatesIntro} ${(params.nearestDates ?? []).slice(0, 3).join(", ")}` : ""),
       aiIntent: "BOOKING_NO_AVAILABILITY_RECOVERY",
       aiConfidence: 0.95
     }
   });
+}
+
+async function sendUniversalBookingChangeMenu(params: {
+  hotelId: string;
+  conversationId: string;
+  to: string;
+  phoneNumberId?: string;
+  language?: string;
+  includeRoomType: boolean;
+}): Promise<void> {
+  const copy = bookingCopy(params.language);
+  const rows = [
+    { id: "no_avail_change_dates", title: copy.changeDates.slice(0, 24), description: copy.changeDatesDesc.slice(0, 72) },
+    { id: "no_avail_change_guests", title: copy.changeGuests.slice(0, 24), description: copy.changeGuestsDesc.slice(0, 72) },
+    { id: "no_avail_change_rooms", title: copy.changeRooms.slice(0, 24), description: copy.changeRoomsDesc.slice(0, 72) },
+    ...(params.includeRoomType
+      ? [{ id: "no_avail_change_room_type", title: copy.changeRoomType.slice(0, 24), description: copy.changeRoomTypeDesc.slice(0, 72) }]
+      : []),
+    { id: "edit_meal_plan", title: copy.changeMealPlan.slice(0, 24), description: copy.changeMealPlanDesc.slice(0, 72) },
+    { id: "edit_payment", title: copy.changePayment.slice(0, 24), description: copy.changePaymentDesc.slice(0, 72) },
+    { id: "talk_to_reception", title: copy.talkReception.slice(0, 24), description: copy.talkReceptionDesc.slice(0, 72) }
+  ];
+  try {
+    await sendWhatsAppList({
+      to: params.to,
+      body: copy.changeMenuBody,
+      buttonText: copy.changeMenuButton,
+      sections: [{ title: copy.changeMenuButton, rows }],
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  } catch {
+    await sendWhatsAppText({
+      to: params.to,
+      body: `${copy.changeMenuBody}\n\nReply: dates, guests, rooms, meal plan, payment, or reception.`,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  }
+  await prisma.message.create({
+    data: {
+      hotelId: params.hotelId,
+      conversationId: params.conversationId,
+      direction: MessageDirection.OUTBOUND,
+      body: copy.changeMenuBody,
+      aiIntent: "BOOKING_CHANGE_MENU",
+      aiConfidence: 0.95
+    }
+  });
+}
+
+async function findNearestAvailableCheckIns(params: {
+  hotelId: string;
+  fromDate: Date;
+  nights: number;
+  guests: number;
+  rooms: number;
+  adults?: number;
+  children?: number;
+  days?: number;
+}): Promise<string[]> {
+  const start = new Date(params.fromDate);
+  start.setHours(0, 0, 0, 0);
+  const found: string[] = [];
+  for (let offset = 1; offset <= (params.days ?? 14) && found.length < 3; offset += 1) {
+    const checkIn = addCalendarDays(start, offset);
+    const checkOut = addCalendarDays(checkIn, Math.max(1, params.nights));
+    const offers = await findAvailableRoomTypes({
+      hotelId: params.hotelId,
+      checkIn,
+      checkOut,
+      guests: params.guests,
+      rooms: params.rooms,
+      ...(typeof params.adults === "number" && typeof params.children === "number"
+        ? { adults: params.adults, children: params.children }
+        : {})
+    });
+    if (offers.length > 0) found.push(checkIn.toISOString().slice(0, 10));
+  }
+  return found;
 }
 
 async function switchBookingConversationToReception(params: {
@@ -3257,6 +3391,28 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
   const quoteEditTarget = parseQuoteEditTarget(input.text);
   const quoteAction = parseQuoteReplyAction(input.text);
+  const compactBookingAction = normalizeText(input.text).replace(/\s+/g, "_");
+  if (conversationMode === "BOOKING_MODE" && (compactBookingAction === "pay_online" || compactBookingAction === "pay_at_hotel")) {
+    const preference = compactBookingAction === "pay_online" ? "PAY_NOW" : "PAY_LATER";
+    const body =
+      preference === "PAY_NOW"
+        ? bookingLang(persisted.language) === "ar"
+          ? "تم اختيار الدفع الإلكتروني. سأرسل رابط دفع آمن بعد تأكيد الحجز."
+          : "Online payment selected. I will send a secure payment link after booking confirmation."
+        : bookingLang(persisted.language) === "ar"
+          ? "تم اختيار الدفع في الفندق. سيكمل الاستقبال الدفع حسب سياسة الفندق."
+          : "Pay at hotel selected. Reception will complete payment according to hotel policy.";
+    await sendWhatsAppText({ to: normalizedPhone, body, phoneNumberId: hotel.phoneNumberId, conversationId: conversation.id });
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId: conversation.id,
+      phoneE164: normalizedPhone,
+      state: { ...persisted, bookingPaymentPreference: preference, lastActivityAt: new Date().toISOString(), conversationMode: "BOOKING_MODE" }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
   if (
     conversationMode === "BOOKING_MODE" &&
     (currentState === "quoted" || currentState === "awaiting_confirmation") &&
@@ -3321,6 +3477,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       nights: persisted.nights,
       totalAmount: persisted.totalAmount,
       bookingMealPlanCode: persisted.bookingMealPlanCode,
+      bookingPaymentPreference: persisted.bookingPaymentPreference,
       fbCartDraft: persisted.fbCartDraft,
       pendingPrebookOrder: persisted.pendingPrebookOrder,
       bookingFlowReturn: persisted.bookingFlowReturn
@@ -3453,42 +3610,43 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       return;
     }
 
-    try {
+    if (quoteEditTarget === "payment") {
+      const copy = bookingCopy(persisted.language);
       await sendWhatsAppList({
         to: normalizedPhone,
-        body: "Sure — what would you like to change?",
-        buttonText: "Edit details",
+        body: copy.paymentChoiceBody,
+        buttonText: copy.changePayment,
         sections: [
           {
-            title: "Edit options",
+            title: copy.changePayment,
             rows: [
-              { id: "edit_dates", title: "Dates", description: "Check-in / check-out" },
-              { id: "edit_guests", title: "Guests", description: "Adults / children" },
-              { id: "edit_rooms", title: "Rooms", description: "Number of rooms" },
-              { id: "edit_meal_plan", title: "Meal plan", description: "Room only / board options" }
+              { id: "pay_online", title: copy.payOnline.slice(0, 24), description: copy.payOnlineDesc.slice(0, 72) },
+              { id: "pay_at_hotel", title: copy.payAtHotel.slice(0, 24), description: copy.payAtHotelDesc.slice(0, 72) },
+              { id: "talk_to_reception", title: copy.talkReception.slice(0, 24), description: copy.talkReceptionDesc.slice(0, 72) }
             ]
           }
         ],
         phoneNumberId: hotel.phoneNumberId,
         conversationId: conversation.id
       });
-    } catch {
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body: "Sure — what would you like to change: dates, guests, rooms, or meal plan?",
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    }
-    await prisma.message.create({
-      data: {
+      await saveConversationSession({
         hotelId: hotel.id,
+        guestId: guest.id,
         conversationId: conversation.id,
-        direction: MessageDirection.OUTBOUND,
-        body: "Sure — what would you like to change: dates, guests, rooms, or meal plan?",
-        aiIntent: "BOOKING_EDIT_MENU",
-        aiConfidence: 0.95
-      }
+        phoneE164: normalizedPhone,
+        state: { ...baseUpdateState, bookingStep: undefined }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    await sendUniversalBookingChangeMenu({
+      hotelId: hotel.id,
+      conversationId: conversation.id,
+      to: normalizedPhone,
+      phoneNumberId: hotel.phoneNumberId,
+      language: persisted.language,
+      includeRoomType: Boolean(persisted.suggestedRoomTypeId || persisted.capacityPickRoomTypes?.length || persisted.bookingRoomOffers?.length)
     });
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
     return;
@@ -3869,7 +4027,12 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       suggestedRoomTypeName: persisted.suggestedRoomTypeName,
       suggestedPropertyId: persisted.suggestedPropertyId,
       nights: persisted.nights,
-      totalAmount: persisted.totalAmount
+      totalAmount: persisted.totalAmount,
+      bookingMealPlanCode: persisted.bookingMealPlanCode,
+      bookingPaymentPreference: persisted.bookingPaymentPreference,
+      lastAvailabilityIssue: persisted.lastAvailabilityIssue,
+      bookingRecoveryNudgeSentAt: persisted.bookingRecoveryNudgeSentAt,
+      bookingRecoveryRecheckSentAt: persisted.bookingRecoveryRecheckSentAt
     };
 
     function previousBookingStep(s: BookingStep): BookingStep | "submenu" {
@@ -3900,6 +4063,39 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
 
     const recoveryAction = normalizeText(input.text).replace(/\s+/g, "_");
+    if (isUniversalChangeBookingRequest(input.text)) {
+      await sendUniversalBookingChangeMenu({
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId,
+        language: persisted.language,
+        includeRoomType: Boolean(persisted.suggestedRoomTypeId || persisted.capacityPickRoomTypes?.length || persisted.bookingRoomOffers?.length)
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    const tryCheckIn = recoveryAction.match(/^try_checkin_(\d{4}-\d{2}-\d{2})$/);
+    if (tryCheckIn) {
+      const nextCheckIn = tryCheckIn[1]!;
+      await sendBookingCheckOutPrompt({
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId,
+        checkInIso: nextCheckIn,
+        language: persisted.language
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseState, stage: "new", bookingStep: "checkout", checkIn: nextCheckIn, checkOut: undefined }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
     if (
       recoveryAction === "no_avail_change_dates" ||
       recoveryAction === "change_dates" ||
@@ -3918,6 +4114,84 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: { ...baseState, stage: "new", bookingStep: "checkin", checkIn: undefined, checkOut: undefined }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (recoveryAction === "edit_meal_plan" || recoveryAction === "change_meal_plan" || recoveryAction === "meal_plan") {
+      const mealOutbound: FoodFlowOutbound = {
+        kind: "list",
+        body: bookingLang(persisted.language) === "ar" ? "اختر باقة الوجبات:" : "Choose your meal package:",
+        buttonText: bookingLang(persisted.language) === "ar" ? "الوجبات" : "Meal plan",
+        sections: [
+          {
+            title: bookingLang(persisted.language) === "ar" ? "الباقات" : "Packages",
+            rows: [
+              { id: "mp_none", title: "No meal plan", description: "Room only" },
+              { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
+              { id: "mp_full", title: "Full board", description: "All main meals" },
+              { id: "mp_view", title: "View menu", description: "Browse categories" }
+            ]
+          }
+        ]
+      };
+      await sendFoodFlowOutbounds({
+        hotelId: hotel.id,
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id,
+        outbounds: [mealOutbound]
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseState, stage: "new", bookingStep: "meal_plan" }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (recoveryAction === "edit_payment" || recoveryAction === "change_payment" || recoveryAction === "payment") {
+      const copy = bookingCopy(persisted.language);
+      await sendWhatsAppList({
+        to: normalizedPhone,
+        body: copy.paymentChoiceBody,
+        buttonText: copy.changePayment,
+        sections: [
+          {
+            title: copy.changePayment,
+            rows: [
+              { id: "pay_online", title: copy.payOnline.slice(0, 24), description: copy.payOnlineDesc.slice(0, 72) },
+              { id: "pay_at_hotel", title: copy.payAtHotel.slice(0, 24), description: copy.payAtHotelDesc.slice(0, 72) },
+              { id: "talk_to_reception", title: copy.talkReception.slice(0, 24), description: copy.talkReceptionDesc.slice(0, 72) }
+            ]
+          }
+        ],
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (recoveryAction === "pay_online" || recoveryAction === "pay_at_hotel") {
+      const preference = recoveryAction === "pay_online" ? "PAY_NOW" : "PAY_LATER";
+      const copy = bookingCopy(persisted.language);
+      const body =
+        preference === "PAY_NOW"
+          ? bookingLang(persisted.language) === "ar"
+            ? "تم اختيار الدفع الإلكتروني. سأرسل رابط دفع آمن بعد تأكيد الحجز."
+            : "Online payment selected. I will send a secure payment link after booking confirmation."
+          : bookingLang(persisted.language) === "ar"
+            ? "تم اختيار الدفع في الفندق. سيكمل الاستقبال الدفع حسب سياسة الفندق."
+            : "Pay at hotel selected. Reception will complete payment according to hotel policy.";
+      await sendWhatsAppText({ to: normalizedPhone, body, phoneNumberId: hotel.phoneNumberId, conversationId: conversation.id });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: { ...baseState, stage: persisted.stage || "new", bookingStep: step, bookingPaymentPreference: preference }
       });
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
       return;
@@ -5179,13 +5453,24 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             : {})
         });
         if (offers.length === 0) {
+          const nearestDates = await findNearestAvailableCheckIns({
+            hotelId: hotel.id,
+            fromDate: checkInDate,
+            nights: Math.max(1, Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (24 * 60 * 60 * 1000))),
+            guests,
+            rooms,
+            ...(typeof persisted.adultCount === "number" && typeof persisted.childCount === "number"
+              ? { adults: persisted.adultCount, children: persisted.childCount }
+              : {})
+          });
           await sendNoAvailabilityRecoveryMenu({
             hotelId: hotel.id,
             conversationId: conversation.id,
             to: normalizedPhone,
             phoneNumberId: hotel.phoneNumberId,
             language: persisted.language,
-            includeRoomType: Boolean(persisted.suggestedRoomTypeId || persisted.capacityPickRoomTypes?.length)
+            includeRoomType: Boolean(persisted.suggestedRoomTypeId || persisted.capacityPickRoomTypes?.length),
+            nearestDates
           });
           await saveConversationSession({
             hotelId: hotel.id,
@@ -5202,7 +5487,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
               roomCount: rooms,
               checkIn: persisted.checkIn,
               checkOut: undefined,
-              manualCheckOutDate: false
+              manualCheckOutDate: false,
+              lastAvailabilityIssue: `No availability for ${guests} guest(s), ${rooms} room(s), ${persisted.checkIn} to ${checkOutDate.toISOString().slice(0, 10)}`
             }
           });
         } else {
@@ -5912,31 +6198,34 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     let paymentLink: string | null = null;
     let paymentLinkError: string | null = null;
     let paymentLinkMissingSetup = false;
-    try {
-      const payment = await createBookingPaymentLink({
-        hotelId: hotel.id,
-        hotelName: hotel.displayName,
-        bookingId: booking.bookingId,
-        guestEmail: guest.email,
-        amount: combinedStayTotal,
-        currency: hotel.currency,
-        description: `${rooms} room(s), ${booking.roomTypeName}, ${checkIn.toISOString().slice(0, 10)} to ${checkOut
-          .toISOString()
-          .slice(0, 10)}`,
-        source: "whatsapp_native_booking"
-      });
-      paymentLink = payment.paymentLinkUrl;
-    } catch (err) {
-      if (err instanceof BookingPaymentLinkUnavailableError) {
-        paymentLinkError = err.message;
-        paymentLinkMissingSetup = true;
-        console.warn("[whatsapp booking] payment link skipped:", err.message);
-      } else {
-        paymentLinkError = err instanceof Error ? err.message : String(err);
-        console.error("[whatsapp booking] payment link creation failed:", err instanceof Error ? err.message : String(err));
+    const payLaterSelected = persisted.bookingPaymentPreference === "PAY_LATER";
+    if (!payLaterSelected) {
+      try {
+        const payment = await createBookingPaymentLink({
+          hotelId: hotel.id,
+          hotelName: hotel.displayName,
+          bookingId: booking.bookingId,
+          guestEmail: guest.email,
+          amount: combinedStayTotal,
+          currency: hotel.currency,
+          description: `${rooms} room(s), ${booking.roomTypeName}, ${checkIn.toISOString().slice(0, 10)} to ${checkOut
+            .toISOString()
+            .slice(0, 10)}`,
+          source: "whatsapp_native_booking"
+        });
+        paymentLink = payment.paymentLinkUrl;
+      } catch (err) {
+        if (err instanceof BookingPaymentLinkUnavailableError) {
+          paymentLinkError = err.message;
+          paymentLinkMissingSetup = true;
+          console.warn("[whatsapp booking] payment link skipped:", err.message);
+        } else {
+          paymentLinkError = err instanceof Error ? err.message : String(err);
+          console.error("[whatsapp booking] payment link creation failed:", err instanceof Error ? err.message : String(err));
+        }
       }
     }
-    if (!paymentLink) {
+    if (!paymentLink && !payLaterSelected) {
       await createRoleRoutedNotification({
         hotelId: hotel.id,
         propertyId: booking.propertyId,
@@ -5998,9 +6287,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             `Booking ID: ${booking.bookingId}`,
             paymentLink
               ? `Secure payment link: ${paymentLink}`
-              : paymentLinkMissingSetup
-                ? "Payment: online payment is not enabled by the hotel yet. Your booking is received, and reception will follow up with the payment method."
-                : "Payment: the secure payment link could not be generated right now. Your booking is received, and reception will follow up with the payment method."
+              : payLaterSelected
+                ? "Payment: pay at the hotel according to hotel policy."
+                : paymentLinkMissingSetup
+                  ? "Payment: online payment is not enabled by the hotel yet. Your booking is received, and reception will follow up with the payment method."
+                  : "Payment: the secure payment link could not be generated right now. Your booking is received, and reception will follow up with the payment method."
           ]
             .filter((x): x is string => typeof x === "string" && x.length > 0)
             .join("\n");

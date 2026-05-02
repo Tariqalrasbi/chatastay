@@ -17735,6 +17735,12 @@ adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW")
   const handledByHuman = Boolean(agentHandoffAt);
   const handlerLabel = handledByHuman ? "Human receptionist" : "AI";
   const handlerBadgeClass = handledByHuman ? "badge alert" : "badge ok";
+  const session = await prisma.conversationSession.findUnique({
+    where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
+    select: { metadataJson: true, stage: true, updatedAt: true }
+  });
+  const sessionMeta = parseConversationMetadata(session?.metadataJson);
+  const bookingContextHtml = renderBookingSessionContextHtml(session?.stage ?? null, sessionMeta);
 
   const updatedNotice = req.query.updated ? '<p class="badge ok">Conversation updated.</p>' : "";
   const replyError = req.query.replyError ? `<p class="badge alert">${escapeHtml(decodeURIComponent(String(req.query.replyError)))}</p>` : "";
@@ -17843,6 +17849,7 @@ ${replyError}
       <p class="muted" style="font-size:12px; margin:8px 0 0;">Chatbot will stop; staff handles replies.</p>
       `}
     </section>
+    ${bookingContextHtml}
     <section style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px;">
       <h3 style="margin:0 0 10px; font-size:14px;">State</h3>
       <form method="post" action="/admin/conversations/${encodeURIComponent(conversation.id)}/state" style="display:grid; gap:8px;">
@@ -17880,6 +17887,51 @@ function parseConversationMetadata(raw: string | null | undefined): Record<strin
   } catch {
     return {};
   }
+}
+
+function textMeta(meta: Record<string, unknown>, key: string): string | null {
+  const value = meta[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberMeta(meta: Record<string, unknown>, key: string): number | null {
+  const value = meta[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function renderBookingSessionContextHtml(stage: string | null, meta: Record<string, unknown>): string {
+  const bookingStep = textMeta(meta, "bookingStep");
+  const adultCount = numberMeta(meta, "adultCount");
+  const childCount = numberMeta(meta, "childCount");
+  const guestCount = numberMeta(meta, "guestCount");
+  const roomCount = numberMeta(meta, "roomCount");
+  const checkIn = textMeta(meta, "checkIn");
+  const checkOut = textMeta(meta, "checkOut");
+  const roomType = textMeta(meta, "suggestedRoomTypeName");
+  const mealPlan = textMeta(meta, "bookingMealPlanCode");
+  const payment = textMeta(meta, "bookingPaymentPreference");
+  const issue = textMeta(meta, "lastAvailabilityIssue");
+  const hasContext = Boolean(bookingStep || adultCount || childCount || guestCount || roomCount || checkIn || checkOut || roomType || mealPlan || payment || issue);
+  if (!hasContext) return "";
+  const rows = [
+    ["Stage", stage || textMeta(meta, "conversationMode") || "Booking in progress"],
+    ["Current step", bookingStep || (meta.awaitingGuestName ? "guest name" : "-")],
+    ["Guests", guestCount ? `${guestCount} total (${adultCount ?? "-"} adults, ${childCount ?? 0} children)` : null],
+    ["Rooms", roomCount ? String(roomCount) : null],
+    ["Dates", checkIn || checkOut ? `${checkIn ?? "?"} to ${checkOut ?? "?"}` : null],
+    ["Room type", roomType],
+    ["Meal plan", mealPlan],
+    ["Payment", payment === "PAY_LATER" ? "Pay at hotel" : payment === "PAY_NOW" ? "Pay online" : null],
+    ["Last issue", issue]
+  ]
+    .filter(([, value]) => Boolean(value))
+    .map(([label, value]) => `<tr><th>${escapeHtml(label ?? "")}</th><td>${escapeHtml(value ?? "")}</td></tr>`)
+    .join("");
+  return `<section style="background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px;">
+      <h3 style="margin:0 0 10px; font-size:14px;">Booking progress</h3>
+      <table style="min-width:0; margin:0; font-size:12px;"><tbody>${rows}</tbody></table>
+      <p class="muted" style="font-size:12px; margin:8px 0 0;">Use this context when taking over from the AI.</p>
+    </section>`;
 }
 
 function isConversationMode(raw: unknown): raw is StaffConversationMode {

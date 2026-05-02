@@ -19,6 +19,7 @@ import { startOwnerDailyDigestScheduler } from "./jobs/ownerDailyDigestJob";
 import { startHotelDailyDigestScheduler } from "./jobs/hotelDailyDigestJob";
 import { startGuestAutoFollowupScheduler } from "./jobs/guestAutoFollowupJob";
 import { startAutoOptimizationScheduler } from "./jobs/autoOptimizationLoopJob";
+import { startBookingSessionFollowupScheduler } from "./jobs/bookingSessionFollowupJob";
 
 const app = express();
 const rawPort = process.env.PORT ?? "3000";
@@ -77,6 +78,7 @@ async function start(): Promise<void> {
         startOwnerDailyDigestScheduler();
         startHotelDailyDigestScheduler();
         startGuestAutoFollowupScheduler();
+        startBookingSessionFollowupScheduler();
         startAutoOptimizationScheduler();
       })
       .catch((err: unknown) =>

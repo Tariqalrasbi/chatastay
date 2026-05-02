@@ -61,12 +61,16 @@ export type PersistentSessionState = {
   totalAmount?: number;
   /** Half / full / none — chosen before quote in structured booking. */
   bookingMealPlanCode?: WhatsAppMealPlanCode | null;
+  bookingPaymentPreference?: "PAY_NOW" | "PAY_LATER" | null;
   /** Interactive F&B cart (booking pre-book or in-stay order). */
   fbCartDraft?: FbCartDraftState | null;
   /** After pre-book flow, stored until booking is confirmed. */
   pendingPrebookOrder?: PendingPrebookOrder | null;
   /** Set when guest taps View menu from meal plan — return here after browse. */
   bookingFlowReturn?: BookingFlowReturnHint | null;
+  lastAvailabilityIssue?: string | null;
+  bookingRecoveryNudgeSentAt?: string;
+  bookingRecoveryRecheckSentAt?: string;
 };
 
 export type CalendarLinkPayload = {
@@ -220,9 +224,18 @@ export async function loadConversationSession(params: {
       metadata.bookingMealPlanCode === "FULL_BOARD"
         ? metadata.bookingMealPlanCode
         : undefined,
+    bookingPaymentPreference:
+      metadata.bookingPaymentPreference === "PAY_NOW" || metadata.bookingPaymentPreference === "PAY_LATER"
+        ? metadata.bookingPaymentPreference
+        : undefined,
     fbCartDraft: parseFbCartDraft(metadata.fbCartDraft),
     pendingPrebookOrder: parsePendingPrebook(metadata.pendingPrebookOrder),
-    bookingFlowReturn: metadata.bookingFlowReturn === "meal_plan" ? "meal_plan" : undefined
+    bookingFlowReturn: metadata.bookingFlowReturn === "meal_plan" ? "meal_plan" : undefined,
+    lastAvailabilityIssue: typeof metadata.lastAvailabilityIssue === "string" ? metadata.lastAvailabilityIssue : undefined,
+    bookingRecoveryNudgeSentAt:
+      typeof metadata.bookingRecoveryNudgeSentAt === "string" ? metadata.bookingRecoveryNudgeSentAt : undefined,
+    bookingRecoveryRecheckSentAt:
+      typeof metadata.bookingRecoveryRecheckSentAt === "string" ? metadata.bookingRecoveryRecheckSentAt : undefined
   };
 }
 
@@ -334,9 +347,13 @@ export async function saveConversationSession(params: {
     nights: params.state.nights ?? null,
     totalAmount: params.state.totalAmount ?? null,
     bookingMealPlanCode: params.state.bookingMealPlanCode ?? null,
+    bookingPaymentPreference: params.state.bookingPaymentPreference ?? null,
     fbCartDraft: params.state.fbCartDraft ?? null,
     pendingPrebookOrder: params.state.pendingPrebookOrder ?? null,
-    bookingFlowReturn: params.state.bookingFlowReturn ?? null
+    bookingFlowReturn: params.state.bookingFlowReturn ?? null,
+    lastAvailabilityIssue: params.state.lastAvailabilityIssue ?? null,
+    bookingRecoveryNudgeSentAt: params.state.bookingRecoveryNudgeSentAt ?? null,
+    bookingRecoveryRecheckSentAt: params.state.bookingRecoveryRecheckSentAt ?? null
   };
   await prisma.conversationSession.upsert({
     where: { hotelId_guestId: { hotelId: params.hotelId, guestId: params.guestId } },
