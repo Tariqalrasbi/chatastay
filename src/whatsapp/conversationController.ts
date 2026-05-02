@@ -5943,7 +5943,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         roles: [UserRole.FRONTDESK, UserRole.FINANCE, UserRole.MANAGER, UserRole.OWNER],
         title: "WhatsApp booking needs payment follow-up",
         body: `Booking ${booking.bookingId} was confirmed, but an automatic payment link was not sent. ${
-          paymentLinkMissingSetup ? "Stripe is not enabled on this server. Set STRIPE_SECRET_KEY to enable automatic links." : "Stripe link creation failed during checkout."
+          paymentLinkMissingSetup
+            ? "Payment provider is not enabled on this server. For Oman, set PAYMENT_PROVIDER=thawani plus THAWANI_API_KEY and THAWANI_PUBLISHABLE_KEY."
+            : "Payment checkout link creation failed during checkout."
         }${paymentLinkError ? ` Reason: ${paymentLinkError}` : ""}`,
         category: "payments",
         severity: "high",

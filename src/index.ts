@@ -27,8 +27,9 @@ const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
 /** Bind all interfaces by default so `localhost`, `127.0.0.1`, and LAN URLs behave consistently (override with HOST=127.0.0.1 if needed). */
 const host = process.env.HOST ?? "0.0.0.0";
 
-// Stripe webhook requires raw body for signature verification.
+// Payment webhooks require raw body for signature verification.
 app.use("/api/payments/webhook/stripe", express.raw({ type: "application/json" }));
+app.use("/api/payments/webhook/thawani", express.raw({ type: "application/json" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use("/static", express.static(path.join(process.cwd(), "src", "public")));

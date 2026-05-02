@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "node:crypto";
 import type Stripe from "stripe";
 import { BookingStatus, FolioPostingTarget, FolioTxnSourceType, PaymentStatus } from "@prisma/client";
 import { prisma } from "../db";
@@ -60,6 +61,59 @@ async function upsertPaymentTransaction(params: {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+function rawRequestBody(reqBody: unknown): Buffer {
+  if (Buffer.isBuffer(reqBody)) return reqBody;
+  if (typeof reqBody === "string") return Buffer.from(reqBody, "utf8");
+  return Buffer.from(JSON.stringify(reqBody ?? {}), "utf8");
+}
+
+function verifyThawaniWebhookSignature(body: Buffer, timestamp: string | undefined, signature: string | undefined): boolean {
+  const secret = process.env.THAWANI_WEBHOOK_SECRET?.trim();
+  if (!secret) return true;
+  if (!timestamp || !signature) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${body.toString("utf8")}-${timestamp}`).digest("hex");
+  const a = Buffer.from(expected);
+  const b = Buffer.from(signature);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function getNestedString(input: unknown, keys: string[]): string | undefined {
+  let current = input;
+  for (const key of keys) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" && current.trim() ? current : undefined;
+}
+
+function thawaniPaymentStatus(payload: unknown): string {
+  return (
+    getNestedString(payload, ["data", "payment_status"]) ??
+    getNestedString(payload, ["payment_status"]) ??
+    getNestedString(payload, ["data", "status"]) ??
+    getNestedString(payload, ["status"]) ??
+    ""
+  ).toLowerCase();
+}
+
+function thawaniLocalPaymentIntentId(payload: unknown): string | undefined {
+  return (
+    getNestedString(payload, ["data", "client_reference_id"]) ??
+    getNestedString(payload, ["client_reference_id"]) ??
+    getNestedString(payload, ["data", "metadata", "paymentIntentId"]) ??
+    getNestedString(payload, ["metadata", "paymentIntentId"])
+  );
+}
+
+function thawaniExternalTxnId(payload: unknown): string | undefined {
+  return (
+    getNestedString(payload, ["data", "invoice"]) ??
+    getNestedString(payload, ["invoice"]) ??
+    getNestedString(payload, ["data", "session_id"]) ??
+    getNestedString(payload, ["session_id"])
+  );
 }
 
 async function applyPaymentStatus(
@@ -129,7 +183,7 @@ async function applyPaymentStatus(
         bookingId: booking.id,
         fromStatus: prevBookingStatus,
         toStatus: BookingStatus.CONFIRMED,
-        source: "STRIPE_WEBHOOK"
+        source: paymentIntent.provider === "thawani" ? "THAWANI_WEBHOOK" : "STRIPE_WEBHOOK"
       });
     }
   }
@@ -153,7 +207,7 @@ async function applyPaymentStatus(
       guestId: booking.guestId,
       bookingId: booking.id,
       conversationId: booking.conversationId ?? undefined,
-      source: "stripe_webhook",
+      source: paymentIntent.provider === "thawani" ? "thawani_webhook" : "stripe_webhook",
       dedupeKey: `payment_completed:${paymentIntent.id}`
     });
 
@@ -174,18 +228,18 @@ async function applyPaymentStatus(
         roomTypeId: booking.roomTypeId,
         currency: paymentIntent.currency,
         amount: round2(paymentIntent.amount),
-        folioPaymentMethod: "Stripe / card (Checkout)",
+        folioPaymentMethod: paymentIntent.provider === "thawani" ? "Thawani Pay" : "Stripe / card (Checkout)",
         postingTarget: FolioPostingTarget.GUEST_FOLIO,
         chargeDate: new Date(),
         referenceNumber: externalTxnId ?? paymentIntent.externalIntentId ?? null,
-        notes: `Stripe Checkout · local PaymentIntent ${paymentIntent.id}`,
+        notes: `${paymentIntent.provider === "thawani" ? "Thawani Checkout" : "Stripe Checkout"} · local PaymentIntent ${paymentIntent.id}`,
         sourceType: FolioTxnSourceType.API,
         allocateFifo: true,
         staffId: null
       });
     } catch (err) {
       console.error(
-        "[stripe webhook] folio payment post failed:",
+        `[${paymentIntent.provider} webhook] folio payment post failed:`,
         err instanceof Error ? err.message : String(err)
       );
     }
@@ -462,9 +516,45 @@ apiRouter.post("/payments/create-booking-link", async (req, res) => {
       res.status(500).json({ error: error.message });
       return;
     }
-    const message = error instanceof Error ? error.message : "Stripe checkout creation failed";
+    const message = error instanceof Error ? error.message : "Payment checkout creation failed";
     res.status(502).json({ error: message });
   }
+});
+
+apiRouter.post("/payments/webhook/thawani", async (req, res) => {
+  const rawBody = rawRequestBody(req.body);
+  const timestampHeader = req.headers["thawani-timestamp"];
+  const signatureHeader = req.headers["thawani-signature"];
+  const timestamp = Array.isArray(timestampHeader) ? timestampHeader[0] : timestampHeader;
+  const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+
+  if (!verifyThawaniWebhookSignature(rawBody, timestamp, signature)) {
+    res.status(400).json({ error: "Invalid Thawani webhook signature." });
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    res.status(400).json({ error: "Invalid Thawani webhook payload." });
+    return;
+  }
+
+  const localPaymentIntentId = thawaniLocalPaymentIntentId(payload);
+  if (!localPaymentIntentId) {
+    res.status(202).json({ received: true, ignored: "missing client_reference_id" });
+    return;
+  }
+
+  const status = thawaniPaymentStatus(payload);
+  if (status === "paid" || status === "succeeded" || status === "success") {
+    await applyPaymentStatus(localPaymentIntentId, "SUCCEEDED", thawaniExternalTxnId(payload), JSON.stringify(payload));
+  } else if (status === "cancelled" || status === "canceled" || status === "failed") {
+    await applyPaymentStatus(localPaymentIntentId, "FAILED", thawaniExternalTxnId(payload), JSON.stringify(payload));
+  }
+
+  res.json({ received: true });
 });
 
 apiRouter.post("/payments/webhook/stripe", async (req, res) => {

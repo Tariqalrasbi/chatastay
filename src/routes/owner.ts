@@ -3524,7 +3524,9 @@ ownerRouter.get("/health", requireOwnerAuth, async (_req, res) => {
     { label: "WHATSAPP_TOKEN", ok: Boolean(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_TOKEN !== "PASTE_META_TEMP_ACCESS_TOKEN") },
     { label: "WHATSAPP_PHONE_NUMBER_ID", ok: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_PHONE_NUMBER_ID !== "PASTE_WHATSAPP_PHONE_NUMBER_ID") },
     { label: "WHATSAPP_VERIFY_TOKEN", ok: Boolean(process.env.WHATSAPP_VERIFY_TOKEN) },
-    { label: "STRIPE_SECRET_KEY", ok: Boolean(process.env.STRIPE_SECRET_KEY) }
+    { label: "PAYMENT_PROVIDER", ok: Boolean(process.env.PAYMENT_PROVIDER || process.env.THAWANI_API_KEY || process.env.STRIPE_SECRET_KEY) },
+    { label: "THAWANI_API_KEY", ok: Boolean(process.env.THAWANI_API_KEY) },
+    { label: "THAWANI_PUBLISHABLE_KEY", ok: Boolean(process.env.THAWANI_PUBLISHABLE_KEY) }
   ];
   const configRows = configChecks
     .map(

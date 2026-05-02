@@ -28,7 +28,6 @@ import {
   SegmentTagSource,
   UserRole
 } from "@prisma/client";
-import Stripe from "stripe";
 import { sendEmail } from "../core/email";
 import {
   generateSecureToken,
@@ -77,6 +76,7 @@ import {
   reserveInventoryForBooking
 } from "../core/bookingService";
 import { recordBookingStatusChange } from "../core/bookingStatusHistory";
+import { createBookingPaymentLink } from "../core/bookingPayments";
 import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { loadPartnerSetupConfig, savePartnerSetupConfig, applyPartnerTemplate, type PartnerSetupConfig } from "../core/partnerSetup";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
@@ -286,12 +286,6 @@ function verifyPassword(password: string, passwordHash: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
-function getStripeClient(): Stripe | null {
-  const apiKey = process.env.STRIPE_SECRET_KEY;
-  if (!apiKey) return null;
-  return new Stripe(apiKey);
-}
-
 function slugifyName(input: string): string {
   return input
     .toLowerCase()
@@ -358,14 +352,6 @@ async function resolveActivePropertyIdForHotel(req: Request, hotelId: string): P
   const fallback = properties[0].id;
   if (session) session.activePropertyId = fallback;
   return fallback;
-}
-
-function toMinorUnits(amount: number, currency: string): number {
-  const zeroDecimal = new Set(["JPY", "KRW"]);
-  const threeDecimal = new Set(["BHD", "KWD", "OMR"]);
-  const upper = currency.toUpperCase();
-  const factor = zeroDecimal.has(upper) ? 1 : threeDecimal.has(upper) ? 1000 : 100;
-  return Math.round(amount * factor);
 }
 
 function buildFullPermissions(): PermissionMatrix {
@@ -2246,7 +2232,6 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
       hotelId: hotel.id,
       bookingId: booking.id,
       kind: "BOOKING",
-      provider: "stripe",
       status: { in: [PaymentStatus.REQUIRES_ACTION, PaymentStatus.PENDING] },
       paymentLinkUrl: { not: null }
     },
@@ -2256,86 +2241,35 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
     return { sent: false, skipped: true, url: reusablePaymentIntent.paymentLinkUrl };
   }
 
-  const successUrl =
-    process.env.STRIPE_CHECKOUT_SUCCESS_URL ??
-    `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`;
-  const cancelUrl = process.env.STRIPE_CHECKOUT_CANCEL_URL ?? `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`;
-
   let paymentIntent = reusablePaymentIntent;
   let checkoutSessionId = "";
   if (!paymentIntent?.paymentLinkUrl) {
-    const stripe = getStripeClient();
-    if (!stripe) return { sent: false, skipped: false, error: "Stripe is not configured." };
-
-    const localPaymentIntent = await prisma.paymentIntent.create({
-      data: {
+    try {
+      const createdPayment = await createBookingPaymentLink({
         hotelId: hotel.id,
-        kind: "BOOKING",
-        provider: "stripe",
+        hotelName: hotel.displayName,
+        bookingId: booking.id,
+        guestEmail: booking.guest.email,
         amount: booking.totalAmount,
         currency: hotel.currency,
-        status: "REQUIRES_ACTION",
-        bookingId: booking.id
-      }
-    });
-
-    let checkoutSession: Stripe.Checkout.Session;
-    try {
-      checkoutSession = await stripe.checkout.sessions.create({
-        mode: "payment",
-        success_url: successUrl,
-        cancel_url: cancelUrl,
-        client_reference_id: localPaymentIntent.id,
-        customer_email: booking.guest.email ?? undefined,
-        metadata: {
-          paymentIntentId: localPaymentIntent.id,
-          bookingId: booking.id,
-          hotelId: hotel.id
-        },
-        line_items: [
-          {
-            quantity: 1,
-            price_data: {
-              currency: hotel.currency.toLowerCase(),
-              unit_amount: toMinorUnits(booking.totalAmount, hotel.currency),
-              product_data: {
-                name: `Booking ${booking.id} - ${hotel.displayName}`,
-                description: `${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}`
-              }
-            }
-          }
-        ],
-        payment_intent_data: {
-          metadata: {
-            paymentIntentId: localPaymentIntent.id,
-            bookingId: booking.id,
-            hotelId: hotel.id
-          }
-        }
+        description: `${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}`,
+        source: "admin_booking_link",
+        successUrl: `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`,
+        cancelUrl: `${appBaseUrl}/guest?bookingId=${encodeURIComponent(booking.id)}&phone=${encodeURIComponent(booking.guest.phoneE164)}`
       });
+      paymentIntent = await prisma.paymentIntent.findUnique({ where: { id: createdPayment.paymentIntentId } });
+      checkoutSessionId = createdPayment.checkoutSessionId ?? "";
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create payment link.";
       return { sent: false, skipped: false, error: message };
     }
-
-    checkoutSessionId = checkoutSession.id;
-    paymentIntent = await prisma.paymentIntent.update({
-      where: { id: localPaymentIntent.id },
-      data: {
-        externalIntentId: checkoutSession.id,
-        paymentLinkUrl: checkoutSession.url ?? undefined,
-        metadataJson: JSON.stringify({
-          stripeCheckoutSessionId: checkoutSession.id,
-          stripePaymentIntent: checkoutSession.payment_intent
-        })
-      }
-    });
   } else {
     checkoutSessionId = paymentIntent.externalIntentId ?? "";
   }
 
-  const link = paymentIntent?.paymentLinkUrl;
-  if (!link) return { sent: false, skipped: false, error: "Payment link URL is unavailable." };
+  if (!paymentIntent?.paymentLinkUrl) return { sent: false, skipped: false, error: "Payment link URL is unavailable." };
+  const confirmedPaymentIntent = paymentIntent;
+  const link = confirmedPaymentIntent.paymentLinkUrl as string;
   const to = normalizePhoneForWhatsApp(booking.guest.phoneE164);
   if (!to) return { sent: false, skipped: false, error: "Guest phone number is invalid." };
 
@@ -2361,7 +2295,7 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
   }
 
   await prisma.paymentIntent.update({
-    where: { id: paymentIntent.id },
+    where: { id: confirmedPaymentIntent.id },
     data: { paymentLinkSentAt: new Date() }
   });
 
@@ -2371,7 +2305,7 @@ async function sendBookingPaymentLinkAfterConfirmation(params: {
     entityType: "Booking",
     entityId: booking.id,
     metadata: {
-      paymentIntentId: paymentIntent.id,
+      paymentIntentId: confirmedPaymentIntent.id,
       checkoutSessionId,
       sentTo: to
     }
@@ -18638,7 +18572,7 @@ adminRouter.get("/billing", requirePermission("BILLING", "VIEW"), async (req, re
     <h3>Payment Settings</h3>
     <table>
       <tbody>
-        <tr><th>Provider</th><td>Stripe abstraction</td></tr>
+        <tr><th>Provider</th><td>${escapeHtml(process.env.PAYMENT_PROVIDER || (process.env.THAWANI_API_KEY ? "thawani" : "stripe"))}</td></tr>
         <tr><th>Default currency</th><td>${escapeHtml(hotel.currency)}</td></tr>
         <tr><th>Payout account</th><td><span class="badge pending">Not connected</span></td></tr>
       </tbody>
