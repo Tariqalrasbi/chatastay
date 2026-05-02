@@ -50,8 +50,14 @@ export function renderCampaignComposePage(params: {
   body: Record<string, unknown>;
   previewCount: number | null;
   errorMsg: string | null;
+  pageTitle?: string;
+  formAction?: string;
+  backHref?: string;
 }): string {
   const { body, previewCount, errorMsg } = params;
+  const pageTitle = params.pageTitle ?? "Group messages";
+  const formAction = params.formAction ?? "/admin/campaigns/new";
+  const backHref = params.backHref ?? "/admin/campaigns";
   const tagAny = new Set(
     arr(body, "filterTagsAny").filter((t) => Object.values(SegmentTagKind).includes(t as SegmentTagKind)) as SegmentTagKind[]
   );
@@ -124,11 +130,12 @@ export function renderCampaignComposePage(params: {
     .join("");
 
   return `
-<h2>Campaign center</h2>
-<p class="muted" style="max-width:720px">${esc(params.hotelDisplayName)} — Target guests using tags, VIP, and booking history, preview the audience size, then send a WhatsApp message. Use responsibly; guests must have a phone on file.</p>
+<h2>${esc(pageTitle)}</h2>
+<p class="muted" style="max-width:760px">${esc(params.hotelDisplayName)} — Send WhatsApp group messages, flash messages, offers, and marketing updates to this hotel's own guest database only. Target guests using tags, VIP, language, source, room history, and stay history, then preview the audience before sending.</p>
+<p class="badge pending" style="max-width:760px;display:inline-block">Important: WhatsApp promotional sends should follow guest consent and Meta template/window rules. Guests marked do-not-disturb or marketing opt-out are skipped automatically.</p>
 ${errBlock}
 ${previewBlock}
-<form method="post" action="/admin/campaigns/new" style="max-width:900px; display:grid; gap:14px">
+<form method="post" action="${esc(formAction)}" style="max-width:900px; display:grid; gap:14px">
   <section style="padding:14px; background:var(--card); border:1px solid var(--border); border-radius:12px">
     <h3 style="margin:0 0 10px">1. Campaign details</h3>
     <label>Campaign name *
@@ -211,7 +218,7 @@ ${previewBlock}
   <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
     <button type="submit" name="_action" value="preview" style="padding:10px 16px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:700">Preview audience</button>
     <button type="submit" name="_action" value="send" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Send campaign</button>
-    <a class="btn-link" href="/admin/campaigns">Back to campaigns</a>
+    <a class="btn-link" href="${esc(backHref)}">Back to group messages</a>
   </div>
 </form>`;
 }

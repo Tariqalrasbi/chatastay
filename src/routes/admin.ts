@@ -1352,7 +1352,7 @@ function renderLayout(
         label: 'Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span>',
         attrs: "data-admin-conv-link"
       },
-      { href: "/admin/campaigns", label: "Templates &amp; campaigns" },
+      { href: "/admin/conversations/group-messages", label: "Group messages" },
       '<span class="nav-tab-placeholder" title="Uses existing conversation error logs" aria-disabled="true">Failed messages</span>',
       '<span class="nav-tab-placeholder" title="Configured from property setup and WhatsApp flow settings" aria-disabled="true">Bot flow</span>'
     ]
@@ -10953,10 +10953,16 @@ adminRouter.post("/offers/:id/toggle", requirePermission("ROOMS", "EDIT"), async
   res.redirect("/admin/offers?toggled=1");
 });
 
-adminRouter.get("/campaigns", requirePermission("BOOKINGS", "VIEW"), async (_req, res) => {
+async function renderGroupMessagesPage(
+  res: Response,
+  opts: { composeHref: string; detailHrefBase: string; title?: string } = {
+    composeHref: "/admin/campaigns/new",
+    detailHrefBase: "/admin/campaigns"
+  }
+): Promise<void> {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
-    res.type("html").send(renderLayout("<h2>Campaigns</h2><p>No hotel data found.</p>", true));
+    res.type("html").send(renderLayout("<h2>Group messages</h2><p>No hotel data found.</p>", true));
     return;
   }
 
@@ -10969,7 +10975,7 @@ adminRouter.get("/campaigns", requirePermission("BOOKINGS", "VIEW"), async (_req
   const rows = campaigns
     .map(
       (c) => `<tr>
-  <td><a class="inline-link" href="/admin/campaigns/${encodeURIComponent(c.id)}">${escapeHtml(c.name)}</a></td>
+  <td><a class="inline-link" href="${opts.detailHrefBase}/${encodeURIComponent(c.id)}">${escapeHtml(c.name)}</a></td>
   <td>${formatDateTime(c.createdAt)}</td>
   <td><span class="badge ${c.status === "SENT" ? "ok" : c.status === "FAILED" ? "alert" : "pending"}">${escapeHtml(c.status)}</span></td>
   <td>${c.audienceCount}</td>
@@ -10981,17 +10987,26 @@ adminRouter.get("/campaigns", requirePermission("BOOKINGS", "VIEW"), async (_req
     .join("");
 
   const content = `
-<h2>Campaign center</h2>
-<p class="muted">Targeted WhatsApp campaigns using guest tags, VIP, and booking history. <a class="inline-link" href="/admin/campaigns/new">Compose new campaign</a></p>
+<h2>${escapeHtml(opts.title ?? "Group messages")}</h2>
+<p class="muted">Send WhatsApp flash messages, advertisements, offers, and marketing messages to this hotel's own guest database. Audience filters use guest tags, VIP, language, source, room history, and booking history. <a class="inline-link" href="${opts.composeHref}">Compose new group message</a></p>
+<p class="badge pending" style="display:inline-block;margin-bottom:12px">Every campaign is hotel-scoped by <code>hotelId</code>; one partner cannot send to another partner's guests.</p>
 <table>
   <thead><tr><th>Name</th><th>Created</th><th>Status</th><th>Audience</th><th>Sent</th><th>Failed</th><th>No phone</th></tr></thead>
   <tbody>${rows || '<tr><td colspan="7">No campaigns yet.</td></tr>'}</tbody>
 </table>`;
 
   res.type("html").send(renderLayout(content, true));
+}
+
+adminRouter.get("/campaigns", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
+  await renderGroupMessagesPage(res, {
+    composeHref: "/admin/campaigns/new",
+    detailHrefBase: "/admin/campaigns",
+    title: "Group messages"
+  });
 });
 
-adminRouter.get("/campaigns/new", requirePermission("BOOKINGS", "VIEW"), async (_req, res) => {
+adminRouter.get("/campaigns/new", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
@@ -11013,13 +11028,16 @@ adminRouter.get("/campaigns/new", requirePermission("BOOKINGS", "VIEW"), async (
     offers,
     body: {},
     previewCount: null,
-    errorMsg: null
+    errorMsg: null,
+    pageTitle: "Compose group message",
+    formAction: "/admin/campaigns/new",
+    backHref: "/admin/conversations/group-messages"
   });
 
   res.type("html").send(renderLayout(inner, true));
 });
 
-adminRouter.post("/campaigns/new", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.redirect("/admin/campaigns");
@@ -11047,7 +11065,10 @@ adminRouter.post("/campaigns/new", requirePermission("BOOKINGS", "EDIT"), async 
       offers,
       body,
       previewCount,
-      errorMsg
+      errorMsg,
+      pageTitle: "Compose group message",
+      formAction: "/admin/campaigns/new",
+      backHref: "/admin/conversations/group-messages"
     });
     res.type("html").send(renderLayout(inner, true));
   };
@@ -11159,7 +11180,7 @@ adminRouter.post("/campaigns/new", requirePermission("BOOKINGS", "EDIT"), async 
   res.redirect(`/admin/campaigns/${encodeURIComponent(campaign.id)}?sent=1`);
 });
 
-adminRouter.get("/campaigns/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+adminRouter.get("/campaigns/:id", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
@@ -17680,6 +17701,7 @@ adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), as
   const content = `
 <h2 data-admin-conversations-index="1">Conversations</h2>
 <p class="muted">Guest WhatsApp conversations with full history and action controls. Results are filtered by the selected date range (conversation created date). <strong>New messages poll every 8 seconds</strong> while you are logged in; the list refreshes when activity arrives.</p>
+<p><a class="btn-link" href="/admin/conversations/group-messages">Open group messages / flash marketing</a></p>
 <form method="get" action="/admin/conversations" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
   <label>From <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
   <label>To <input type="date" name="end" value="${formatDateForInput(end)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
@@ -17703,6 +17725,14 @@ adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), as
 </table>`;
 
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/conversations/group-messages", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
+  await renderGroupMessagesPage(res, {
+    composeHref: "/admin/campaigns/new",
+    detailHrefBase: "/admin/campaigns",
+    title: "Group messages / flash marketing"
+  });
 });
 
 adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {

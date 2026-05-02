@@ -202,7 +202,8 @@ function buildMainMenuMessage(hotelName: string, lang: "ar" | "en"): string {
       "2) معلومات الفندق والموقع",
       "3) تصفح قائمة المطعم",
       "4) طلب طعام للنزلاء داخل الفندق",
-      "5) التحدث مع الاستقبال"
+      "5) تغيير اللغة",
+      "6) التحدث مع الاستقبال"
     ].join("\n");
   }
   return [
@@ -212,7 +213,8 @@ function buildMainMenuMessage(hotelName: string, lang: "ar" | "en"): string {
     "2) Hotel info & location",
     "3) Browse restaurant menu",
     "4) Order food in-house",
-    "5) Chat with reception"
+    "5) Change language",
+    "6) Chat with reception"
   ].join("\n");
 }
 
@@ -261,6 +263,7 @@ async function sendMainMenuForGuest(params: {
         stay
           ? { id: "order_food_stay", title: "طلب طعام", description: "خدمة الغرف / أمر مطبخ KOT" }
           : { id: "ask_question", title: "اسأل سؤال", description: "الغرف، السياسات، المرافق" },
+        { id: "change_language", title: "اللغة", description: "العربية / English" },
         { id: "talk_to_agent", title: "الاستقبال", description: "التحدث مع موظف" }
       ]
     : [
@@ -270,6 +273,7 @@ async function sendMainMenuForGuest(params: {
         stay
           ? { id: "order_food_stay", title: "Order food", description: "Room service / restaurant KOT" }
           : { id: "ask_question", title: "Ask question", description: "Rooms, policy, amenities" },
+        { id: "change_language", title: "Language", description: "Arabic / English" },
         { id: "talk_to_agent", title: "Reception", description: "Speak with staff" }
       ];
   try {
@@ -316,6 +320,30 @@ const LANGUAGE_BUTTONS: Array<{ id: string; title: string }> = [
   { id: "lang_ar", title: "العربية" },
   { id: "lang_en", title: "English" }
 ];
+
+async function sendLanguageSelectionPrompt(params: {
+  to: string;
+  phoneNumberId?: string;
+  conversationId: string;
+}): Promise<void> {
+  try {
+    await sendWhatsAppButtons({
+      to: params.to,
+      body: LANGUAGE_SELECT_PROMPT,
+      buttons: LANGUAGE_BUTTONS,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  } catch (err) {
+    console.error("WhatsApp language buttons send failed:", err instanceof Error ? err.message : String(err));
+    await sendWhatsAppText({
+      to: params.to,
+      body: LANGUAGE_SELECT_FALLBACK,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+  }
+}
 
 const BOOKING_MODE_ENTRY =
   "I'll help you book a stay. You can ask about room types or check availability. To get started, share your preferred dates and number of guests—e.g. 10–12 April for 2 guests.";
@@ -421,6 +449,19 @@ function isMenuChoiceHotelInfo(text: string): boolean {
 function isMenuChoiceBrowseMenu(text: string): boolean {
   const t = normalizeMenuButtonInput(text).toLowerCase();
   return t === "browse_menu" || t === "browse menu" || t === "restaurant menu" || t === "food menu";
+}
+function isMenuChoiceChangeLanguage(text: string): boolean {
+  const t = normalizeMenuButtonInput(text).toLowerCase();
+  return (
+    t === "change_language" ||
+    t === "change language" ||
+    t === "language" ||
+    t === "lang" ||
+    t === "arabic / english" ||
+    t === "العربية / english" ||
+    t === "اللغة" ||
+    t === "تغيير اللغة"
+  );
 }
 function isMenuChoiceTalkToAgent(text: string): boolean {
   const t = normalizeMenuButtonInput(text).toLowerCase();
@@ -2838,8 +2879,101 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     persisted.language = "en";
   }
 
+  const explicitLanguageChoice = isLanguageChoice(input.text);
+  if (!needsLanguageSelection(persisted.language) && isMenuChoiceChangeLanguage(input.text)) {
+    await sendLanguageSelectionPrompt({
+      to: normalizedPhone,
+      phoneNumberId: hotel.phoneNumberId,
+      conversationId: conversation.id
+    });
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: LANGUAGE_SELECT_PROMPT,
+        aiIntent: "LANGUAGE_SELECT",
+        aiConfidence: 0.98
+      }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  if (!needsLanguageSelection(persisted.language) && explicitLanguageChoice) {
+    const lang = explicitLanguageChoice;
+    persisted.language = lang;
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId: conversation.id,
+      phoneE164: normalizedPhone,
+      state: {
+        ...persisted,
+        language: lang,
+        lastActivityAt: new Date().toISOString(),
+        phoneNumberId: hotel.phoneNumberId
+      }
+    });
+
+    const hasActiveBookingProgress =
+      persisted.conversationMode === "BOOKING_MODE" && (Boolean(persisted.bookingStep) || Boolean(persisted.awaitingGuestName));
+    if (hasActiveBookingProgress || persisted.conversationMode === "AGENT_MODE") {
+      const body =
+        lang === "ar"
+          ? "تم تغيير اللغة إلى العربية. يمكنك المتابعة من نفس المكان."
+          : "Language changed to English. You can continue from the same place.";
+      await sendWhatsAppText({
+        to: normalizedPhone,
+        body,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body,
+          aiIntent: "LANGUAGE_CHANGED",
+          aiConfidence: 0.98
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+
+    const menuPersonalizedLanguageChange = personalizeMainMenuBodies(hotel.displayName, lang, {
+      memory: guestMemoryBundle.memory,
+      confirmedStayCount: guestMemoryBundle.confirmedStayCount
+    });
+    const { recordedBody: languageMenuRecorded } = await sendMainMenuForGuest({
+      hotel,
+      guestId: guest.id,
+      to: normalizedPhone,
+      conversationId: conversation.id,
+      menuBody: menuPersonalizedLanguageChange.menuBody,
+      fallbackBody: menuPersonalizedLanguageChange.fallbackBody
+    });
+    if (menuPersonalizedLanguageChange.stampedWelcomeBack) {
+      await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
+    }
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: languageMenuRecorded,
+        aiIntent: "LANGUAGE_CHANGED_MAIN_MENU",
+        aiConfidence: 0.98
+      }
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
   if (needsLanguageSelection(persisted.language)) {
-    const chosenLang = isLanguageChoice(input.text);
+    const chosenLang = explicitLanguageChoice;
     if (chosenLang === "ar" || chosenLang === "en") {
       const lang = chosenLang;
       persisted.language = lang;
