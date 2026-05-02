@@ -748,7 +748,10 @@ function hotelAccountKeyForLogin(hotel: LoginHotelContext): string {
 }
 
 async function resolveLoginHotel(req: Request): Promise<LoginHotelContext> {
-  const raw = String(req.query.hotel ?? req.body?.hotelSlug ?? req.body?.hotel ?? "").trim();
+  const queryHotel = typeof req.query.hotel === "string" ? req.query.hotel.trim() : "";
+  const bodyHotelSlug = typeof req.body?.hotelSlug === "string" ? req.body.hotelSlug.trim() : "";
+  const bodyHotel = typeof req.body?.hotel === "string" ? req.body.hotel.trim() : "";
+  const raw = queryHotel || bodyHotelSlug || bodyHotel;
   if (!raw) {
     return {
       id: "",
