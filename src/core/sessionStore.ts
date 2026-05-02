@@ -298,6 +298,8 @@ export async function saveConversationSession(params: {
     lastActivityAt: params.state.lastActivityAt ?? nowIso,
     conversationMode: params.state.conversationMode ?? "IDLE",
     awaitingGuestName: Boolean(params.state.awaitingGuestName),
+    quoteConfirmedAt: params.state.quoteConfirmedAt ?? null,
+    quoteConfirmedActionKey: params.state.quoteConfirmedActionKey ?? null,
     awaitingBookingLookup: Boolean(params.state.awaitingBookingLookup),
     myBookingCandidateIds: params.state.myBookingCandidateIds ?? null,
     phoneNumberId: params.state.phoneNumberId ?? null,

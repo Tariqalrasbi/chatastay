@@ -12,6 +12,7 @@ import { parseGuestMessage, validateParsedBookingInput } from "../core/parse";
 import { findAvailableRoomType, findAvailableRoomTypes } from "../core/availability";
 import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
+import { BookingPaymentLinkUnavailableError, createBookingPaymentLink } from "../core/bookingPayments";
 import { computeMealPlanSurchargeForStay, type MealPlanCode } from "../core/frontDeskPricing";
 import { createFbOrdersFromMenuLines } from "../core/fbFolio";
 import { mergeGuestProfileFromBooking } from "../core/guestProfile";
@@ -5265,6 +5266,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       currency: hotel.currency,
       adults: adultsForBooking,
       children: childrenForBooking,
+      preferredRoomTypeId: persisted.suggestedRoomTypeId,
       source: ChannelProvider.WHATSAPP
     });
 
@@ -5315,24 +5317,74 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     }
 
-    const confirmationBody = [
-      "Booking confirmed successfully.",
-      `Guest: ${providedName}`,
-      `Room: ${booking.roomTypeName}`,
-      `Check-in: ${checkIn.toISOString().slice(0, 10)}`,
-      `Check-out: ${checkOut.toISOString().slice(0, 10)}`,
-      `Guests: ${guests}`,
-      `Nights: ${booking.nights}`,
-      `Room stay total: ${roomStayTotal.toFixed(2)} ${hotel.currency}`,
-      mealPart > 0
-        ? `Meal plan surcharge (${mpCode}): +${mealPart.toFixed(2)} ${hotel.currency}`
-        : "Meal plan: none",
-      prebookSummaryLine,
-      `Booking total (room + meal plan): ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
-      `Booking ID: ${booking.bookingId}`
-    ]
-      .filter((x): x is string => typeof x === "string" && x.length > 0)
-      .join("\n");
+    let paymentLink: string | null = null;
+    try {
+      const payment = await createBookingPaymentLink({
+        hotelId: hotel.id,
+        hotelName: hotel.displayName,
+        bookingId: booking.bookingId,
+        guestEmail: guest.email,
+        amount: combinedStayTotal,
+        currency: hotel.currency,
+        description: `${rooms} room(s), ${booking.roomTypeName}, ${checkIn.toISOString().slice(0, 10)} to ${checkOut
+          .toISOString()
+          .slice(0, 10)}`,
+        source: "whatsapp_native_booking"
+      });
+      paymentLink = payment.paymentLinkUrl;
+    } catch (err) {
+      if (err instanceof BookingPaymentLinkUnavailableError) {
+        console.warn("[whatsapp booking] payment link skipped:", err.message);
+      } else {
+        console.error("[whatsapp booking] payment link creation failed:", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    const lang = effectiveLang(persisted.language);
+    const confirmationBody =
+      lang === "ar"
+        ? [
+            "تم تأكيد الحجز بنجاح.",
+            `اسم الضيف: ${providedName}`,
+            `الفندق: ${hotel.displayName}`,
+            `الغرفة: ${booking.roomTypeName}`,
+            `الوصول: ${checkIn.toISOString().slice(0, 10)}`,
+            `المغادرة: ${checkOut.toISOString().slice(0, 10)}`,
+            `الضيوف: ${guests} (${adultsForBooking} بالغ، ${childrenForBooking} طفل)`,
+            `الليالي: ${booking.nights}`,
+            `إجمالي الإقامة: ${roomStayTotal.toFixed(2)} ${hotel.currency}`,
+            mealPart > 0 ? `إضافة الوجبات (${mpCode}): +${mealPart.toFixed(2)} ${hotel.currency}` : "خطة الوجبات: بدون",
+            prebookSummaryLine,
+            `الإجمالي النهائي: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
+            `رقم الحجز: ${booking.bookingId}`,
+            paymentLink
+              ? `رابط الدفع الآمن: ${paymentLink}`
+              : "الدفع: سنرسل لك رابط الدفع قريباً، أو يمكنك الدفع حسب سياسة الفندق."
+          ]
+            .filter((x): x is string => typeof x === "string" && x.length > 0)
+            .join("\n")
+        : [
+            "Booking confirmed successfully.",
+            `Guest: ${providedName}`,
+            `Hotel: ${hotel.displayName}`,
+            `Room: ${booking.roomTypeName}`,
+            `Check-in: ${checkIn.toISOString().slice(0, 10)}`,
+            `Check-out: ${checkOut.toISOString().slice(0, 10)}`,
+            `Guests: ${guests} (${adultsForBooking} adults, ${childrenForBooking} children)`,
+            `Nights: ${booking.nights}`,
+            `Room stay total: ${roomStayTotal.toFixed(2)} ${hotel.currency}`,
+            mealPart > 0
+              ? `Meal plan surcharge (${mpCode}): +${mealPart.toFixed(2)} ${hotel.currency}`
+              : "Meal plan: none",
+            prebookSummaryLine,
+            `Booking total: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
+            `Booking ID: ${booking.bookingId}`,
+            paymentLink
+              ? `Secure payment link: ${paymentLink}`
+              : "Payment: we will send a payment link shortly, or you can pay according to the hotel policy."
+          ]
+            .filter((x): x is string => typeof x === "string" && x.length > 0)
+            .join("\n");
 
     await sendWhatsAppText({
       to: normalizedPhone,
@@ -5373,11 +5425,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         suggestedRoomTypeName: booking.roomTypeName,
         suggestedPropertyId: booking.propertyId,
         nights: booking.nights,
-        totalAmount: roomStayTotal,
+        totalAmount: combinedStayTotal,
         bookingMealPlanCode: undefined,
         pendingPrebookOrder: null,
         fbCartDraft: null,
         bookingFlowReturn: null,
+        quoteConfirmedAt: undefined,
+        quoteConfirmedActionKey: undefined,
         bookingStep: undefined
       }
     });

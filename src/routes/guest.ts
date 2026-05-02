@@ -1,10 +1,10 @@
 import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
-import Stripe from "stripe";
-import { ChannelProvider, PaymentStatus } from "@prisma/client";
+import { ChannelProvider } from "@prisma/client";
 import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
+import { createBookingPaymentLink } from "../core/bookingPayments";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
 import { computeMealPlanSurchargeForStay, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
@@ -38,94 +38,10 @@ function addDays(input: Date, days: number): Date {
 
 const defaultHotelSlug = process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort";
 const offersFile = path.join(process.cwd(), "hotel-offers.json");
-const appBaseUrl = (process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
-
-function getStripeClient(): Stripe | null {
-  const apiKey = process.env.STRIPE_SECRET_KEY;
-  return apiKey ? new Stripe(apiKey) : null;
-}
-
-function toMinorUnits(amount: number, currency: string): number {
-  const upper = currency.toUpperCase();
-  const factor = ["BHD", "KWD", "OMR"].includes(upper) ? 1000 : ["JPY", "KRW"].includes(upper) ? 1 : 100;
-  return Math.max(1, Math.round(amount * factor));
-}
 
 function normalizeMealPlan(raw: unknown): MealPlanCode {
   const value = String(raw ?? "NONE").toUpperCase();
   return value === "BREAKFAST" || value === "HALF_BOARD" || value === "FULL_BOARD" ? value : "NONE";
-}
-
-async function createGuestPaymentLink(params: {
-  hotelId: string;
-  hotelName: string;
-  bookingId: string;
-  guestEmail?: string | null;
-  amount: number;
-  currency: string;
-  description: string;
-}): Promise<string | null> {
-  const stripe = getStripeClient();
-  if (!stripe) return null;
-  const localPaymentIntent = await prisma.paymentIntent.create({
-    data: {
-      hotelId: params.hotelId,
-      kind: "BOOKING",
-      provider: "stripe",
-      amount: params.amount,
-      currency: params.currency,
-      status: PaymentStatus.REQUIRES_ACTION,
-      bookingId: params.bookingId
-    }
-  });
-  const successUrl = `${appBaseUrl}/guest?bookingId=${encodeURIComponent(params.bookingId)}`;
-  const cancelUrl = `${appBaseUrl}/guest?bookingId=${encodeURIComponent(params.bookingId)}`;
-  const checkoutSession = await stripe.checkout.sessions.create({
-    mode: "payment",
-    success_url: successUrl,
-    cancel_url: cancelUrl,
-    client_reference_id: localPaymentIntent.id,
-    customer_email: params.guestEmail ?? undefined,
-    metadata: {
-      paymentIntentId: localPaymentIntent.id,
-      bookingId: params.bookingId,
-      hotelId: params.hotelId
-    },
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: params.currency.toLowerCase(),
-          unit_amount: toMinorUnits(params.amount, params.currency),
-          product_data: {
-            name: `Booking ${params.bookingId} - ${params.hotelName}`,
-            description: params.description
-          }
-        }
-      }
-    ],
-    payment_intent_data: {
-      metadata: {
-        paymentIntentId: localPaymentIntent.id,
-        bookingId: params.bookingId,
-        hotelId: params.hotelId
-      }
-    }
-  });
-  await prisma.paymentIntent.update({
-    where: { id: localPaymentIntent.id },
-    data: {
-      externalIntentId: checkoutSession.id,
-      paymentLinkUrl: checkoutSession.url ?? undefined,
-      paymentLinkSentAt: new Date(),
-      metadataJson: JSON.stringify({
-        stripeCheckoutSessionId: checkoutSession.id,
-        stripePaymentIntent: checkoutSession.payment_intent,
-        source: "guest_mobile_booking"
-      })
-    }
-  });
-  return checkoutSession.url ?? null;
 }
 
 type GuestOffer = {
@@ -686,15 +602,17 @@ guestRouter.post("/book", async (req, res) => {
 
   let paymentLink: string | null = null;
   if (paymentPreference === "PAY_NOW") {
-    paymentLink = await createGuestPaymentLink({
+    const payment = await createBookingPaymentLink({
       hotelId: hotel.id,
       hotelName: hotel.displayName,
       bookingId: booking.bookingId,
       guestEmail: guest.email,
       amount: booking.totalAmount,
       currency: hotel.currency,
-      description: `${booking.roomCount} room(s), ${booking.roomTypeName}, ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)}`
+      description: `${booking.roomCount} room(s), ${booking.roomTypeName}, ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)}`,
+      source: "guest_mobile_booking"
     }).catch(() => null);
+    paymentLink = payment?.paymentLinkUrl ?? null;
   }
 
   const guestDisplayName = guestName || guest.fullName || (ar ? "الضيف" : "Guest");
