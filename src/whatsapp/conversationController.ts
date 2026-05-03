@@ -13,7 +13,11 @@ import { findAvailableRoomType, findAvailableRoomTypes } from "../core/availabil
 import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
 import { BookingPaymentLinkUnavailableError, createBookingPaymentLink } from "../core/bookingPayments";
-import { computeMealPlanSurchargeForStay, type MealPlanCode } from "../core/frontDeskPricing";
+import {
+  computeMealPlanSurchargeForStay,
+  formatMealPlanSurchargeExplanation,
+  type MealPlanCode
+} from "../core/frontDeskPricing";
 import { createFbOrdersFromMenuLines } from "../core/fbFolio";
 import { mergeGuestProfileFromBooking } from "../core/guestProfile";
 import type { LightGuestMemory } from "../core/lightGuestMemory";
@@ -1176,10 +1180,172 @@ async function switchBookingConversationToReception(params: {
     state: {
       ...params.state,
       conversationMode: "AGENT_MODE",
-      preHandoffConversationMode: "BOOKING_MODE",
+      preHandoffConversationMode:
+        params.state.conversationMode && params.state.conversationMode !== "AGENT_MODE"
+          ? params.state.conversationMode
+          : "IDLE",
       lastActivityAt: new Date().toISOString()
     }
   });
+}
+
+function compactWhatsAppListRowId(text: string): string {
+  return normalizeMenuButtonInput(text).toLowerCase().replace(/\s+/g, "_");
+}
+
+/** Handles in-stay welcome list replies (`isv_*`) when guest has an active stay. */
+async function tryHandleInStayServiceListReply(params: {
+  hotel: { id: string; displayName: string; phoneNumberId?: string | null; currency: string };
+  guest: { id: string; fullName: string | null };
+  conversation: { id: string };
+  normalizedPhone: string;
+  text: string;
+  persisted: PersistentSessionState;
+}): Promise<boolean> {
+  const id = compactWhatsAppListRowId(params.text);
+  const known = new Set([
+    "isv_view_stay",
+    "isv_book_meal",
+    "isv_order_meal",
+    "isv_coffee",
+    "isv_bike",
+    "isv_hk",
+    "isv_reception"
+  ]);
+  if (!known.has(id)) return false;
+
+  const stay = await findGuestActiveStayBooking(params.hotel.id, params.guest.id);
+  if (!stay) {
+    await sendWhatsAppText({
+      to: params.normalizedPhone,
+      body: "We could not match this to an active in-house stay. If you just checked in, wait a moment or contact reception.",
+      phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+      conversationId: params.conversation.id
+    });
+    return true;
+  }
+
+  if (id === "isv_view_stay") {
+    const full = await prisma.booking.findUnique({
+      where: { id: stay.id },
+      include: { guest: true, roomType: true }
+    });
+    if (!full) return true;
+    const body = [
+      "Your stay summary:",
+      formatBookingSummary({
+        id: full.id,
+        guest: full.guest,
+        roomType: full.roomType,
+        checkIn: full.checkIn,
+        checkOut: full.checkOut,
+        nights: full.nights,
+        adults: full.adults,
+        children: full.children,
+        totalAmount: full.totalAmount,
+        currency: full.currency,
+        status: full.status,
+        paymentStatus: full.paymentStatus,
+        mealPlan: full.mealPlan
+      })
+    ].join("\n");
+    await sendWhatsAppText({
+      to: params.normalizedPhone,
+      body,
+      phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+      conversationId: params.conversation.id
+    });
+    await prisma.message.create({
+      data: {
+        hotelId: params.hotel.id,
+        conversationId: params.conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body,
+        aiIntent: "IN_STAY_VIEW_STAY",
+        aiConfidence: 0.95
+      }
+    });
+    return true;
+  }
+
+  if (id === "isv_reception") {
+    await switchBookingConversationToReception({
+      hotelId: params.hotel.id,
+      guestId: params.guest.id,
+      conversationId: params.conversation.id,
+      phoneE164: params.normalizedPhone,
+      to: params.normalizedPhone,
+      hotelDisplayName: params.hotel.displayName,
+      phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+      state: params.persisted
+    });
+    return true;
+  }
+
+  if (id === "isv_order_meal") {
+    const mp = String(stay.mealPlan ?? "NONE").toUpperCase();
+    if (mp === "HALF_BOARD" || mp === "FULL_BOARD") {
+      await sendWhatsAppText({
+        to: params.normalizedPhone,
+        body:
+          "Your rate includes a fixed board plan (buffet / set menu / approved options only). For included meals and meal times, tap *Book meal time* or speak with reception. Items outside your plan are extra and must be confirmed at reception before ordering.",
+        phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+        conversationId: params.conversation.id
+      });
+      return true;
+    }
+    const initDraft = {
+      purpose: "stay" as const,
+      step: "category" as const,
+      cart: [],
+      stayBookingId: stay.id
+    };
+    await saveConversationSession({
+      hotelId: params.hotel.id,
+      guestId: params.guest.id,
+      conversationId: params.conversation.id,
+      phoneE164: params.normalizedPhone,
+      state: {
+        ...params.persisted,
+        fbCartDraft: initDraft,
+        lastActivityAt: new Date().toISOString()
+      }
+    });
+    await sendFoodFlowOutbounds({
+      hotelId: params.hotel.id,
+      to: params.normalizedPhone,
+      phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+      conversationId: params.conversation.id,
+      outbounds: [initialFbOrderList("stay")]
+    });
+    return true;
+  }
+
+  if (id === "isv_book_meal") {
+    await sendWhatsAppText({
+      to: params.normalizedPhone,
+      body:
+        "To reserve breakfast, lunch, or dinner times (and guest count), reply with your preferred meal and time — e.g. *Dinner 19:30, 2 guests* — and reception will confirm. Half/full board guests: included meals follow the fixed plan; times are arranged after check-in.",
+      phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+      conversationId: params.conversation.id
+    });
+    return true;
+  }
+
+  const routed =
+    id === "isv_coffee"
+      ? "Café / coffee orders"
+      : id === "isv_bike"
+        ? "Bike or activity bookings"
+        : "Housekeeping";
+
+  await sendWhatsAppText({
+    to: params.normalizedPhone,
+    body: `${routed}: our front desk will arrange this for you. Tap *Reception* on the welcome menu or reply here and we will connect you with staff.`,
+    phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+    conversationId: params.conversation.id
+  });
+  return true;
 }
 
 async function sendCapacityRoomTypePickList(params: {
@@ -1392,16 +1558,72 @@ function computeWhatsAppStayTotalsFromRoomSubtotal(params: {
   adults: number;
   children: number;
   nights: number;
+  /** Booked physical rooms; defaults to 1. */
+  rooms?: number;
 }): { roomTotal: number; mealPart: number; stayTotal: number } {
   const roomTotal = Number((Math.max(0, params.roomStaySubtotal ?? 0)).toFixed(2));
   const mealPart = computeMealPlanSurchargeForStay({
     mealPlan: params.mealPlan,
     adults: params.adults,
     children: params.children,
-    nights: params.nights
+    nights: params.nights,
+    rooms: params.rooms
   });
   const stayTotal = Number((roomTotal + mealPart).toFixed(2));
   return { roomTotal, mealPart, stayTotal };
+}
+
+function buildWhatsAppBookingQuoteBundle(params: {
+  roomTypeName: string;
+  checkIn: string;
+  checkOut: string;
+  guestCount: number;
+  adults: number;
+  children: number;
+  rooms: number;
+  nights: number;
+  currency: string;
+  roomStaySubtotal: number | null | undefined;
+  mealPlan: MealPlanCode;
+  prebookLine: string | null;
+  upsellBlock: string;
+}): { quoteBody: string; stayTotal: number; roomTotal: number; mealPart: number } {
+  const rooms = Math.max(1, params.rooms);
+  const nights = Math.max(1, params.nights);
+  const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+    roomStaySubtotal: params.roomStaySubtotal,
+    mealPlan: params.mealPlan,
+    adults: params.adults,
+    children: params.children,
+    nights,
+    rooms
+  });
+  const denom = rooms * nights;
+  const nightlyPerRoom = denom > 0 ? roomTotal / denom : 0;
+  const mealExpl = formatMealPlanSurchargeExplanation({
+    mealPlan: params.mealPlan,
+    adults: params.adults,
+    children: params.children,
+    nights,
+    rooms,
+    currency: params.currency
+  });
+  const lines: string[] = [
+    "Here is your quote:",
+    `Room type: ${params.roomTypeName}`,
+    `Rooms: ${rooms}`,
+    `Nights: ${nights}`,
+    `Guests: ${params.guestCount} (${params.adults} adult(s), ${params.children} child(ren))`,
+    `Check-in: ${params.checkIn}`,
+    `Check-out: ${params.checkOut}`,
+    `Rate: ${nightlyPerRoom.toFixed(2)} ${params.currency} per room per night`,
+    `Room stay total: ${rooms} room(s) × ${nights} night(s) × ${nightlyPerRoom.toFixed(2)} = ${roomTotal.toFixed(2)} ${params.currency}`,
+    mealExpl
+  ];
+  if (params.prebookLine) lines.push(params.prebookLine);
+  lines.push(`Grand total (room + meal plan): ${stayTotal.toFixed(2)} ${params.currency}`);
+  if (params.upsellBlock.trim()) lines.push("", params.upsellBlock.trim());
+  return { quoteBody: lines.join("\n"), stayTotal, roomTotal, mealPart };
 }
 
 function formatWhatsAppPrebookFolioEstimateLine(currency: string, estimatedTotal: number): string | null {
@@ -1509,26 +1731,34 @@ function formatBookingSummary(booking: {
   checkOut: Date;
   nights: number;
   adults: number;
+  children?: number;
   totalAmount: number;
   currency: string;
   status: string;
   paymentStatus: string;
+  mealPlan?: string | null;
 }): string {
   const checkInStr = new Date(booking.checkIn).toISOString().slice(0, 10);
   const checkOutStr = new Date(booking.checkOut).toISOString().slice(0, 10);
-  return [
-    "Here is your booking:",
+  const ch = typeof booking.children === "number" ? booking.children : 0;
+  const guestLine =
+    typeof booking.children === "number"
+      ? `Guests: ${booking.adults} adult(s), ${ch} child(ren)`
+      : `Guests: ${booking.adults}`;
+  const lines = [
     `Booking ID: ${booking.id}`,
     `Guest: ${booking.guest.fullName ?? booking.guest.phoneE164}`,
     `Room: ${booking.roomType.name}`,
     `Check-in: ${checkInStr}`,
     `Check-out: ${checkOutStr}`,
-    `Guests: ${booking.adults}`,
+    guestLine,
     `Nights: ${booking.nights}`,
+    ...(booking.mealPlan ? [`Meal plan: ${booking.mealPlan}`] : []),
     `Total: ${Number(booking.totalAmount).toFixed(2)} ${booking.currency}`,
     `Status: ${booking.status}`,
     `Payment: ${booking.paymentStatus}`
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }
 
 type BookingWithGuestAndRoom = Awaited<
@@ -1954,6 +2184,19 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     conversationId: conversation.id,
     defaultLanguage: "en"
   });
+  if (
+    await tryHandleInStayServiceListReply({
+      hotel,
+      guest,
+      conversation,
+      normalizedPhone,
+      text: input.text,
+      persisted
+    })
+  ) {
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
   const propertyContextId = conversation.propertyId ?? persisted.suggestedPropertyId;
 
   const currentState = normalizeSessionState(persisted.stage);
@@ -2520,6 +2763,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   ) {
     const stay = await findGuestActiveStayBooking(hotel.id, guest.id);
     if (stay) {
+      const mp = String(stay.mealPlan ?? "NONE").toUpperCase();
+      if (mp === "HALF_BOARD" || mp === "FULL_BOARD") {
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body:
+            "Your stay includes a fixed board plan. Use the *Book meal time* option from your in-stay menu, or contact reception for included buffet / set-menu times. À la carte items outside the plan are extra and must be confirmed at reception.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
       const initDraft = { purpose: "stay" as const, step: "category" as const, cart: [], stayBookingId: stay.id };
       await saveConversationSession({
         hotelId: hotel.id,
@@ -2701,44 +2956,47 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
       const children = persisted.childCount ?? 0;
       const nights = persisted.nights ?? 1;
+      const rooms = persisted.roomCount ?? 1;
+      const guestCount = persisted.guestCount ?? adults + children;
       const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-      const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+      const prebookLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, nextPrebook.estimatedTotal);
+      const { stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
         roomStaySubtotal: persisted.totalAmount,
         mealPlan: mp,
         adults,
         children,
-        nights
+        nights,
+        rooms
       });
-      const prebookLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, nextPrebook.estimatedTotal);
-      const quoteBody = [
-        "Here is your quote:",
-        `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
-        `Check-in: ${persisted.checkIn}`,
-        `Check-out: ${persisted.checkOut}`,
-        `Guests: ${persisted.guestCount} (${adults} adults, ${children} children)`,
-        `Nights: ${nights}`,
-        `Room stay total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
-        mealPart > 0 ? `Meal plan surcharge: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
+      const upsellBlock = `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+        {
+          totalAmount: stayTotal,
+          nights: nights,
+          checkIn: persisted.checkIn
+        },
+        {
+          memory: guestMemoryBundle.memory,
+          repeatForSoftTone:
+            guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+          frequencyFactor: optimization.upsellFrequencyFactor,
+          messageVariant: optimization.upsellMessageVariant
+        }
+      )}`;
+      const { quoteBody } = buildWhatsAppBookingQuoteBundle({
+        roomTypeName: persisted.suggestedRoomTypeName ?? "—",
+        checkIn: String(persisted.checkIn ?? ""),
+        checkOut: String(persisted.checkOut ?? ""),
+        guestCount,
+        adults,
+        children,
+        rooms,
+        nights,
+        currency: hotel.currency,
+        roomStaySubtotal: persisted.totalAmount,
+        mealPlan: mp,
         prebookLine,
-        `Booking total (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
-        "",
-        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
-          {
-            totalAmount: stayTotal,
-            nights: nights,
-            checkIn: persisted.checkIn
-          },
-          {
-            memory: guestMemoryBundle.memory,
-            repeatForSoftTone:
-              guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
-            frequencyFactor: optimization.upsellFrequencyFactor,
-            messageVariant: optimization.upsellMessageVariant
-          }
-        )}`
-      ]
-        .filter((x): x is string => typeof x === "string")
-        .join("\n");
+        upsellBlock
+      });
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
@@ -2812,9 +3070,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             title: "Meal plan",
             rows: [
               { id: "mp_none", title: "No meal plan", description: "Room only" },
+              { id: "mp_bf", title: "Breakfast", description: "Morning package" },
               { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
-              { id: "mp_full", title: "Full board", description: "All main meals" },
-              { id: "mp_view", title: "View menu", description: "Browse categories" }
+              { id: "mp_full", title: "Full board", description: "All main meals" }
             ]
           }
         ]
@@ -3714,9 +3972,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             title: "Packages",
             rows: [
               { id: "mp_none", title: "No meal plan", description: "Room only" },
+              { id: "mp_bf", title: "Breakfast", description: "Morning package" },
               { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
-              { id: "mp_full", title: "Full board", description: "All main meals" },
-              { id: "mp_view", title: "View menu", description: "Browse categories" }
+              { id: "mp_full", title: "Full board", description: "All main meals" }
             ]
           }
         ],
@@ -4071,47 +4329,50 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
     const children = persisted.childCount ?? 0;
     const nights = persisted.nights ?? 1;
+    const rooms = persisted.roomCount ?? 1;
+    const guestCount = persisted.guestCount ?? adults + children;
     const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-    const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
-      roomStaySubtotal: persisted.totalAmount,
-      mealPlan: mp,
-      adults,
-      children,
-      nights
-    });
     const prebookLine = formatWhatsAppPrebookFolioEstimateLine(
       hotel.currency,
       persisted.pendingPrebookOrder?.estimatedTotal ?? 0
     );
-    const quoteBody = [
-      "Here is your quote:",
-      `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
-      `Check-in: ${persisted.checkIn}`,
-      `Check-out: ${persisted.checkOut}`,
-      `Guests: ${persisted.guestCount ?? adults + children} (${adults} adults, ${children} children)`,
-      `Nights: ${nights}`,
-      `Room stay total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
-      mealPart > 0 ? `Meal plan surcharge: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : "Meal plan: None",
+    const { stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+      roomStaySubtotal: persisted.totalAmount,
+      mealPlan: mp,
+      adults,
+      children,
+      nights,
+      rooms
+    });
+    const upsellBlock = `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+      {
+        totalAmount: stayTotal,
+        nights: nights,
+        checkIn: persisted.checkIn
+      },
+      {
+        memory: guestMemoryBundle.memory,
+        repeatForSoftTone:
+          guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+        frequencyFactor: optimization.upsellFrequencyFactor,
+        messageVariant: optimization.upsellMessageVariant
+      }
+    )}`;
+    const { quoteBody } = buildWhatsAppBookingQuoteBundle({
+      roomTypeName: persisted.suggestedRoomTypeName ?? "—",
+      checkIn: String(persisted.checkIn ?? ""),
+      checkOut: String(persisted.checkOut ?? ""),
+      guestCount,
+      adults,
+      children,
+      rooms,
+      nights,
+      currency: hotel.currency,
+      roomStaySubtotal: persisted.totalAmount,
+      mealPlan: mp,
       prebookLine,
-      `Booking total (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
-      "",
-      `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
-        {
-          totalAmount: stayTotal,
-          nights: nights,
-          checkIn: persisted.checkIn
-        },
-        {
-          memory: guestMemoryBundle.memory,
-          repeatForSoftTone:
-            guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
-          frequencyFactor: optimization.upsellFrequencyFactor,
-          messageVariant: optimization.upsellMessageVariant
-        }
-      )}`
-    ]
-      .filter((x): x is string => typeof x === "string" && x.length > 0)
-      .join("\n");
+      upsellBlock
+    });
     try {
       await sendWhatsAppButtons({
         to: normalizedPhone,
@@ -4262,9 +4523,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             title: bookingLang(persisted.language) === "ar" ? "الباقات" : "Packages",
             rows: [
               { id: "mp_none", title: "No meal plan", description: "Room only" },
+              {
+                id: "mp_bf",
+                title: bookingLang(persisted.language) === "ar" ? "إفطار" : "Breakfast",
+                description: bookingLang(persisted.language) === "ar" ? "باقة صباحية" : "Morning package"
+              },
               { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
-              { id: "mp_full", title: "Full board", description: "All main meals" },
-              { id: "mp_view", title: "View menu", description: "Browse categories" }
+              { id: "mp_full", title: "Full board", description: "All main meals" }
             ]
           }
         ]
@@ -4586,16 +4851,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       if (prev === "meal_plan") {
         const mealOutbound: FoodFlowOutbound = {
           kind: "list",
-          body: "Choose your meal package for this stay (you can browse our restaurant menu):",
+          body: "Choose your meal package for this stay:",
           buttonText: "Meal plan",
           sections: [
             {
               title: "Packages",
               rows: [
                 { id: "mp_none", title: "No meal plan", description: "Room only" },
+                { id: "mp_bf", title: "Breakfast", description: "Morning package" },
                 { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
-                { id: "mp_full", title: "Full board", description: "All main meals" },
-                { id: "mp_view", title: "View menu", description: "Browse categories" }
+                { id: "mp_full", title: "Full board", description: "All main meals" }
               ]
             }
           ]
@@ -5706,48 +5971,21 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             title: "Packages",
             rows: [
               { id: "mp_none", title: "No meal plan", description: "Room only" },
+              { id: "mp_bf", title: "Breakfast", description: "Morning package" },
               { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
-              { id: "mp_full", title: "Full board", description: "All main meals" },
-              { id: "mp_view", title: "View menu", description: "Browse categories" }
+              { id: "mp_full", title: "Full board", description: "All main meals" }
             ]
           }
         ]
       };
       if (t.includes("mp_view")) {
-        await saveConversationSession({
-          hotelId: hotel.id,
-          guestId: guest.id,
-          conversationId: conversation.id,
-          phoneE164: normalizedPhone,
-          state: {
-            ...baseState,
-            stage: "new",
-            bookingStep: "meal_plan",
-            bookingFlowReturn: "meal_plan",
-            fbCartDraft: { purpose: "meal_plan_view", step: "category", cart: [] },
-            bookingRoomOffers: persisted.bookingRoomOffers,
-            suggestedRoomTypeId: persisted.suggestedRoomTypeId,
-            suggestedRoomTypeName: persisted.suggestedRoomTypeName,
-            suggestedPropertyId: persisted.suggestedPropertyId,
-            nights: persisted.nights,
-            totalAmount: persisted.totalAmount
-          }
-        });
-        await sendFoodFlowOutbounds({
-          hotelId: hotel.id,
+        await sendWhatsAppText({
           to: normalizedPhone,
+          body:
+            "Browsing the full à la carte menu during booking is available for *room only* or *breakfast* stays. Half board and full board are fixed plans—after check-in you can pick meal times and included buffet / set-menu options on WhatsApp.",
           phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id,
-          outbounds: [initialFbOrderList("meal_plan_view")]
+          conversationId: conversation.id
         });
-        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-        return;
-      }
-      let code: WhatsAppMealPlanCode = "NONE";
-      if (t.includes("mp_half")) code = "HALF_BOARD";
-      else if (t.includes("mp_full")) code = "FULL_BOARD";
-      else if (t.includes("mp_none")) code = "NONE";
-      else {
         await sendFoodFlowOutbounds({
           hotelId: hotel.id,
           to: normalizedPhone,
@@ -5756,6 +5994,130 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           outbounds: [mealOutbound]
         });
         await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+      let code: WhatsAppMealPlanCode | null = null;
+      if (t.includes("mp_half")) code = "HALF_BOARD";
+      else if (t.includes("mp_full")) code = "FULL_BOARD";
+      else if (t.includes("mp_bf")) code = "BREAKFAST";
+      else if (t.includes("mp_none")) code = "NONE";
+      if (code === null) {
+        await sendFoodFlowOutbounds({
+          hotelId: hotel.id,
+          to: normalizedPhone,
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id,
+          outbounds: [mealOutbound]
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return;
+      }
+      if (code === "HALF_BOARD" || code === "FULL_BOARD") {
+        await sendWhatsAppText({
+          to: normalizedPhone,
+          body:
+            "Your meal plan is fixed (buffet, set menu, or choices from the hotel’s approved board menu only). You can select meal times and included options after check-in on WhatsApp—we do not build à la carte meals during booking for this plan.",
+          phoneNumberId: hotel.phoneNumberId,
+          conversationId: conversation.id
+        });
+        const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
+        const children = persisted.childCount ?? 0;
+        const nights = persisted.nights ?? 1;
+        const rooms = persisted.roomCount ?? 1;
+        const guestCount = persisted.guestCount ?? adults + children;
+        const mp = whatsAppMealPlanToPricingCode(code);
+        const { stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+          roomStaySubtotal: persisted.totalAmount,
+          mealPlan: mp,
+          adults,
+          children,
+          nights,
+          rooms
+        });
+        const upsellBlock = `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+          {
+            totalAmount: stayTotal,
+            nights: nights,
+            checkIn: persisted.checkIn
+          },
+          {
+            memory: guestMemoryBundle.memory,
+            repeatForSoftTone:
+              guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+            frequencyFactor: optimization.upsellFrequencyFactor,
+            messageVariant: optimization.upsellMessageVariant
+          }
+        )}`;
+        const { quoteBody } = buildWhatsAppBookingQuoteBundle({
+          roomTypeName: persisted.suggestedRoomTypeName ?? "—",
+          checkIn: String(persisted.checkIn ?? ""),
+          checkOut: String(persisted.checkOut ?? ""),
+          guestCount,
+          adults,
+          children,
+          rooms,
+          nights,
+          currency: hotel.currency,
+          roomStaySubtotal: persisted.totalAmount,
+          mealPlan: mp,
+          prebookLine: null,
+          upsellBlock
+        });
+        try {
+          await sendWhatsAppButtons({
+            to: normalizedPhone,
+            body: quoteBody,
+            buttons: QUOTE_BUTTONS,
+            phoneNumberId: hotel.phoneNumberId,
+            conversationId: conversation.id
+          });
+        } catch {
+          await sendWhatsAppText({
+            to: normalizedPhone,
+            body: quoteBody,
+            phoneNumberId: hotel.phoneNumberId,
+            conversationId: conversation.id
+          });
+        }
+        await prisma.message.create({
+          data: {
+            hotelId: hotel.id,
+            conversationId: conversation.id,
+            direction: MessageDirection.OUTBOUND,
+            body: quoteBody,
+            aiIntent: "BOOKING_QUOTED_MEALS",
+            aiConfidence: 0.97
+          }
+        });
+        await saveConversationSession({
+          hotelId: hotel.id,
+          guestId: guest.id,
+          conversationId: conversation.id,
+          phoneE164: normalizedPhone,
+          state: {
+            ...baseState,
+            stage: "quoted",
+            bookingStep: undefined,
+            bookingRoomOffers: undefined,
+            adultCount: persisted.adultCount,
+            childCount: persisted.childCount,
+            guestCount: persisted.guestCount ?? 1,
+            roomCount: persisted.roomCount ?? 1,
+            checkIn: persisted.checkIn,
+            checkOut: persisted.checkOut,
+            suggestedRoomTypeId: persisted.suggestedRoomTypeId,
+            suggestedRoomTypeName: persisted.suggestedRoomTypeName,
+            suggestedPropertyId: persisted.suggestedPropertyId,
+            nights: persisted.nights,
+            totalAmount: persisted.totalAmount,
+            bookingMealPlanCode: code,
+            pendingPrebookOrder: null
+          }
+        });
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: { state: DbConversationState.QUOTED, lastMessageAt: new Date() }
+        });
         return;
       }
       const preBody: FoodFlowOutbound = {
@@ -5837,42 +6199,46 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         const adults = persisted.adultCount ?? persisted.guestCount ?? 2;
         const children = persisted.childCount ?? 0;
         const nights = persisted.nights ?? 1;
+        const rooms = persisted.roomCount ?? 1;
+        const guestCount = persisted.guestCount ?? adults + children;
         const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-        const { roomTotal, mealPart, stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
+        const { stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
           roomStaySubtotal: persisted.totalAmount,
           mealPlan: mp,
           adults,
           children,
-          nights
+          nights,
+          rooms
         });
-        const quoteBody = [
-          "Here is your quote:",
-          `Room type: ${persisted.suggestedRoomTypeName ?? "—"}`,
-          `Check-in: ${persisted.checkIn}`,
-          `Check-out: ${persisted.checkOut}`,
-          `Guests: ${persisted.guestCount} (${adults} adults, ${children} children)`,
-          `Nights: ${nights}`,
-          `Room stay total: ${roomTotal.toFixed(2)} ${hotel.currency}`,
-          mealPart > 0 ? `Meal plan surcharge: +${mealPart.toFixed(2)} ${hotel.currency} (${mp})` : `Meal plan: None`,
-          `Booking total (room + meal plan): ${stayTotal.toFixed(2)} ${hotel.currency}`,
-          "",
-          `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
-            {
-              totalAmount: stayTotal,
-              nights: nights,
-              checkIn: persisted.checkIn
-            },
-            {
-              memory: guestMemoryBundle.memory,
-              repeatForSoftTone:
-                guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
-              frequencyFactor: optimization.upsellFrequencyFactor,
-              messageVariant: optimization.upsellMessageVariant
-            }
-          )}`
-        ]
-          .filter((x): x is string => typeof x === "string")
-          .join("\n");
+        const upsellBlock = `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+          {
+            totalAmount: stayTotal,
+            nights: nights,
+            checkIn: persisted.checkIn
+          },
+          {
+            memory: guestMemoryBundle.memory,
+            repeatForSoftTone:
+              guestMemoryBundle.confirmedStayCount >= 2 || Boolean(guestMemoryBundle.memory.repeatGuest),
+            frequencyFactor: optimization.upsellFrequencyFactor,
+            messageVariant: optimization.upsellMessageVariant
+          }
+        )}`;
+        const { quoteBody } = buildWhatsAppBookingQuoteBundle({
+          roomTypeName: persisted.suggestedRoomTypeName ?? "—",
+          checkIn: String(persisted.checkIn ?? ""),
+          checkOut: String(persisted.checkOut ?? ""),
+          guestCount,
+          adults,
+          children,
+          rooms,
+          nights,
+          currency: hotel.currency,
+          roomStaySubtotal: persisted.totalAmount,
+          mealPlan: mp,
+          prebookLine: null,
+          upsellBlock
+        });
         try {
           await sendWhatsAppButtons({
             to: normalizedPhone,
@@ -5983,16 +6349,16 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
       const mealOutbound: FoodFlowOutbound = {
         kind: "list",
-        body: "Choose your meal package for this stay (you can browse our restaurant menu):",
+        body: "Choose your meal package for this stay:",
         buttonText: "Meal plan",
         sections: [
           {
             title: "Packages",
             rows: [
               { id: "mp_none", title: "No meal plan", description: "Room only" },
+              { id: "mp_bf", title: "Breakfast", description: "Morning package" },
               { id: "mp_half", title: "Half board", description: "Breakfast + dinner" },
-              { id: "mp_full", title: "Full board", description: "All main meals" },
-              { id: "mp_view", title: "View menu", description: "Browse categories" }
+              { id: "mp_full", title: "Full board", description: "All main meals" }
             ]
           }
         ]
@@ -6747,19 +7113,24 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     }
     if (bookingToShow) {
-      const summary = formatBookingSummary({
-        id: bookingToShow.id,
-        guest: bookingToShow.guest,
-        roomType: bookingToShow.roomType,
-        checkIn: bookingToShow.checkIn,
-        checkOut: bookingToShow.checkOut,
-        nights: bookingToShow.nights,
-        adults: bookingToShow.adults,
-        totalAmount: bookingToShow.totalAmount,
-        currency: bookingToShow.currency,
-        status: bookingToShow.status,
-        paymentStatus: bookingToShow.paymentStatus
-      });
+      const summary = [
+        "Here is your booking:",
+        formatBookingSummary({
+          id: bookingToShow.id,
+          guest: bookingToShow.guest,
+          roomType: bookingToShow.roomType,
+          checkIn: bookingToShow.checkIn,
+          checkOut: bookingToShow.checkOut,
+          nights: bookingToShow.nights,
+          adults: bookingToShow.adults,
+          children: bookingToShow.children,
+          totalAmount: bookingToShow.totalAmount,
+          currency: bookingToShow.currency,
+          status: bookingToShow.status,
+          paymentStatus: bookingToShow.paymentStatus,
+          mealPlan: bookingToShow.mealPlan
+        })
+      ].join("\n");
       await sendWhatsAppText({
         to: normalizedPhone,
         body: summary,

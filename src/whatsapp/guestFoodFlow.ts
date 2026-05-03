@@ -222,6 +222,29 @@ export async function advanceFbCartDraft(params: {
     return { draft, outbound: [buildCategoryList("meal_plan_view")] };
   }
 
+  if (draft.purpose === "stay" && draft.stayBookingId) {
+    const stayBooking = await prisma.booking.findUnique({
+      where: { id: draft.stayBookingId },
+      select: { mealPlan: true }
+    });
+    const mp = String(stayBooking?.mealPlan ?? "NONE").toUpperCase();
+    if (mp === "HALF_BOARD" || mp === "FULL_BOARD") {
+      const blocksCustom =
+        raw.startsWith(PREFIX_CAT) || raw.startsWith(PREFIX_ITEM) || raw.includes("fb_add_yes");
+      if (blocksCustom) {
+        return {
+          draft: null,
+          outbound: [
+            {
+              kind: "text",
+              body: "Your board plan is fixed. Please book meal times with reception or use the in-stay *Book meal time* flow. À la carte cart ordering is only for extras confirmed as chargeable."
+            }
+          ]
+        };
+      }
+    }
+  }
+
   // --- back navigation (order flows) ---
   if (isBack(raw)) {
     if (draft.step === "confirm") {

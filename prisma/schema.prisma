@@ -741,6 +741,8 @@ model Booking {
   guestJourneyPreArrival24hSentAt        DateTime?
   /// Guest journey: CHECKIN_DAY WhatsApp sent (once per booking).
   guestJourneyCheckinDaySentAt           DateTime?
+  /// Guest journey: in-stay welcome / service menu WhatsApp sent (once per booking; idempotency).
+  guestJourneyInStayWelcomeSentAt        DateTime?
   /// Guest journey: POST_CHECKOUT_THANK_YOU WhatsApp sent (once per booking).
   guestJourneyPostCheckoutThankYouSentAt DateTime?
   /// Guest journey: REVIEW_REQUEST WhatsApp sent (once per booking).

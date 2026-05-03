@@ -1,6 +1,6 @@
 import type { Request } from "express";
 import type { RoomType, RoomUnit } from "@prisma/client";
-import { loadFrontDeskPricing } from "../core/frontDeskPricing";
+import { getMealPlanUnitRate, loadFrontDeskPricing } from "../core/frontDeskPricing";
 import { MANUAL_CHECK_IN_NATIONALITY_OPTIONS } from "./manualCheckInNationalities";
 import type { ManualCheckInRoomSelectionSnapshot } from "./manualCheckInRoomSelection";
 
@@ -183,7 +183,9 @@ export function buildManualCheckInPageHtml(
     })
     .join("");
 
-  const mealHints = `Breakfast +${formatMoney(fdPricing.mealPlans.BREAKFAST.perPersonPerNight, hotel.currency)}/guest/night · Half board +${formatMoney(fdPricing.mealPlans.HALF_BOARD.perPersonPerNight, hotel.currency)}/guest/night`;
+  const br = getMealPlanUnitRate("BREAKFAST");
+  const hr = getMealPlanUnitRate("HALF_BOARD");
+  const mealHints = `Breakfast +${formatMoney(br.rate, hotel.currency)}/${br.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night · Half board +${formatMoney(hr.rate, hotel.currency)}/${hr.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night`;
   const mp = (form?.mealPlan ?? "NONE").toUpperCase();
   const mealSelected = (v: string) => (mp === v ? " selected" : "");
   const bc = (form?.bookingChannel ?? "DIRECT").toUpperCase();

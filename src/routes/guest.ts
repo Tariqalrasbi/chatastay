@@ -1,12 +1,16 @@
 import { Router } from "express";
-import fs from "node:fs";
-import path from "node:path";
 import { ChannelProvider } from "@prisma/client";
 import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
 import { createBookingPaymentLink } from "../core/bookingPayments";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
-import { computeMealPlanSurchargeForStay, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
+import {
+  computeMealPlanSurchargeForStay,
+  getMealPlanUnitRate,
+  loadFrontDeskPricing,
+  type MealPlanCode
+} from "../core/frontDeskPricing";
+import { formatHotelOfferDetails, readActiveHotelOffers } from "../core/hotelOffers";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
@@ -37,38 +41,10 @@ function addDays(input: Date, days: number): Date {
 }
 
 const defaultHotelSlug = process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort";
-const offersFile = path.join(process.cwd(), "hotel-offers.json");
 
 function normalizeMealPlan(raw: unknown): MealPlanCode {
   const value = String(raw ?? "NONE").toUpperCase();
   return value === "BREAKFAST" || value === "HALF_BOARD" || value === "FULL_BOARD" ? value : "NONE";
-}
-
-type GuestOffer = {
-  id: string;
-  code: string;
-  title: string;
-  type: string;
-  discountPercent: number;
-  isActive: boolean;
-  seasonStart?: string;
-  seasonEnd?: string;
-  minNights?: number;
-  minDaysBeforeCheckIn?: number;
-  stayX?: number;
-  stayY?: number;
-  corporateOnly?: boolean;
-};
-
-function readActiveOffersForGuest(): GuestOffer[] {
-  try {
-    if (!fs.existsSync(offersFile)) return [];
-    const raw = JSON.parse(fs.readFileSync(offersFile, "utf8")) as unknown;
-    if (!Array.isArray(raw)) return [];
-    return (raw as GuestOffer[]).filter((offer) => offer.isActive);
-  } catch {
-    return [];
-  }
 }
 
 function parseIntSafe(raw: unknown, fallback: number, min: number, max: number): number {
@@ -158,7 +134,7 @@ guestRouter.get("/", async (req, res) => {
       (await prisma.hotel.findFirst({
         include: { roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } } }
       }));
-    const offers = readActiveOffersForGuest();
+    const offers = readActiveHotelOffers();
 
     const roomRows = hotel?.roomTypes
       .map(
@@ -173,17 +149,11 @@ guestRouter.get("/", async (req, res) => {
 
     const offerRows = offers
       .map((offer) => {
-        const conditionParts: string[] = [];
-        if (offer.type === "STAY_X_GET_Y_FREE" && offer.stayX && offer.stayY) conditionParts.push(`Stay ${offer.stayX} get ${offer.stayY} free`);
-        if (offer.type === "EARLY_BOOKING" && offer.minDaysBeforeCheckIn) conditionParts.push(`${offer.minDaysBeforeCheckIn}+ days ahead`);
-        if (offer.type === "LONG_STAY" && offer.minNights) conditionParts.push(`${offer.minNights}+ nights`);
-        if (offer.type === "SEASONAL" && offer.seasonStart && offer.seasonEnd) conditionParts.push(`${offer.seasonStart} to ${offer.seasonEnd}`);
-        if (offer.corporateOnly) conditionParts.push("Corporate only");
         return `<tr>
       <td>${escapeHtml(offer.title)}</td>
       <td>${escapeHtml(offer.type)}</td>
       <td>${offer.discountPercent}%</td>
-      <td>${escapeHtml(conditionParts.join(" • ") || "Standard offer terms")}</td>
+      <td>${escapeHtml(formatHotelOfferDetails(offer))}</td>
     </tr>`;
       })
       .join("");
@@ -359,8 +329,12 @@ guestRouter.get("/book", async (req, res) => {
 
   const today = formatDate(new Date());
   const tomorrow = formatDate(addDays(new Date(), 1));
-  const pricing = loadFrontDeskPricing();
   const ar = lang === "ar";
+  const mealPlanSuffix = (code: MealPlanCode) => {
+    const { mode, rate } = getMealPlanUnitRate(code);
+    const unit = mode === "PER_GUEST_PER_NIGHT" ? (ar ? "ضيف" : "guest") : ar ? "غرفة" : "room";
+    return `(+${rate.toFixed(2)} ${escapeHtml(hotel.currency)}/${unit}/${ar ? "ليلة" : "night"})`;
+  };
   const roomOptions = hotel.roomTypes
     .map(
       (room) =>
@@ -418,9 +392,9 @@ ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
     <label>${ar ? "خطة الوجبات" : "Meal plan"}
       <select name="mealPlan">
         <option value="NONE">${ar ? "غرفة فقط" : "Room only"}</option>
-        <option value="BREAKFAST">${ar ? "إفطار" : "Breakfast"} (+${pricing.mealPlans.BREAKFAST.perPersonPerNight.toFixed(2)} ${escapeHtml(hotel.currency)}/guest/night)</option>
-        <option value="HALF_BOARD">${ar ? "نصف إقامة" : "Half board"} (+${pricing.mealPlans.HALF_BOARD.perPersonPerNight.toFixed(2)} ${escapeHtml(hotel.currency)}/guest/night)</option>
-        <option value="FULL_BOARD">${ar ? "إقامة كاملة" : "Full board"} (+${pricing.mealPlans.FULL_BOARD.perPersonPerNight.toFixed(2)} ${escapeHtml(hotel.currency)}/guest/night)</option>
+        <option value="BREAKFAST">${ar ? "إفطار" : "Breakfast"} ${mealPlanSuffix("BREAKFAST")}</option>
+        <option value="HALF_BOARD">${ar ? "نصف إقامة" : "Half board"} ${mealPlanSuffix("HALF_BOARD")}</option>
+        <option value="FULL_BOARD">${ar ? "إقامة كاملة" : "Full board"} ${mealPlanSuffix("FULL_BOARD")}</option>
       </select>
     </label>
     <label>${ar ? "الدفع" : "Payment"}
@@ -558,7 +532,10 @@ guestRouter.post("/book", async (req, res) => {
     nightlyRate: offer.nightlyTotal,
     nights: offer.nights,
     totalAmount: Number(
-      (offer.total + computeMealPlanSurchargeForStay({ mealPlan, adults, children, nights: offer.nights })).toFixed(2)
+      (
+        offer.total +
+        computeMealPlanSurchargeForStay({ mealPlan, adults, children, nights: offer.nights, rooms })
+      ).toFixed(2)
     ),
     bookingMealPlanCode: mealPlan,
     specialRequests

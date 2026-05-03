@@ -1,4 +1,5 @@
 import knowledge from "../data/al_ashkhara_knowledge.json";
+import { buildLiveOffersMessage } from "../core/hotelOffers";
 
 type KnowledgeTopic =
   | "room_types"
@@ -190,12 +191,7 @@ export function getRoomTypesForBookingSubmenu(): string {
 }
 
 export function getOffersForBookingSubmenu(): string {
-  const k = knowledge as Record<string, unknown>;
-  const offers = Array.isArray(k.offers) ? (k.offers as string[]) : undefined;
-  if (offers && offers.length > 0) {
-    return "Current offers and promotions:\n" + offers.map((o, i) => `${i + 1}. ${o}`).join("\n");
-  }
-  return "No current offers or promotions are listed. For the best available rate, please check availability for your dates.";
+  return buildLiveOffersMessage();
 }
 
 export function getLocationAndHotelInfoForSubmenu(): string {

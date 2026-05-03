@@ -3,6 +3,9 @@ import path from "node:path";
 
 export type MealPlanCode = "NONE" | "BREAKFAST" | "HALF_BOARD" | "FULL_BOARD";
 
+/** How meal-plan surcharge is applied for quotes and folio-style estimates. */
+export type MealPlanPricingMode = "PER_ROOM_PER_NIGHT" | "PER_GUEST_PER_NIGHT";
+
 export type FrontDeskExtra = {
   id: string;
   label: string;
@@ -13,13 +16,19 @@ export type FrontDeskExtra = {
   applyPerHour: boolean;
 };
 
+export type MealPlanPricingRow = {
+  /** Default: per room per night (hotel industry standard for board). */
+  pricingMode?: MealPlanPricingMode;
+  /** OMR (or hotel currency) per room per night when pricingMode is PER_ROOM_PER_NIGHT (or legacy default). */
+  perRoomPerNight?: number;
+  /** OMR per guest per night when pricingMode is PER_GUEST_PER_NIGHT. */
+  perGuestPerNight?: number;
+  /** @deprecated Legacy key — when no pricingMode/perRoomPerNight, treated as per-room-per-night for backward compatibility. */
+  perPersonPerNight?: number;
+};
+
 export type FrontDeskPricingConfig = {
-  mealPlans: Record<
-    MealPlanCode,
-    {
-      perPersonPerNight: number;
-    }
-  >;
+  mealPlans: Record<MealPlanCode, MealPlanPricingRow>;
   extras: FrontDeskExtra[];
 };
 
@@ -27,10 +36,10 @@ const configPath = path.join(process.cwd(), "front-desk-pricing.json");
 
 const defaults: FrontDeskPricingConfig = {
   mealPlans: {
-    NONE: { perPersonPerNight: 0 },
-    BREAKFAST: { perPersonPerNight: 4 },
-    HALF_BOARD: { perPersonPerNight: 15 },
-    FULL_BOARD: { perPersonPerNight: 28 }
+    NONE: { pricingMode: "PER_ROOM_PER_NIGHT", perRoomPerNight: 0 },
+    BREAKFAST: { pricingMode: "PER_ROOM_PER_NIGHT", perRoomPerNight: 4 },
+    HALF_BOARD: { pricingMode: "PER_ROOM_PER_NIGHT", perRoomPerNight: 15 },
+    FULL_BOARD: { pricingMode: "PER_ROOM_PER_NIGHT", perRoomPerNight: 28 }
   },
   extras: [
     { id: "airport_transfer", label: "Airport transfer (one-way)", amount: 25, applyPerNight: false, applyPerHour: false },
@@ -38,6 +47,29 @@ const defaults: FrontDeskPricingConfig = {
     { id: "bike_rent", label: "Bikes rent", amount: 10, applyPerNight: false, applyPerHour: true }
   ]
 };
+
+function normalizeMealPlanRow(raw: unknown, fallbackPerPerson: number): MealPlanPricingRow {
+  if (!raw || typeof raw !== "object") {
+    return { pricingMode: "PER_ROOM_PER_NIGHT", perRoomPerNight: Math.max(0, fallbackPerPerson) };
+  }
+  const o = raw as Record<string, unknown>;
+  const modeRaw = String(o.pricingMode ?? "").toUpperCase();
+  const mode: MealPlanPricingMode =
+    modeRaw === "PER_GUEST_PER_NIGHT" ? "PER_GUEST_PER_NIGHT" : "PER_ROOM_PER_NIGHT";
+
+  const perRoom = typeof o.perRoomPerNight === "number" ? Math.max(0, o.perRoomPerNight) : undefined;
+  const perGuest = typeof o.perGuestPerNight === "number" ? Math.max(0, o.perGuestPerNight) : undefined;
+  const legacy = typeof o.perPersonPerNight === "number" ? Math.max(0, o.perPersonPerNight) : undefined;
+
+  if (mode === "PER_GUEST_PER_NIGHT") {
+    const rate = perGuest ?? legacy ?? fallbackPerPerson;
+    return { pricingMode: "PER_GUEST_PER_NIGHT", perGuestPerNight: rate };
+  }
+
+  // PER_ROOM_PER_NIGHT: prefer explicit perRoomPerNight; else migrate legacy perPersonPerNight as room-night rate.
+  const rate = perRoom ?? legacy ?? fallbackPerPerson;
+  return { pricingMode: "PER_ROOM_PER_NIGHT", perRoomPerNight: rate };
+}
 
 function sanitizeConfig(raw: unknown): FrontDeskPricingConfig {
   if (!raw || typeof raw !== "object") return defaults;
@@ -70,11 +102,8 @@ function sanitizeConfig(raw: unknown): FrontDeskPricingConfig {
   if (mealPlans && typeof mealPlans === "object") {
     for (const key of ["NONE", "BREAKFAST", "HALF_BOARD", "FULL_BOARD"] as const) {
       const m = (mealPlans as Record<string, unknown>)[key];
-      if (m && typeof m === "object" && typeof (m as { perPersonPerNight?: unknown }).perPersonPerNight === "number") {
-        next.mealPlans[key] = {
-          perPersonPerNight: Math.max(0, Number((m as { perPersonPerNight: number }).perPersonPerNight))
-        };
-      }
+      const legacyDefault = defaults.mealPlans[key].perRoomPerNight ?? 0;
+      next.mealPlans[key] = normalizeMealPlanRow(m, legacyDefault);
     }
   }
   return next;
@@ -93,12 +122,25 @@ export function loadFrontDeskPricing(): FrontDeskPricingConfig {
   }
 }
 
+/** Resolved numeric rate used in the formula line (per room per night or per guest per night). */
+export function getMealPlanUnitRate(mealPlan: MealPlanCode): { mode: MealPlanPricingMode; rate: number } {
+  const pricing = loadFrontDeskPricing();
+  const row = pricing.mealPlans[mealPlan] ?? { pricingMode: "PER_ROOM_PER_NIGHT" as const, perRoomPerNight: 0 };
+  const mode = row.pricingMode ?? "PER_ROOM_PER_NIGHT";
+  if (mode === "PER_GUEST_PER_NIGHT") {
+    return { mode, rate: row.perGuestPerNight ?? row.perPersonPerNight ?? 0 };
+  }
+  return { mode, rate: row.perRoomPerNight ?? row.perPersonPerNight ?? 0 };
+}
+
 export type ManualCheckInTotalInput = {
   baseNightlyRate: number;
   nights: number;
   mealPlan: MealPlanCode;
   adults: number;
   children: number;
+  /** Physical rooms for the stay (manual check-in form is one room). */
+  rooms?: number;
   selectedExtraIds: string[];
   /** Hours for extras with applyPerHour (default 1) */
   extraHoursById?: Record<string, number>;
@@ -113,13 +155,18 @@ export function computeManualCheckInTotal(params: ManualCheckInTotalInput): {
 } {
   const pricing = loadFrontDeskPricing();
   const { baseNightlyRate, nights, mealPlan, adults, children } = params;
-  const pax = Math.max(0, adults) + Math.max(0, children);
-  const roomSubtotal = Number((Math.max(0, baseNightlyRate) * Math.max(1, nights)).toFixed(2));
-  const mealRate = pricing.mealPlans[mealPlan]?.perPersonPerNight ?? 0;
-  const mealSubtotal = Number((mealRate * pax * Math.max(1, nights)).toFixed(2));
+  const rooms = Math.max(1, params.rooms ?? 1);
+  const roomSubtotal = Number((Math.max(0, baseNightlyRate) * rooms * Math.max(1, nights)).toFixed(2));
+  const mealSubtotal = computeMealPlanSurchargeForStay({
+    mealPlan,
+    adults,
+    children,
+    nights,
+    rooms
+  });
 
   const breakdown: { label: string; amount: number }[] = [
-    { label: "Room (rack × nights)", amount: roomSubtotal },
+    { label: `Room (rack × ${rooms} room(s) × ${nights} night(s))`, amount: roomSubtotal },
     { label: `Meals (${mealPlan})`, amount: mealSubtotal }
   ];
 
@@ -147,15 +194,49 @@ export function computeManualCheckInTotal(params: ManualCheckInTotalInput): {
   return { roomSubtotal, mealSubtotal, extrasSubtotal, total, breakdown };
 }
 
-/** Meal-plan add-on for WhatsApp quotes (room total is separate). */
+/**
+ * Meal-plan surcharge for a stay: default **rooms × nights × rate** (per room per night).
+ * Optional `PER_GUEST_PER_NIGHT`: (adults + children) × nights × rate.
+ */
 export function computeMealPlanSurchargeForStay(params: {
   mealPlan: MealPlanCode;
   adults: number;
   children: number;
   nights: number;
+  /** Number of booked rooms; defaults to 1. */
+  rooms?: number;
 }): number {
-  const pricing = loadFrontDeskPricing();
-  const pax = Math.max(0, params.adults) + Math.max(0, params.children);
-  const rate = pricing.mealPlans[params.mealPlan]?.perPersonPerNight ?? 0;
-  return Number((rate * pax * Math.max(1, params.nights)).toFixed(2));
+  const { mealPlan, adults, children, nights } = params;
+  const rooms = Math.max(1, params.rooms ?? 1);
+  const { mode, rate } = getMealPlanUnitRate(mealPlan);
+  if (rate <= 0 || mealPlan === "NONE") return 0;
+  const n = Math.max(1, nights);
+  if (mode === "PER_GUEST_PER_NIGHT") {
+    const pax = Math.max(0, adults) + Math.max(0, children);
+    return Number((rate * pax * n).toFixed(2));
+  }
+  return Number((rate * rooms * n).toFixed(2));
+}
+
+/** Human-readable meal surcharge line for WhatsApp quotes and confirmations. */
+export function formatMealPlanSurchargeExplanation(params: {
+  mealPlan: MealPlanCode;
+  adults: number;
+  children: number;
+  nights: number;
+  rooms: number;
+  currency: string;
+}): string {
+  const amount = computeMealPlanSurchargeForStay(params);
+  if (amount <= 0 || params.mealPlan === "NONE") {
+    return `Meal plan: None (room only)`;
+  }
+  const { mode, rate } = getMealPlanUnitRate(params.mealPlan);
+  const rooms = Math.max(1, params.rooms);
+  const nights = Math.max(1, params.nights);
+  if (mode === "PER_GUEST_PER_NIGHT") {
+    const pax = Math.max(0, params.adults) + Math.max(0, params.children);
+    return `Meal plan (${params.mealPlan}): ${pax} guest(s) × ${nights} night(s) × ${rate.toFixed(2)} ${params.currency}/guest/night = ${amount.toFixed(2)} ${params.currency}`;
+  }
+  return `Meal plan (${params.mealPlan}): ${rooms} room(s) × ${nights} night(s) × ${rate.toFixed(2)} ${params.currency}/room/night = ${amount.toFixed(2)} ${params.currency}`;
 }

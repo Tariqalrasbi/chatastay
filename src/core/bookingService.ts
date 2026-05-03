@@ -241,7 +241,8 @@ export async function createConfirmedBookingAtomic(params: {
     mealPlan,
     adults,
     children,
-    nights: offer.nights
+    nights: offer.nights,
+    rooms: params.rooms
   });
   const totalWithMeals = Number((offer.total + mealSubtotal).toFixed(2));
   const perRoomTotal = Number((totalWithMeals / Math.max(1, params.rooms)).toFixed(2));
@@ -443,7 +444,7 @@ export async function createConfirmedBookingAtomic(params: {
     roomTypeId: offer.roomTypeId,
     roomTypeName: offer.roomTypeName,
     nights: offer.nights,
-    totalAmount: offer.total,
+    totalAmount: totalWithMeals,
     checkOut: params.checkOut
   }).catch((err) =>
     console.error("[light-guest-memory] merge after confirm failed:", err instanceof Error ? err.message : String(err))

@@ -55,7 +55,7 @@ export async function findAvailableRoomType(params: {
     orderBy: { baseNightlyRate: "asc" }
   });
 
-  const useMix = params.adults !== undefined && params.children !== undefined;
+  const useMix = params.rooms <= 1 && params.adults !== undefined && params.children !== undefined;
   const filtered = useMix
     ? roomTypes.filter((rt) => roomTypeAllowsOccupancy(rt.code, params.adults!, params.children!).ok)
     : roomTypes;
@@ -121,7 +121,7 @@ export async function findAvailableRoomTypes(params: {
     orderBy: { baseNightlyRate: "asc" }
   });
 
-  const useMix = params.adults !== undefined && params.children !== undefined;
+  const useMix = params.rooms <= 1 && params.adults !== undefined && params.children !== undefined;
   const filtered = useMix
     ? roomTypes.filter((rt) => roomTypeAllowsOccupancy(rt.code, params.adults!, params.children!).ok)
     : roomTypes;

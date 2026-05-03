@@ -78,6 +78,7 @@ import {
 import { recordBookingStatusChange } from "../core/bookingStatusHistory";
 import { createBookingPaymentLink } from "../core/bookingPayments";
 import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
+import { sendInStayWelcomeMenuIfEligible } from "../core/inStayWelcome";
 import { loadPartnerSetupConfig, savePartnerSetupConfig, applyPartnerTemplate, type PartnerSetupConfig } from "../core/partnerSetup";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
 import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
@@ -6490,6 +6491,27 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
     }
   }
 
+  if (status === "OCCUPIED") {
+    const dayStart = startOfDay(boardDate);
+    const dayEndExclusive = addDays(dayStart, 1);
+    const activeBooking = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        status: BookingStatus.CONFIRMED,
+        checkIn: { lt: dayEndExclusive },
+        checkOut: { gt: dayStart }
+      },
+      orderBy: { checkIn: "desc" },
+      select: { id: true }
+    });
+    if (activeBooking) {
+      sendInStayWelcomeMenuIfEligible(activeBooking.id).catch((err) =>
+        console.error("in-stay welcome after room board OCCUPIED:", err instanceof Error ? err.message : String(err))
+      );
+    }
+  }
+
   if (returnTo === "/admin/profile") {
     res.redirect("/admin/profile?unitUpdated=1");
     return;
@@ -7240,7 +7262,8 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
   const adults = clamp(parseIntegerInput(req.body.adults, 2), 1, 12);
   const children = clamp(parseIntegerInput(req.body.children, 0), 0, 8);
   const mealPlanRaw = String(req.body.mealPlan ?? "NONE").toUpperCase();
-  const mealPlan = mealPlanRaw === "BREAKFAST" || mealPlanRaw === "HALF_BOARD" ? mealPlanRaw : "NONE";
+  const mealPlan =
+    mealPlanRaw === "BREAKFAST" || mealPlanRaw === "HALF_BOARD" || mealPlanRaw === "FULL_BOARD" ? mealPlanRaw : "NONE";
   const paymentStatusRaw = String(req.body.paymentStatus ?? "PENDING").toUpperCase();
   const manualPaymentMap: Record<string, PaymentStatus> = {
     PENDING: PaymentStatus.PENDING,
@@ -7320,6 +7343,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
     mealPlan: mealPlan as MealPlanCode,
     adults,
     children,
+    rooms: 1,
     selectedExtraIds,
     extraHoursById
   });
@@ -7405,7 +7429,8 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
           status: BookingStatus.CONFIRMED,
           source: bookingSourceChannel,
           referenceCode,
-          paymentStatus
+          paymentStatus,
+          mealPlan
         }
       });
 
@@ -7454,6 +7479,10 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         rooms: 1
       });
     });
+
+    sendInStayWelcomeMenuIfEligible(bookingId).catch((err) =>
+      console.error("in-stay welcome after manual check-in:", err instanceof Error ? err.message : String(err))
+    );
 
     const segGuestId = await prisma.booking.findUnique({
       where: { id: bookingId },
