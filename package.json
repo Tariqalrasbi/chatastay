@@ -26,7 +26,9 @@
     "seed:outlet-menu": "node scripts/seed-outlet-menu.cjs",
     "smoke:webhook": "tsx scripts/smoke-webhook.ts",
     "test:e2e:calendar": "tsx scripts/e2e-calendar-dryrun.ts",
-    "smoke:all": "npm run smoke:webhook && npm run test:e2e:calendar"
+    "smoke:all": "npm run smoke:webhook && npm run test:e2e:calendar",
+    "test": "npm run test:critical",
+    "test:critical": "tsx scripts/critical-flows.test.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -42,12 +44,14 @@
     "stripe": "^18.2.1"
   },
   "devDependencies": {
+    "@types/supertest": "^6.0.2",
     "@types/express": "^4.17.21",
     "@types/multer": "^2.1.0",
     "@types/node": "^22.10.7",
     "@types/nodemailer": "^6.4.17",
     "@types/pdfkit": "^0.17.5",
     "prisma": "6.19.3",
+    "supertest": "^7.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
