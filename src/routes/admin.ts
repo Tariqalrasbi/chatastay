@@ -2640,6 +2640,60 @@ function housekeepingDurationMinutes(start: Date | null | undefined, end: Date |
   return Math.round(diff / 60000);
 }
 
+function housekeepingRoomDisplayLabel(
+  roomUnit: { name: string; roomType?: { name: string } | null } | null | undefined
+): string {
+  if (!roomUnit?.name?.trim()) return "Unknown room";
+  const nm = roomUnit.name.trim();
+  const rt = roomUnit.roomType?.name?.trim();
+  return rt ? `${nm} · ${rt}` : nm;
+}
+
+async function housekeepingStaffDisplayName(hotelId: string, hotelUserId: string | null | undefined): Promise<string> {
+  if (!hotelUserId || hotelUserId === "STAFF-SUPERADMIN") return "Staff";
+  const u = await prisma.hotelUser.findFirst({
+    where: { id: hotelUserId, hotelId },
+    select: { fullName: true, email: true }
+  });
+  const n = u?.fullName?.trim();
+  if (n) return n;
+  const e = u?.email?.trim();
+  if (e) return e.split("@")[0] ?? "Staff";
+  return "Staff";
+}
+
+/** Front desk / manager feed: room is clean or marked maintenance after housekeeping completes. */
+async function notifyFrontDeskHousekeepingTaskCompleted(params: {
+  hotelId: string;
+  taskId: string;
+  roomUnit: { name: string; roomType?: { name: string } | null } | null | undefined;
+  completedByUserId: string | null | undefined;
+  targetStatus: RoomBoardStatus;
+  durationMins: number | null;
+}): Promise<void> {
+  const roomLine = housekeepingRoomDisplayLabel(params.roomUnit);
+  const staffName = await housekeepingStaffDisplayName(params.hotelId, params.completedByUserId ?? null);
+  const statusLabel = params.targetStatus === "MAINTENANCE" ? "Maintenance" : "Available (guest-ready)";
+  const durationPart =
+    params.durationMins !== null && params.durationMins >= 0 ? ` · ${params.durationMins} min on task` : "";
+  await createRoleRoutedNotification({
+    hotelId: params.hotelId,
+    roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
+    title:
+      params.targetStatus === "MAINTENANCE"
+        ? `Maintenance · ${roomLine}`
+        : `Room ready · ${roomLine}`,
+    body: `${staffName} finished cleaning ${roomLine}. Board status: ${statusLabel}.${durationPart}`,
+    category: "housekeeping",
+    severity: params.targetStatus === "MAINTENANCE" ? "high" : "normal",
+    link: "/admin/housekeeping",
+    sourceType: "HOUSEKEEPING_TASK_COMPLETED",
+    sourceId: params.taskId,
+    requiresAttention: true,
+    audience: ["front_desk", "owner"]
+  }).catch(() => undefined);
+}
+
 function formatDurationMinutes(mins: number | null): string {
   if (mins === null) return "—";
   const h = Math.floor(mins / 60);
@@ -6839,7 +6893,9 @@ adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPo
       hotelId: hotel.id,
       status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
     },
-    include: { roomUnit: { select: { notes: true } } }
+    include: {
+      roomUnit: { select: { notes: true, name: true, roomType: { select: { name: true } } } }
+    }
   });
   if (!task) {
     res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
@@ -6890,6 +6946,14 @@ adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPo
       completedAt: completed?.completedAt?.toISOString() ?? undefined,
       portal: "hk"
     }
+  });
+  await notifyFrontDeskHousekeepingTaskCompleted({
+    hotelId: hotel.id,
+    taskId: task.id,
+    roomUnit: task.roomUnit,
+    completedByUserId: session.staffId !== "STAFF-SUPERADMIN" ? session.staffId : null,
+    targetStatus,
+    durationMins
   });
   res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
 });
@@ -15186,7 +15250,8 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     return;
   }
   const task = await prisma.housekeepingTask.findFirst({
-    where: { id: taskId, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING }
+    where: { id: taskId, hotelId: hotel.id, status: HousekeepingTaskStatus.PENDING },
+    include: { roomUnit: { select: { name: true, roomType: { select: { name: true } } } } }
   });
   if (!task) {
     res.redirect("/admin/housekeeping");
@@ -15236,11 +15301,14 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     entityId: task.id,
     metadata: { roomUnitId: task.roomUnitId, assignedToUserId: session.staffId, shift }
   });
+  const roomLine = housekeepingRoomDisplayLabel(task.roomUnit);
+  const claimerName = await housekeepingStaffDisplayName(hotel.id, session.staffId);
+  const roomTitle = task.roomUnit?.name?.trim() || "Room";
   await createNotification({
     hotelId: hotel.id,
     userId: session.staffId,
-    title: "Housekeeping task claimed",
-    body: "You claimed a room cleaning task.",
+    title: `Cleaning claimed · ${roomTitle}`,
+    body: `${claimerName}, you claimed ${roomLine}. This room is now in your queue (cleaning).`,
     category: "housekeeping",
     severity: "high",
     link: "/admin/housekeeping",
@@ -15248,6 +15316,30 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     sourceId: task.id,
     requiresAttention: true
   }).catch(() => undefined);
+  const fdRecipients = await prisma.hotelUser.findMany({
+    where: {
+      hotelId: hotel.id,
+      isActive: true,
+      role: { in: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER] },
+      id: { not: session.staffId }
+    },
+    select: { id: true }
+  });
+  if (fdRecipients.length > 0) {
+    await createRoleRoutedNotification({
+      hotelId: hotel.id,
+      userIds: fdRecipients.map((r) => r.id),
+      title: `Housekeeping started · ${roomTitle}`,
+      body: `${claimerName} claimed ${roomLine} for cleaning.`,
+      category: "housekeeping",
+      severity: "normal",
+      link: "/admin/housekeeping",
+      sourceType: "HOUSEKEEPING_TASK_CLAIMED_FD",
+      sourceId: task.id,
+      requiresAttention: false,
+      audience: ["front_desk", "owner"]
+    }).catch(() => undefined);
+  }
   res.redirect("/admin/housekeeping");
 });
 
@@ -15401,7 +15493,9 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
       hotelId: hotel.id,
       status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
     },
-    include: { roomUnit: { select: { notes: true } } }
+    include: {
+      roomUnit: { select: { notes: true, name: true, roomType: { select: { name: true } } } }
+    }
   });
   if (!task) {
     res.redirect("/admin/housekeeping");
@@ -15444,6 +15538,14 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
     entityId: task.id,
     bookingId: task.bookingId ?? undefined,
     metadata: { roomUnitId: task.roomUnitId, completedByUserId: session.staffId, targetStatus, shift, durationMinutes: durationMins }
+  });
+  await notifyFrontDeskHousekeepingTaskCompleted({
+    hotelId: hotel.id,
+    taskId: task.id,
+    roomUnit: task.roomUnit,
+    completedByUserId: session.staffId !== "STAFF-SUPERADMIN" ? session.staffId : null,
+    targetStatus,
+    durationMins
   });
   res.redirect("/admin/housekeeping");
 });
