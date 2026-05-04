@@ -1010,6 +1010,7 @@ function getAdminNotificationScript(): string {
   panel.setAttribute("hidden", "");
 
   var knownIds = new Set();
+  var notifBootstrapped = false;
   var soundMuted = localStorage.getItem("notifSoundMuted") === "true";
   var audioCtx = null;
   var iconOn = "🔔";
@@ -1026,8 +1027,16 @@ function getAdminNotificationScript(): string {
     if (sev === "normal") return "normal";
     return "info";
   }
-  function shouldBeep(sev) {
-    return sev === "critical" || sev === "high";
+  function isHousekeepingAttention(item) {
+    if (!item) return false;
+    if (item.category === "housekeeping") return true;
+    var st = String(item.sourceType || "");
+    return st.indexOf("HK_") === 0 || st === "ROOM_BOARD_MAINTENANCE";
+  }
+  function shouldBeep(sev, item) {
+    if (sev === "critical" || sev === "high") return true;
+    if (isHousekeepingAttention(item)) return true;
+    return false;
   }
   function ensureAudioUnlocked() {
     if (audioCtx) return audioCtx;
@@ -1037,22 +1046,41 @@ function getAdminNotificationScript(): string {
     } catch (e) {}
     return audioCtx;
   }
-  function beep() {
+  function playTone(ctx, freqHz, startOffset, durationSec, peak) {
+    var o = ctx.createOscillator();
+    var g = ctx.createGain();
+    o.type = "sine";
+    o.frequency.setValueAtTime(freqHz, ctx.currentTime + startOffset);
+    var pk = peak == null ? 0.04 : peak;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime + startOffset);
+    g.gain.exponentialRampToValueAtTime(pk, ctx.currentTime + startOffset + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + startOffset + durationSec);
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start(ctx.currentTime + startOffset);
+    o.stop(ctx.currentTime + startOffset + durationSec + 0.02);
+  }
+  function pulseBell() {
+    if (!notifBtn) return;
+    notifBtn.classList.remove("admin-notif-bell-pulse");
+    void notifBtn.offsetWidth;
+    notifBtn.classList.add("admin-notif-bell-pulse");
+    window.setTimeout(function () {
+      notifBtn.classList.remove("admin-notif-bell-pulse");
+    }, 4500);
+  }
+  function beep(style) {
     if (soundMuted) return;
     try {
       var ctx = ensureAudioUnlocked();
       if (!ctx) return;
-      var o = ctx.createOscillator();
-      var g = ctx.createGain();
-      o.type = "sine";
-      o.frequency.setValueAtTime(880, ctx.currentTime);
-      g.gain.setValueAtTime(0.0001, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.04, ctx.currentTime + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.16);
-      o.connect(g);
-      g.connect(ctx.destination);
-      o.start();
-      o.stop(ctx.currentTime + 0.18);
+      if (style === "hk") {
+        playTone(ctx, 660, 0, 0.11, 0.045);
+        playTone(ctx, 880, 0.13, 0.12, 0.05);
+      } else {
+        playTone(ctx, 880, 0, 0.16, 0.04);
+      }
+      pulseBell();
     } catch (e) {}
   }
   function updateBadge(n) {
@@ -1105,11 +1133,15 @@ function getAdminNotificationScript(): string {
     if (!r.ok) return;
     var j = await r.json();
     var items = Array.isArray(j.notifications) ? j.notifications : [];
+    var skipBeeps = !notifBootstrapped;
+    notifBootstrapped = true;
     for (var i = 0; i < items.length; i++) {
       var n = items[i];
       if (!knownIds.has(n.id)) {
         knownIds.add(n.id);
-        if (n.readAt == null && shouldBeep(n.severity)) beep();
+        if (!skipBeeps && n.readAt == null && shouldBeep(n.severity, n)) {
+          beep(isHousekeepingAttention(n) ? "hk" : "default");
+        }
       }
     }
     renderList(items);
@@ -1117,6 +1149,7 @@ function getAdminNotificationScript(): string {
   }
   notifBtn.addEventListener("click", function () {
     panel.hidden = !panel.hidden;
+    notifBtn.classList.remove("admin-notif-bell-pulse");
   });
   document.addEventListener("click", function (e) {
     if (panel.hidden) return;
@@ -2790,8 +2823,7 @@ async function notifyHousekeepingStaff(opts: {
     select: { id: true, email: true, role: true }
   });
   for (const u of users) {
-    if (!u.email) continue;
-    const matrix = effectivePermissionsForHotelUser(u.email, u.role);
+    const matrix = effectivePermissionsForHotelUser(u.email ?? "", u.role);
     if (!hasPermission(matrix, "HOUSEKEEPING", "VIEW")) continue;
     await createNotification({
       hotelId: opts.hotelId,
@@ -2800,7 +2832,7 @@ async function notifyHousekeepingStaff(opts: {
       body: opts.body,
       category: "housekeeping",
       severity: opts.severity ?? "high",
-      link: opts.link ?? "/admin/housekeeping",
+      link: opts.link ?? "/admin/hk",
       sourceType: opts.type,
       sourceId: undefined,
       requiresAttention: (opts.severity ?? "high") !== "info",
@@ -3111,7 +3143,7 @@ adminRouter.use((req, _res, next) => {
   next();
 });
 
-/** Housekeeping staff: dedicated portal under /admin/hk (no full admin chrome). */
+/** Housekeeping role: limited portal under /admin/hk (same app and session as staff login; no separate /hk product). */
 adminRouter.use((req, res, next) => {
   const session = getSession(req);
   if (session?.role === "HOUSEKEEPING") {
@@ -3265,7 +3297,7 @@ adminRouter.get("/module/housekeeping", requireAuth, requirePmsModule("housekeep
 <div class="pms-grid">
   <div class="pms-card"><h3>Cleaning queue</h3><p>Desktop task board with assignment controls.</p><a href="/admin/housekeeping">Open queue →</a></div>
   <div class="pms-card"><h3>Room board</h3><p>See room status alongside arrivals.</p><a href="/admin/room-board">Open room board →</a></div>
-  <div class="pms-card"><h3>Mobile portal</h3><p>Cleaner-focused, touch-friendly tasks.</p><a href="/admin/hk">Open HK portal →</a></div>
+  <div class="pms-card"><h3>Housekeeping workspace</h3><p>Same staff login; touch-friendly task list and room status for cleaners.</p><a href="/admin/hk">Open housekeeping →</a></div>
 </div>`;
   res.type("html").send(renderLayout(content, true));
 });
@@ -3303,9 +3335,22 @@ adminRouter.get("/login", async (req, res) => {
     req.query.staff === "error" ? '<p class="badge alert">Staff sign in is temporarily unavailable. Please try again.</p>' : "";
   const onboardNotice =
     req.query.onboard === "1" ? '<p class="badge ok">Property onboarding complete. You can sign in now.</p>' : "";
+  const hkMovedNotice =
+    req.query.hk_moved === "1"
+      ? '<p class="badge ok">Housekeeping now uses this same staff sign-in (not a separate URL). Use the email/username and PIN or password from your administrator. After login, housekeeping accounts go straight to your task board.</p>'
+      : "";
   const onboardLink =
     '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
-  const content = resetNotice + authErrorNotice + loginFailedNotice + staffNotice + staffErrorNotice + onboardNotice + loginPageHtml(loginHotel) + onboardLink;
+  const content =
+    hkMovedNotice +
+    resetNotice +
+    authErrorNotice +
+    loginFailedNotice +
+    staffNotice +
+    staffErrorNotice +
+    onboardNotice +
+    loginPageHtml(loginHotel) +
+    onboardLink;
   res.type("html").send(
     renderLayout(content, false, {
       hotelName: loginHotel.displayName,
@@ -4482,9 +4527,9 @@ ${created}${updated}${resetSent}${deleted}${deactivated}${userErrorNotice}
     <div class="grid-2">
       <label>Full name<br /><input type="text" name="fullName" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
       <label>Email (optional for housekeeping)<br /><input type="email" name="email" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
-      <label>Username (for /hk login)<br /><input type="text" name="username" maxlength="64" placeholder="e.g. hk-01" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>Username (optional — staff / housekeeping mobile sign-in)<br /><input type="text" name="username" maxlength="64" placeholder="e.g. hk-01" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
       <label>Password<br /><input type="password" name="password" minlength="8" required style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
-      <label>PIN (optional, /hk login)<br /><input type="password" name="pin" minlength="4" maxlength="12" placeholder="4-12 digits" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+      <label>PIN (optional — used with username for housekeeping staff sign-in)<br /><input type="password" name="pin" minlength="4" maxlength="12" placeholder="4-12 digits" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
       <label>Role
         <select name="role" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">
           <option value="MANAGER">MANAGER</option>
@@ -6504,6 +6549,26 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
     }
   }
 
+  if (!hkOpsSkipped && status === "MAINTENANCE") {
+    try {
+      const unitLabel = await prisma.roomUnit.findUnique({
+        where: { id: unit.id },
+        select: { name: true, roomType: { select: { name: true } } }
+      });
+      const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : unit.id;
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "ROOM_BOARD_MAINTENANCE",
+        title: "Room needs maintenance",
+        body: `${label} — marked maintenance on the room board.`,
+        severity: "high",
+        link: "/admin/hk/room-board"
+      });
+    } catch (err) {
+      if (!isOptionalHousekeepingSchemaError(err)) throw err;
+    }
+  }
+
   await logAudit({
     hotelId: hotel.id,
     action: "ROOM_BOARD_UNIT_STATUS",
@@ -6955,6 +7020,23 @@ adminRouter.post("/hk/task/:taskId/complete", requireAuth, requireHousekeepingPo
     targetStatus,
     durationMins
   });
+  if (targetStatus === "MAINTENANCE") {
+    try {
+      const ru = task.roomUnit;
+      const label =
+        ru?.name && ru.roomType?.name ? `${ru.name} (${ru.roomType.name})` : ru?.name || task.roomUnitId;
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "HK_TASK_MAINTENANCE",
+        title: "Room needs maintenance",
+        body: `${label} — marked maintenance from housekeeping (mobile portal).`,
+        severity: "high",
+        link: "/admin/hk/room-board"
+      });
+    } catch (err) {
+      if (!isOptionalHousekeepingSchemaError(err)) throw err;
+    }
+  }
   res.redirect(redirectPathPreservingHkListFilters("/admin/hk", hkBody));
 });
 
@@ -15302,44 +15384,54 @@ adminRouter.post("/housekeeping/task/:taskId/claim", requirePermissionAny([{ mod
     metadata: { roomUnitId: task.roomUnitId, assignedToUserId: session.staffId, shift }
   });
   const roomLine = housekeepingRoomDisplayLabel(task.roomUnit);
-  const claimerName = await housekeepingStaffDisplayName(hotel.id, session.staffId);
   const roomTitle = task.roomUnit?.name?.trim() || "Room";
-  await createNotification({
-    hotelId: hotel.id,
-    userId: session.staffId,
-    title: `Cleaning claimed · ${roomTitle}`,
-    body: `${claimerName}, you claimed ${roomLine}. This room is now in your queue (cleaning).`,
-    category: "housekeeping",
-    severity: "high",
-    link: "/admin/housekeeping",
-    sourceType: "HOUSEKEEPING_TASK_CLAIMED",
-    sourceId: task.id,
-    requiresAttention: true
-  }).catch(() => undefined);
-  const fdRecipients = await prisma.hotelUser.findMany({
-    where: {
-      hotelId: hotel.id,
-      isActive: true,
-      role: { in: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER] },
-      id: { not: session.staffId }
-    },
-    select: { id: true }
-  });
-  if (fdRecipients.length > 0) {
-    await createRoleRoutedNotification({
-      hotelId: hotel.id,
-      userIds: fdRecipients.map((r) => r.id),
-      title: `Housekeeping started · ${roomTitle}`,
-      body: `${claimerName} claimed ${roomLine} for cleaning.`,
-      category: "housekeeping",
-      severity: "normal",
-      link: "/admin/housekeeping",
-      sourceType: "HOUSEKEEPING_TASK_CLAIMED_FD",
-      sourceId: task.id,
-      requiresAttention: false,
-      audience: ["front_desk", "owner"]
-    }).catch(() => undefined);
-  }
+  const hotelId = hotel.id;
+  const staffId = session.staffId;
+  const taskIdForNotify = task.id;
+  // Do not block the HTTP response on notification fan-out (avoids nginx 504 if DB is slow).
+  void (async () => {
+    try {
+      const claimerName = await housekeepingStaffDisplayName(hotelId, staffId);
+      await createNotification({
+        hotelId,
+        userId: staffId,
+        title: `Cleaning claimed · ${roomTitle}`,
+        body: `${claimerName}, you claimed ${roomLine}. This room is now in your queue (cleaning).`,
+        category: "housekeeping",
+        severity: "high",
+        link: "/admin/housekeeping",
+        sourceType: "HOUSEKEEPING_TASK_CLAIMED",
+        sourceId: taskIdForNotify,
+        requiresAttention: true
+      });
+      const fdRecipients = await prisma.hotelUser.findMany({
+        where: {
+          hotelId,
+          isActive: true,
+          role: { in: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER] },
+          id: { not: staffId }
+        },
+        select: { id: true }
+      });
+      if (fdRecipients.length > 0) {
+        await createRoleRoutedNotification({
+          hotelId,
+          userIds: fdRecipients.map((r) => r.id),
+          title: `Housekeeping started · ${roomTitle}`,
+          body: `${claimerName} claimed ${roomLine} for cleaning.`,
+          category: "housekeeping",
+          severity: "normal",
+          link: "/admin/housekeeping",
+          sourceType: "HOUSEKEEPING_TASK_CLAIMED_FD",
+          sourceId: taskIdForNotify,
+          requiresAttention: false,
+          audience: ["front_desk", "owner"]
+        });
+      }
+    } catch (err) {
+      console.error("housekeeping claim notifications:", err instanceof Error ? err.message : String(err));
+    }
+  })();
   res.redirect("/admin/housekeeping");
 });
 
@@ -15547,6 +15639,23 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
     targetStatus,
     durationMins
   });
+  if (targetStatus === "MAINTENANCE") {
+    try {
+      const ru = task.roomUnit;
+      const label =
+        ru?.name && ru.roomType?.name ? `${ru.name} (${ru.roomType.name})` : ru?.name || task.roomUnitId;
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "HK_TASK_MAINTENANCE",
+        title: "Room needs maintenance",
+        body: `${label} — marked maintenance from housekeeping (desk).`,
+        severity: "high",
+        link: "/admin/room-board"
+      });
+    } catch (err) {
+      if (!isOptionalHousekeepingSchemaError(err)) throw err;
+    }
+  }
   res.redirect("/admin/housekeeping");
 });
 
