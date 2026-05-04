@@ -566,11 +566,12 @@ const reportStartDefault = "2026-03-01";
 const reportEndDefault = "2026-03-31";
 const tourOperatorDiscount = 0.15;
 const offersFile = path.join(process.cwd(), "hotel-offers.json");
+/** High = rack with breakfast included (per room per night). Low = room only; breakfast +5 OMR/room/night via meal plan. */
 const seasonalBaseRates: Record<string, { high: number; low: number }> = {
-  STD_SUPERIOR: { high: 30, low: 25 },
-  STD_EXEC: { high: 35, low: 30 },
-  SUITE: { high: 40, low: 35 },
-  APARTMENT: { high: 50, low: 40 }
+  STD_SUPERIOR: { high: 30, low: 20 },
+  STD_EXEC: { high: 35, low: 25 },
+  SUITE: { high: 40, low: 30 },
+  APARTMENT: { high: 50, low: 35 }
 };
 
 type OfferType =
@@ -11711,6 +11712,7 @@ ${unitSavedInfo}
     <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Apply season pricing</button>
   </form>
   <p class="muted" style="margin-top:8px">Tour operating company discount: 15% from selected/base rate.</p>
+  <p class="muted" style="margin-top:6px"><strong>High</strong> season targets include continental breakfast for the <strong>room</strong> (not priced per guest). <strong>Low</strong> season targets are <strong>room only</strong>; add breakfast in front desk / folio at <strong>+5 ${escapeHtml(hotel.currency)}</strong> per room per night.</p>
 </section>
 <section style="margin-bottom:14px">
   <h3>Apply Offer Scheme</h3>
@@ -11726,9 +11728,9 @@ ${unitSavedInfo}
 </section>
 <table>
   <thead>
-    <tr><th>Room Type</th><th>Capacity</th><th>High (${escapeHtml(hotel.currency)})</th><th>Low (${escapeHtml(
+    <tr><th>Room Type</th><th>Capacity</th><th>High (${escapeHtml(hotel.currency)}, incl. breakfast / room)</th><th>Low (${escapeHtml(
       hotel.currency
-    )})</th><th>Base/Edit Rate</th><th>Tour Operator (${escapeHtml(hotel.currency)})</th><th>Room cap (owner)</th><th>Status</th><th>Action</th></tr>
+    )}, room only)</th><th>Base/Edit Rate</th><th>Tour Operator (${escapeHtml(hotel.currency)})</th><th>Room cap (owner)</th><th>Status</th><th>Action</th></tr>
   </thead>
   <tbody>${roomRows || '<tr><td colspan="9">No room types found.</td></tr>'}</tbody>
 </table>

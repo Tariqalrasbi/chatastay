@@ -289,10 +289,10 @@ async function main() {
     });
 
     const roomTypes = [
-      { code: "STD_SUPERIOR", name: "Standard Superior", capacity: 4, baseNightlyRate: 25, totalInventory: 8 },
-      { code: "STD_EXEC", name: "Standard Executive", capacity: 4, baseNightlyRate: 30, totalInventory: 6 },
-      { code: "SUITE", name: "Suite", capacity: 5, baseNightlyRate: 35, totalInventory: 7 },
-      { code: "APARTMENT", name: "Apartment", capacity: 6, baseNightlyRate: 40, totalInventory: 6 }
+      { code: "STD_SUPERIOR", name: "Standard Superior", capacity: 4, baseNightlyRate: 20, totalInventory: 8 },
+      { code: "STD_EXEC", name: "Standard Executive", capacity: 4, baseNightlyRate: 25, totalInventory: 6 },
+      { code: "SUITE", name: "Suite", capacity: 5, baseNightlyRate: 30, totalInventory: 7 },
+      { code: "APARTMENT", name: "Apartment", capacity: 6, baseNightlyRate: 35, totalInventory: 6 }
     ];
 
     const inventoryDays = Number.parseInt(env("BOOTSTRAP_INVENTORY_DAYS", "365"), 10);

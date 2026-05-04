@@ -1,7 +1,7 @@
 {
   "mealPlans": {
     "NONE": { "pricingMode": "PER_ROOM_PER_NIGHT", "perRoomPerNight": 0 },
-    "BREAKFAST": { "pricingMode": "PER_ROOM_PER_NIGHT", "perRoomPerNight": 4 },
+    "BREAKFAST": { "pricingMode": "PER_ROOM_PER_NIGHT", "perRoomPerNight": 5 },
     "HALF_BOARD": { "pricingMode": "PER_ROOM_PER_NIGHT", "perRoomPerNight": 15 },
     "FULL_BOARD": { "pricingMode": "PER_ROOM_PER_NIGHT", "perRoomPerNight": 28 }
   },

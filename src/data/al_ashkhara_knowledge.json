@@ -29,8 +29,18 @@
       "brochure_rates": {
         "currency": "OMR",
         "basis": "Per room per night",
-        "with_breakfast": true,
-        "amount": 30.0,
+        "breakfast_basis": "When breakfast is bundled with the room, it is priced per room per night (not per guest).",
+        "high_season": {
+          "label": "High season — includes continental breakfast for the room",
+          "with_breakfast_included": true,
+          "amount": 30.0
+        },
+        "low_season": {
+          "label": "Low season — best value (room only)",
+          "room_only_amount": 20.0,
+          "breakfast_addon_per_room_per_night": 5.0,
+          "with_breakfast_total": 25.0
+        },
         "tour_operator_discount_note": "Up to 15% discount from rack rate."
       }
     },
@@ -42,8 +52,18 @@
       "brochure_rates": {
         "currency": "OMR",
         "basis": "Per room per night",
-        "with_breakfast": true,
-        "amount": 35.0,
+        "breakfast_basis": "When breakfast is bundled with the room, it is priced per room per night (not per guest).",
+        "high_season": {
+          "label": "High season — includes continental breakfast for the room",
+          "with_breakfast_included": true,
+          "amount": 35.0
+        },
+        "low_season": {
+          "label": "Low season — best value (room only)",
+          "room_only_amount": 25.0,
+          "breakfast_addon_per_room_per_night": 5.0,
+          "with_breakfast_total": 30.0
+        },
         "tour_operator_discount_note": "Up to 15% discount from rack rate."
       }
     },
@@ -55,8 +75,18 @@
       "brochure_rates": {
         "currency": "OMR",
         "basis": "Per room per night",
-        "with_breakfast": true,
-        "amount": 40.0,
+        "breakfast_basis": "When breakfast is bundled with the room, it is priced per room per night (not per guest).",
+        "high_season": {
+          "label": "High season — includes continental breakfast for the room",
+          "with_breakfast_included": true,
+          "amount": 40.0
+        },
+        "low_season": {
+          "label": "Low season — best value (room only)",
+          "room_only_amount": 30.0,
+          "breakfast_addon_per_room_per_night": 5.0,
+          "with_breakfast_total": 35.0
+        },
         "tour_operator_discount_note": "Up to 15% discount from rack rate."
       }
     },
@@ -68,12 +98,66 @@
       "brochure_rates": {
         "currency": "OMR",
         "basis": "Per room per night",
-        "with_breakfast": true,
-        "amount": 40.0,
+        "breakfast_basis": "When breakfast is bundled with the room, it is priced per room per night (not per guest).",
+        "high_season": {
+          "label": "High season — includes continental breakfast for the room",
+          "with_breakfast_included": true,
+          "amount": 50.0
+        },
+        "low_season": {
+          "label": "Low season — best value (room only)",
+          "room_only_amount": 35.0,
+          "breakfast_addon_per_room_per_night": 5.0,
+          "with_breakfast_total": 40.0
+        },
         "tour_operator_discount_note": "Up to 15% discount from rack rate."
       }
     }
   ],
+  "promotions_and_experiences": {
+    "currency": "OMR",
+    "headline_ar": "الإقامة (أفضل قيمة) — موسم منخفض وعروض",
+    "multi_night_offer": {
+      "summary": "Book 3 nights — 25% off (subject to availability; confirm at booking).",
+      "summary_ar": "احجز 3 ليالي واحصل على خصم 25%"
+    },
+    "half_board": {
+      "summary": "Half board: stay + breakfast + dinner — full-board style convenience.",
+      "summary_ar": "هاف بورد: إقامة + إفطار + عشاء"
+    },
+    "dining_highlights": {
+      "dinner_from_per_person": 5.5,
+      "weekend_buffet": { "adult": 4.0, "child": 3.0 },
+      "notes_ar": "عشاء ابتداءً من 5.5 ريال؛ بوفيه نهاية الأسبوع الكبار 4 والأطفال 3"
+    },
+    "special_segments": {
+      "families_ar": "عوائل: أسعار مخفّضة أيام الأسبوع",
+      "couples_ar": "أزواج: 12–14 ريال لشخصين (حسب العرض والتوفر)"
+    },
+    "day_guest_options": {
+      "day_pass": { "amount": 5.0, "includes_ar": "مسبح + شاطئ + جلسات" },
+      "day_experience": { "amount": 8.0, "includes_ar": "وجبة + مشروب + دخول كامل" },
+      "work_from_resort": { "amount": 5.0, "includes_ar": "إنترنت + قهوة + أجواء هادئة" }
+    },
+    "activities_with_stay": {
+      "discount_up_to_percent": 30,
+      "summary_ar": "خصم حتى 30% على الأنشطة مع الإقامة (دراجات وأنشطة ومغامرات)"
+    },
+    "why_book": [
+      "Direct beachfront",
+      "Family pools",
+      "Kids play areas",
+      "Seafront seating",
+      "Calm, relaxed stay"
+    ],
+    "why_book_ar": [
+      "شاطئ مباشر",
+      "مسابح عائلية",
+      "ألعاب أطفال",
+      "جلسات بحرية",
+      "تجربة هادئة ومريحة"
+    ]
+  },
   "room_descriptions": {
     "STANDARD_SUPERIOR": {
       "summary": "Suite-style bedroom with spacious balcony and sea view.",
@@ -157,6 +241,8 @@
       "style": "Continental buffet breakfast",
       "brochure_rates": {
         "currency": "OMR",
+        "note": "When breakfast is sold with a room booking, it is charged per room per night (see room type low/high season). Walk-in or non-room buffet pricing may differ.",
+        "room_booking_addon_per_room_per_night_low_season": 5.0,
         "adult_per_head_if_not_included": 2.0,
         "kid_upto_8_per_head_if_not_included": 1.5
       }
@@ -181,8 +267,16 @@
       ],
       "brochure_rates": {
         "currency": "OMR",
-        "per_person": 4.5,
+        "per_person": 5.5,
         "includes_service_charges": true
+      }
+    },
+    "weekend_buffet": {
+      "brochure_rates": {
+        "currency": "OMR",
+        "adult": 4.0,
+        "child": 3.0,
+        "note": "When scheduled; confirm with reception."
       }
     },
     "capacity_note": "Restaurant can cater around 50 people at a time."
@@ -267,7 +361,8 @@
       "Advertised room rates apply to selected dates only.",
       "Rates are subject to availability and may change without prior notice.",
       "Rooms may be limited on public holidays, school breaks, and weekends.",
-      "Rates are per room per night."
+      "Rates are per room per night.",
+      "High-season published room rates include continental breakfast for the room (not per guest). Low-season published room-only rates can add breakfast at +5 OMR per room per night when bundled with the stay."
     ],
     "tax_fee_note": "Rates include service tax/service charges and/or other applicable local charges depending on locality.",
     "changes_allowed": [
@@ -296,7 +391,8 @@
     "front_desk_mobile": [
       "25535666",
       "255335999"
-    ]
+    ],
+    "whatsapp_booking": "94082424"
   },
   "faq_seed": [
     {
@@ -328,6 +424,11 @@
       "question": "How can I contact the resort?",
       "answer": "You can contact info@ashkhara.com or front desk numbers 25535666 / 255335999.",
       "topic": "contacts"
+    },
+    {
+      "question": "What are the room rates for high season and low season?",
+      "answer": "High season (per room per night, breakfast included for the room): Standard Superior 30 OMR, Standard Executive 35 OMR, Suite 40 OMR, Apartment 50 OMR. Low season room-only: 20 / 25 / 30 / 35 OMR respectively; add breakfast for +5 OMR per room per night. Promotions (e.g. 3 nights 25% off, day passes, dining) vary — confirm when booking.",
+      "topic": "pricing"
     }
   ]
 }

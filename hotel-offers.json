@@ -12,7 +12,7 @@
   {
     "id": "282960ae-c405-4c6a-87d5-ffdcea46a6fc",
     "code": "STAY_3_GET_1",
-    "title": "Stay 3 Nights Get 1 Free",
+    "title": "Book 3 nights — 25% off",
     "type": "STAY_X_GET_Y_FREE",
     "discountPercent": 25,
     "stayX": 3,

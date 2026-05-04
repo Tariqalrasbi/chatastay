@@ -52,11 +52,34 @@ function detectTopic(question: string): KnowledgeTopic | undefined {
   return undefined;
 }
 
+function formatRoomRateLine(room: (typeof knowledge.room_types)[number]): string {
+  const br = room.brochure_rates as {
+    currency: string;
+    high_season?: { amount: number; label?: string };
+    low_season?: {
+      room_only_amount: number;
+      breakfast_addon_per_room_per_night?: number;
+      with_breakfast_total?: number;
+    };
+    amount?: number;
+    with_breakfast?: boolean;
+  };
+  const cur = br.currency;
+  if (br.high_season && br.low_season) {
+    const hi = br.high_season.amount;
+    const lo = br.low_season.room_only_amount;
+    const bfAdd = br.low_season.breakfast_addon_per_room_per_night ?? 5;
+    const loWithBf = br.low_season.with_breakfast_total ?? lo + bfAdd;
+    return `High ${hi.toFixed(0)} ${cur}/night (breakfast included per room). Low from ${lo.toFixed(0)} ${cur} room-only; +${bfAdd.toFixed(0)} ${cur}/room/night breakfast → ${loWithBf.toFixed(0)} ${cur} with breakfast.`;
+  }
+  if (typeof br.amount === "number") {
+    return `Brochure ${br.amount.toFixed(2)} ${cur}/night${br.with_breakfast ? " (with breakfast)" : ""}.`;
+  }
+  return `Rates in ${cur} — confirm for your dates.`;
+}
+
 function buildRoomTypesAnswer(): string {
-  const lines = knowledge.room_types.map(
-    (room) =>
-      `- ${room.name}: ${room.occupancy_note} Brochure rate ${room.brochure_rates.amount.toFixed(3)} ${room.brochure_rates.currency} (with breakfast).`
-  );
+  const lines = knowledge.room_types.map((room) => `- ${room.name}: ${room.occupancy_note} ${formatRoomRateLine(room)}`);
   return `Available room types:\n${lines.join("\n")}`;
 }
 
@@ -78,12 +101,18 @@ function buildAmenitiesAnswer(): string {
 
 function buildRestaurantAnswer(): string {
   const timings = knowledge.restaurant.meal_timings;
+  const weekend = (knowledge.restaurant as { weekend_buffet?: { brochure_rates: { adult: number; child: number; currency: string } } })
+    .weekend_buffet;
+  const weekendLine =
+    weekend?.brochure_rates != null
+      ? `\n- Weekend buffet (when scheduled): adult ${weekend.brochure_rates.adult.toFixed(1)} ${weekend.brochure_rates.currency}, child ${weekend.brochure_rates.child.toFixed(1)} ${weekend.brochure_rates.currency}.`
+      : "";
   return [
     "Restaurant information:",
     `- Timings: Breakfast ${timings.breakfast}, Lunch ${timings.lunch}, Dinner ${timings.dinner}.`,
     `- Breakfast: ${knowledge.restaurant.breakfast.style}.`,
     `- Lunch brochure rate: ${knowledge.restaurant.lunch.brochure_rates.per_person.toFixed(3)} ${knowledge.restaurant.lunch.brochure_rates.currency} per person.`,
-    `- Dinner brochure rate: ${knowledge.restaurant.dinner.brochure_rates.per_person.toFixed(3)} ${knowledge.restaurant.dinner.brochure_rates.currency} per person.`
+    `- Dinner brochure rate: ${knowledge.restaurant.dinner.brochure_rates.per_person.toFixed(3)} ${knowledge.restaurant.dinner.brochure_rates.currency} per person.${weekendLine}`
   ].join("\n");
 }
 
@@ -116,13 +145,15 @@ function buildCancellationAnswer(): string {
 }
 
 function buildContactsAnswer(): string {
+  const c = knowledge.contacts as typeof knowledge.contacts & { whatsapp_booking?: string };
+  const wa = c.whatsapp_booking ? `\n- WhatsApp bookings: ${c.whatsapp_booking}` : "";
   return [
     "Contact details:",
     `- Email: ${knowledge.contacts.email}`,
     `- Website: ${knowledge.contacts.website}`,
     `- Front desk: ${knowledge.contacts.front_desk_mobile.join(" / ")}`,
     `- Management: ${knowledge.contacts.management_contact.mobile}`,
-    `- Instagram: ${knowledge.contacts.instagram}`
+    `- Instagram: ${knowledge.contacts.instagram}${wa}`
   ].join("\n");
 }
 
