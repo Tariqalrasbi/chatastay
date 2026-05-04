@@ -71,7 +71,17 @@ function rawRequestBody(reqBody: unknown): Buffer {
 
 function verifyThawaniWebhookSignature(body: Buffer, timestamp: string | undefined, signature: string | undefined): boolean {
   const secret = process.env.THAWANI_WEBHOOK_SECRET?.trim();
-  if (!secret) return true;
+  if (!secret) {
+    // Never accept unsigned webhooks in production: missing secret previously allowed anyone to forge payment success.
+    const allowUnsigned = (process.env.THAWANI_WEBHOOK_ALLOW_UNSIGNED ?? "").trim() === "1";
+    if (!allowUnsigned) {
+      return false;
+    }
+    console.warn(
+      "[payments/webhook/thawani] THAWANI_WEBHOOK_SECRET is not set; webhooks accepted only because THAWANI_WEBHOOK_ALLOW_UNSIGNED=1. Do not use in production."
+    );
+    return true;
+  }
   if (!timestamp || !signature) return false;
   const expected = crypto.createHmac("sha256", secret).update(`${body.toString("utf8")}-${timestamp}`).digest("hex");
   const a = Buffer.from(expected);
