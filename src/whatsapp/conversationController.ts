@@ -2960,11 +2960,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       if (normalizedComment === "fb_google_skip" || normalizedComment === "skip" || normalizedComment === "fb_skip_comment") {
         await prisma.guestFeedback.update({
           where: { id: feedbackOpen.id },
-          data: { status: GuestFeedbackStatus.COMPLETED }
+          data: { status: GuestFeedbackStatus.AWAITING_COMMENT }
         });
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Thank you — that means a lot to our team.",
+          body: "No problem. If you'd like, share one short comment here. If not, reply *skip comment*.",
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -3017,7 +3017,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
         return;
       }
-      if (comment.length >= 2 && comment.length <= 500) {
+      if (comment.length >= 1 && comment.length <= 500) {
         await prisma.guestFeedback.update({
           where: { id: feedbackOpen.id },
           data: { comment, status: GuestFeedbackStatus.COMPLETED }

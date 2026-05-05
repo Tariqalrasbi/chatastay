@@ -4,13 +4,17 @@
     <p class="muted login-card-sub">Al Ashkhara Beach Resort — one portal for management and operations.</p>
 
     <p class="login-mode-hint" id="loginModeHint" aria-live="polite">
-      Enter your hotel ID or staff username, then your password/PIN. Your workspace opens automatically based on your role.
+      Best-practice access: use one hotel account as the property root, then each staff member signs in with their own personal credential and role permissions.
     </p>
+    {{LOGIN_ALERTS}}
 
-    <div id="loginPanelUnified" class="login-panel">
-      <form method="post" action="/admin/login" id="loginFormUnified">
-        <fieldset class="login-fieldset" id="loginFieldsetUnified">
-          <label class="login-label" for="loginId">Hotel ID / username</label>
+    <div class="login-section">
+      <h2 class="login-section-title">Hotel owner / manager</h2>
+      <p class="muted login-section-sub">Use your hotel account number or manager email/username.</p>
+      <form method="post" action="/admin/login" id="loginFormMgmt">
+        <fieldset class="login-fieldset" id="loginFieldsetMgmt">
+          {{HOTEL_HIDDEN_FIELD}}
+          <label class="login-label" for="loginId">Hotel account / manager ID</label>
           <input
             class="login-input"
             id="loginId"
@@ -18,10 +22,10 @@
             name="loginId"
             required
             autocomplete="username"
-            value="{{LOGIN_ID_VALUE}}"
-            placeholder="1 or jaweed"
+            value="{{HOTEL_ACCOUNT_KEY}}"
+            placeholder="e.g. 1001 or owner@hotel.com"
           />
-          <label class="login-label" for="loginPassword">Password or PIN</label>
+          <label class="login-label" for="loginPassword">Password</label>
           <input
             class="login-input"
             id="loginPassword"
@@ -29,13 +33,56 @@
             name="password"
             required
             autocomplete="current-password"
+            minlength="8"
+            maxlength="128"
+          />
+          <button class="login-btn login-btn--primary" type="submit" id="loginBtnMgmt">Continue to Workspace</button>
+          <p class="login-forgot muted"><a class="inline-link" href="/admin/forgot-password">Forgot password?</a></p>
+        </fieldset>
+      </form>
+    </div>
+
+    <div class="login-divider" aria-hidden="true"></div>
+
+    <div class="login-section">
+      <h2 class="login-section-title">Staff login (role-based)</h2>
+      <p class="muted login-section-sub">Each staff member uses personal username/email and PIN/password. Access is limited by role.</p>
+      <form method="post" action="/auth/staff-login" id="loginFormStaff">
+        <fieldset class="login-fieldset" id="loginFieldsetStaff">
+          {{HOTEL_HIDDEN_FIELD}}
+          <label class="login-label" for="staffHotel">Hotel account number</label>
+          <input
+            class="login-input"
+            id="staffHotel"
+            type="text"
+            name="hotel"
+            required
+            autocomplete="organization"
+            value="{{HOTEL_ACCOUNT_KEY}}"
+            placeholder="e.g. 1001"
+          />
+          <label class="login-label" for="staffUsername">Staff username / email</label>
+          <input
+            class="login-input"
+            id="staffUsername"
+            type="text"
+            name="username"
+            required
+            autocomplete="username"
+            placeholder="e.g. frontdesk1"
+          />
+          <label class="login-label" for="staffPin">Staff PIN or password</label>
+          <input
+            class="login-input"
+            id="staffPin"
+            type="password"
+            name="pin"
+            required
+            autocomplete="current-password"
             minlength="4"
             maxlength="128"
           />
-          <button class="login-btn login-btn--primary" type="submit" id="loginBtnUnified">
-            Continue to Workspace
-          </button>
-          <p class="login-forgot muted"><a class="inline-link" href="/admin/forgot-password">Forgot password?</a></p>
+          <button class="login-btn login-btn--staff" type="submit" id="loginBtnStaff">Sign in as Staff</button>
         </fieldset>
       </form>
     </div>
@@ -73,6 +120,23 @@
     line-height: 1.5;
     color: #64748b;
     min-height: 2.75em;
+  }
+  .login-section {
+    margin-top: 6px;
+  }
+  .login-section-title {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 800;
+    color: #0f172a;
+  }
+  .login-section-sub {
+    margin: 0 0 10px;
+    font-size: 12px;
+  }
+  .login-divider {
+    margin: 16px 0;
+    border-top: 1px dashed #d8dee6;
   }
   .login-panel[hidden] {
     display: none !important;
@@ -173,10 +237,14 @@
 
 <script>
   (function () {
-    var form = document.getElementById("loginFormUnified");
-    var btn = document.getElementById("loginBtnUnified");
+    var formMgmt = document.getElementById("loginFormMgmt");
+    var btnMgmt = document.getElementById("loginBtnMgmt");
+    var formStaff = document.getElementById("loginFormStaff");
+    var btnStaff = document.getElementById("loginBtnStaff");
     var LABEL_MGMT_LOADING = "Signing in…";
     var LABEL_MGMT_DEFAULT = "Continue to Workspace";
+    var LABEL_STAFF_LOADING = "Signing in…";
+    var LABEL_STAFF_DEFAULT = "Sign in as Staff";
 
     function wireSubmitLoading(form, button, loadingLabel, defaultLabel) {
       if (!form || !button) return;
@@ -203,7 +271,8 @@
       });
     }
 
-    wireSubmitLoading(form, btn, LABEL_MGMT_LOADING, LABEL_MGMT_DEFAULT);
+    wireSubmitLoading(formMgmt, btnMgmt, LABEL_MGMT_LOADING, LABEL_MGMT_DEFAULT);
+    wireSubmitLoading(formStaff, btnStaff, LABEL_STAFF_LOADING, LABEL_STAFF_DEFAULT);
     requestAnimationFrame(function () {
       var e = document.getElementById("loginId");
       if (e && !e.disabled) e.focus({ preventScroll: true });

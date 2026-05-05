@@ -785,17 +785,15 @@ function loginPageHtml(hotel?: LoginHotelContext): string {
   const hotelDisplayName = hotel?.displayName ?? "ChatStay Hotel Portal";
   const isKnownHotel = Boolean(hotel?.id);
   const hotelContextField = isKnownHotel ? `<input type="hidden" name="hotelSlug" value="${escapeHtml(hotelAccountKey)}" />` : "";
-  const invalidHotelNotice =
+  const loginAlerts =
     hotel?.requestedKey && !hotel.id
       ? `<p class="badge alert">No hotel account found for <code>${escapeHtml(hotel.requestedKey)}</code>. Use the numeric account number from the Owner Console.</p>`
       : "";
   return readView("login.html")
     .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
-    .replace("{{LOGIN_ID_VALUE}}", escapeHtml(hotelAccountKey))
-    .replace(
-      '<fieldset class="login-fieldset" id="loginFieldsetUnified">',
-      `<fieldset class="login-fieldset" id="loginFieldsetUnified">${invalidHotelNotice}${hotelContextField}`
-    )
+    .replaceAll("{{HOTEL_ACCOUNT_KEY}}", escapeHtml(hotelAccountKey))
+    .replaceAll("{{HOTEL_HIDDEN_FIELD}}", hotelContextField)
+    .replace("{{LOGIN_ALERTS}}", loginAlerts)
     .replaceAll('href="/admin/forgot-password"', `href="/admin/forgot-password?hotel=${encodeURIComponent(hotelAccountKey)}"`)
     .replace("{{LOGIN_DEMO_SECTION}}", loginDemoSectionHtml());
 }
