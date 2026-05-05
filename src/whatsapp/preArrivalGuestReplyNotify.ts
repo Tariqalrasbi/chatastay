@@ -1,5 +1,6 @@
 import { BookingStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
+import { isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
 import {
   mergePreferredActivitiesFromText,
   mergeSpecialRequestSnippet,
@@ -253,7 +254,7 @@ export async function handleGuestJourneyInboundReply(params: {
     where: {
       hotelId: params.hotelId,
       guestId: params.guestId,
-      status: BookingStatus.CONFIRMED,
+      status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
       OR: [
         { guestJourneyPreArrival24hSentAt: { not: null } },
         { guestJourneyCheckinDaySentAt: { not: null } },
@@ -264,7 +265,7 @@ export async function handleGuestJourneyInboundReply(params: {
       ]
     },
     orderBy: { checkOut: "desc" },
-    include: { guest: true }
+    include: { guest: true, roomUnit: { select: { notes: true } } }
   });
 
   if (!booking) {
@@ -272,6 +273,22 @@ export async function handleGuestJourneyInboundReply(params: {
   }
 
   const category = detectGuestOperationalIntentCategory(params.messageBody);
+  if (
+    isGuestEffectivelyCheckedIn({
+      status: booking.status,
+      guestJourneyInStayWelcomeSentAt: booking.guestJourneyInStayWelcomeSentAt,
+      roomUnit: booking.roomUnit
+    }) &&
+    category &&
+    isArrivalFamilyCategory(category)
+  ) {
+    return {
+      matched: false,
+      rawMessage: params.messageBody,
+      bookingId: booking.id,
+      referenceCode: booking.referenceCode
+    };
+  }
   const parsedEta = parseEtaText(params.messageBody);
   const upsellMeta = detectUpsellMetadata({
     category,

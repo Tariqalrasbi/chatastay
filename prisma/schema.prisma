@@ -33,6 +33,8 @@ enum ConversationState {
 enum BookingStatus {
   PENDING
   CONFIRMED
+  /** Guest has arrived / room assigned at front desk; in-stay WhatsApp & folio flows apply. */
+  CHECKED_IN
   CANCELLED
   NO_SHOW
 }

@@ -1,5 +1,7 @@
 import { FbServiceMode } from "@prisma/client";
 import { prisma } from "../db";
+import { hotelTimezoneOrUtc } from "../core/guestMessagingSchedule";
+import { isBookingCalendarActiveOnDate, isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
 import type { FbCartDraftState, FbCartLine, FbCartPurpose } from "./foodTypes";
 import { buildResolvedMenuItemMap, findCategoryById, getAbrCategories, menuItemKey } from "./menuCatalog";
 import { validateMealServiceTime } from "./restaurantHours";
@@ -29,21 +31,69 @@ function isBack(t: string): boolean {
   return x === "back" || x === "*back*";
 }
 
-export async function findGuestActiveStayBooking(hotelId: string, guestId: string) {
-  const now = new Date();
-  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
-  return prisma.booking.findFirst({
-    where: {
-      hotelId,
-      guestId,
-      status: "CONFIRMED",
-      checkIn: { lt: dayEnd },
-      checkOut: { gt: dayStart }
-    },
-    orderBy: { checkIn: "desc" }
+/**
+ * Confirmed stay overlapping "today" on the hotel calendar (inclusive check-in through check-out date).
+ */
+export async function findGuestActiveStayBooking(hotelId: string, guestId: string, hotelTimezone?: string | null) {
+  const tz = hotelTimezoneOrUtc(hotelTimezone);
+  const asOf = new Date();
+  const rows = await prisma.booking.findMany({
+    where: { hotelId, guestId, status: { in: ["CONFIRMED", "CHECKED_IN"] } },
+    include: { roomUnit: { select: { id: true, name: true, notes: true } } },
+    orderBy: { checkIn: "desc" },
+    take: 24
   });
+  for (const b of rows) {
+    if (!isBookingCalendarActiveOnDate(b.checkIn, b.checkOut, tz, asOf)) continue;
+    return b;
+  }
+  return null;
+}
+
+/** In-house guest: active stay + (welcome sent or room board OCCUPIED). */
+export async function findGuestInHouseForServices(hotelId: string, guestId: string, hotelTimezone?: string | null) {
+  const tz = hotelTimezoneOrUtc(hotelTimezone);
+  const asOf = new Date();
+  const rows = await prisma.booking.findMany({
+    where: { hotelId, guestId, status: { in: ["CONFIRMED", "CHECKED_IN"] } },
+    include: { roomUnit: { select: { id: true, name: true, notes: true } } },
+    orderBy: { checkIn: "desc" },
+    take: 24
+  });
+  for (const b of rows) {
+    if (!isBookingCalendarActiveOnDate(b.checkIn, b.checkOut, tz, asOf)) continue;
+    if (!isGuestEffectivelyCheckedIn({ ...b, status: b.status })) continue;
+    return b;
+  }
+  return null;
+}
+
+/** WhatsApp meal-plan picker: prominent header + list (reuse everywhere booking asks for meal plan). */
+export function buildMealPlanSelectionOutbounds(lang: "en" | "ar"): FoodFlowOutbound[] {
+  const ar = lang === "ar";
+  const header: FoodFlowOutbound = {
+    kind: "text",
+    body: ar
+      ? "🍽 *باقة الوجبات*\nاختر واحدة من القائمة التالية (اضغط *اختيار الباقة*)."
+      : "🍽 *Meal plan*\nChoose one option below (tap *Choose plan*)."
+  };
+  const list: FoodFlowOutbound = {
+    kind: "list",
+    body: ar ? "اختر خطة الوجبات الآن:" : "Choose your meal plan:",
+    buttonText: ar ? "اختيار الباقة" : "Choose plan",
+    sections: [
+      {
+        title: ar ? "باقات الوجبات" : "Meal packages",
+        rows: [
+          { id: "mp_none", title: ar ? "غرفة فقط" : "Room only", description: ar ? "بدون وجبات" : "Room rate only" },
+          { id: "mp_bf", title: ar ? "إفطار" : "Breakfast", description: ar ? "فطور يومي" : "Daily breakfast" },
+          { id: "mp_half", title: ar ? "نصف إقامة" : "Half board", description: ar ? "فطور + عشاء" : "Breakfast + dinner" },
+          { id: "mp_full", title: ar ? "إقامة كاملة" : "Full board", description: ar ? "جميع الوجبات" : "All main meals" }
+        ]
+      }
+    ]
+  };
+  return [header, list];
 }
 
 export function isStayFoodIntent(text: string): boolean {
@@ -159,6 +209,16 @@ function cartSubtotal(cart: FbCartLine[]): number {
   return cart.reduce((s, l) => s + l.unitPrice * l.qty, 0);
 }
 
+function mergeCartLinesByMenuItemId(cart: FbCartLine[]): FbCartLine[] {
+  const m = new Map<string, FbCartLine>();
+  for (const l of cart) {
+    const cur = m.get(l.menuItemId);
+    if (cur) m.set(l.menuItemId, { ...cur, qty: Math.min(99, cur.qty + l.qty) });
+    else m.set(l.menuItemId, { ...l });
+  }
+  return [...m.values()];
+}
+
 function cartSummaryWithSubtotal(cart: FbCartLine[], currency: string): string {
   const lines = cartSummaryLines(cart, currency);
   const sub = cartSubtotal(cart);
@@ -192,7 +252,7 @@ export async function advanceFbCartDraft(params: {
     if (isBack(raw)) {
       if (draft.step === "item") {
         draft = { ...draft, step: "category", categoryId: undefined };
-        return { draft, outbound: [buildCategoryList("meal_plan_view")] };
+        return { draft, outbound: [buildCategoryList(draft.purpose === "browse_only" ? "browse_only" : "meal_plan_view")] };
       }
       return { draft: null, outbound: [], viewFinished: true };
     }
@@ -211,15 +271,16 @@ export async function advanceFbCartDraft(params: {
         select: { name: true, unitPrice: true }
       });
       if (!row) return { draft, outbound: [{ kind: "text", body: "Item not found." }] };
+      const browsePurpose = draft.purpose === "browse_only" ? "browse_only" : "meal_plan_view";
       return {
         draft: { ...draft, step: "category", categoryId: undefined },
         outbound: [
           { kind: "text", body: `*${row.name}* — ${row.unitPrice.toFixed(2)} ${currency}` },
-          buildCategoryList("meal_plan_view")
+          buildCategoryList(browsePurpose)
         ]
       };
     }
-    return { draft, outbound: [buildCategoryList("meal_plan_view")] };
+    return { draft, outbound: [buildCategoryList(draft.purpose === "browse_only" ? "browse_only" : "meal_plan_view")] };
   }
 
   if (draft.purpose === "stay" && draft.stayBookingId) {
@@ -372,7 +433,7 @@ export async function advanceFbCartDraft(params: {
       unitPrice: draft.pendingUnitPrice,
       qty: q
     };
-    const nextCart = [...draft.cart, line];
+    const nextCart = mergeCartLinesByMenuItemId([...draft.cart, line]);
     draft = {
       ...draft,
       step: "add_more",
@@ -523,7 +584,7 @@ export async function advanceFbCartDraft(params: {
       "*Review your order*",
       cartSummaryWithSubtotal(draft.cart, currency),
       "",
-      `*Total:* ${grand.toFixed(2)} ${currency}`,
+      `*FINAL TOTAL:* ${grand.toFixed(2)} ${currency}`,
       `*Service:* ${svcLabel}`,
       `*Requested time:* ${timeLabel}`,
       "",
@@ -560,7 +621,7 @@ export async function advanceFbCartDraft(params: {
         "*Review your order*",
         cartSummaryWithSubtotal(draft.cart, currency),
         "",
-        `*Total:* ${grand.toFixed(2)} ${currency}`,
+        `*FINAL TOTAL:* ${grand.toFixed(2)} ${currency}`,
         `Service: ${sm === "ROOM_SERVICE" ? "Room service" : "Restaurant dining"}`,
         `Time: ${note === "ASAP" ? "ASAP" : note}`
       ].join("\n");
@@ -594,7 +655,7 @@ export async function advanceFbCartDraft(params: {
         outbound: [
           {
             kind: "text",
-            body: `Order received — *total ${grand.toFixed(2)} ${currency}*. The team has been notified.`
+            body: `Order confirmed — *FINAL TOTAL ${grand.toFixed(2)} ${currency}*. The kitchen has your request and it is on your folio.`
           }
         ],
         stayFinished: { bookingId: draft.stayBookingId, lines, serviceMode: sm, timeNote: note }

@@ -56,7 +56,7 @@ export async function autoAssignRoomUnitForBookingTx(params: {
     where: {
       hotelId: params.hotelId,
       roomTypeId: params.roomTypeId,
-      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
       checkIn: { lt: params.checkOut },
       checkOut: { gt: params.checkIn },
       roomUnitId: { not: null },
@@ -191,7 +191,7 @@ export async function createConfirmedBookingAtomic(params: {
       conversationId: params.conversationId,
       checkIn: params.checkIn,
       checkOut: params.checkOut,
-      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] }
+      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] }
     },
     include: { roomType: true }
   });
@@ -262,7 +262,7 @@ export async function createConfirmedBookingAtomic(params: {
       where: {
         hotelId: params.hotelId,
         roomTypeId: offer.roomTypeId,
-        status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+        status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
         checkIn: { lt: params.checkOut },
         checkOut: { gt: params.checkIn }
       }
@@ -564,7 +564,7 @@ export async function assertRoomUnitAvailableForBookingStayTx(
     where: {
       hotelId: params.hotelId,
       roomUnitId: params.roomUnitId,
-      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+      status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
       checkIn: { lt: params.checkOut },
       checkOut: { gt: params.checkIn },
       id: { not: params.excludeBookingId }
@@ -604,8 +604,12 @@ export async function reassignBookingRoomUnitTx(
   if (!booking) {
     throw new Error("Booking not found.");
   }
-  if (booking.status !== BookingStatus.PENDING && booking.status !== BookingStatus.CONFIRMED) {
-    throw new Error("Only pending or confirmed bookings can change room assignment.");
+  if (
+    booking.status !== BookingStatus.PENDING &&
+    booking.status !== BookingStatus.CONFIRMED &&
+    booking.status !== BookingStatus.CHECKED_IN
+  ) {
+    throw new Error("Only pending, confirmed, or checked-in bookings can change room assignment.");
   }
 
   const target = await tx.roomUnit.findFirst({

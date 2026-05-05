@@ -74,7 +74,7 @@ export async function findAvailableRoomType(params: {
         where: {
           hotelId: params.hotelId,
           roomTypeId: roomType.id,
-          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
           checkIn: { lt: params.checkOut },
           checkOut: { gt: params.checkIn }
         }
@@ -141,7 +141,7 @@ export async function findAvailableRoomTypes(params: {
         where: {
           hotelId: params.hotelId,
           roomTypeId: roomType.id,
-          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
           checkIn: { lt: params.checkOut },
           checkOut: { gt: params.checkIn }
         }
@@ -255,7 +255,7 @@ export async function getDayAvailability(params: {
       where: {
         hotelId: params.hotelId,
         roomTypeId: roomType.id,
-        status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+        status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
         checkIn: { lt: checkOut },
         checkOut: { gt: checkIn }
       }

@@ -104,6 +104,16 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
     button { border:0; background:#075e54; color:#fff; padding:10px 14px; border-radius: 10px; font-weight: 700; cursor: pointer; }
     button:disabled { opacity:.45; cursor:not-allowed; }
     .row { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .meal-plan-fieldset { border: 1px solid #cfe8e0; border-radius: 14px; padding: 12px 14px; margin: 0; background: #f7fdfb; }
+    .meal-plan-fieldset legend { font-weight: 700; font-size: 15px; padding: 0 4px; color: #0f172a; }
+    .meal-plan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 8px; }
+    @media (min-width: 520px) { .meal-plan-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    .meal-plan-card { display: flex; flex-direction: column; gap: 4px; border: 2px solid #d8eee5; border-radius: 10px; padding: 10px 8px; cursor: pointer; background: #fff; position: relative; min-height: 72px; transition: border-color 0.15s, box-shadow 0.15s, background 0.15s; }
+    .meal-plan-card:hover { border-color: #94d4c9; }
+    .meal-plan-card:has(input:checked) { border-color: #128c7e; box-shadow: 0 0 0 1px #128c7e; background: #ecfff8; }
+    .meal-plan-card input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .meal-plan-card .t { font-weight: 700; font-size: 14px; }
+    .meal-plan-card .d { font-size: 12px; color: #64748b; line-height: 1.35; }
     .hero-card { background: linear-gradient(135deg, #075e54 0%, #128c7e 100%); color: #fff; border-radius: 18px; padding: 18px; margin-bottom: 14px; }
     .hero-card .muted { color: rgba(255,255,255,.82); }
     @media (max-width: 700px) {
@@ -373,6 +383,32 @@ ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
       </select>
     </label>
   </div>
+  <fieldset class="meal-plan-fieldset">
+    <legend>${ar ? "خطة الوجبات" : "Meal plan"}</legend>
+    <p class="muted" style="margin:0 0 8px;font-size:13px">${ar ? "اختر الباقة قبل الغرفة والدفع — تظهر دائماً هنا." : "Choose your board plan before rooms & payment — always visible here."}</p>
+    <div class="meal-plan-grid" role="radiogroup" aria-label="${ar ? "خطة الوجبات" : "Meal plan"}">
+      <label class="meal-plan-card">
+        <input type="radio" name="mealPlan" value="NONE" checked />
+        <span class="t">${ar ? "غرفة فقط" : "Room only"}</span>
+        <span class="d">${ar ? "بدون وجبات" : "Room rate only"}</span>
+      </label>
+      <label class="meal-plan-card">
+        <input type="radio" name="mealPlan" value="BREAKFAST" />
+        <span class="t">${ar ? "إفطار" : "Breakfast"}</span>
+        <span class="d">${mealPlanSuffix("BREAKFAST")}</span>
+      </label>
+      <label class="meal-plan-card">
+        <input type="radio" name="mealPlan" value="HALF_BOARD" />
+        <span class="t">${ar ? "نصف إقامة" : "Half board"}</span>
+        <span class="d">${mealPlanSuffix("HALF_BOARD")}</span>
+      </label>
+      <label class="meal-plan-card">
+        <input type="radio" name="mealPlan" value="FULL_BOARD" />
+        <span class="t">${ar ? "إقامة كاملة" : "Full board"}</span>
+        <span class="d">${mealPlanSuffix("FULL_BOARD")}</span>
+      </label>
+    </div>
+  </fieldset>
   <div class="row">
     <label>${ar ? "عدد الغرف" : "Rooms"}
       <select name="rooms" required>
@@ -388,22 +424,12 @@ ${error ? `<p class="badge alert">${escapeHtml(error)}</p>` : ""}
       </select>
     </label>
   </div>
-  <div class="row">
-    <label>${ar ? "خطة الوجبات" : "Meal plan"}
-      <select name="mealPlan">
-        <option value="NONE">${ar ? "غرفة فقط" : "Room only"}</option>
-        <option value="BREAKFAST">${ar ? "إفطار" : "Breakfast"} ${mealPlanSuffix("BREAKFAST")}</option>
-        <option value="HALF_BOARD">${ar ? "نصف إقامة" : "Half board"} ${mealPlanSuffix("HALF_BOARD")}</option>
-        <option value="FULL_BOARD">${ar ? "إقامة كاملة" : "Full board"} ${mealPlanSuffix("FULL_BOARD")}</option>
-      </select>
-    </label>
-    <label>${ar ? "الدفع" : "Payment"}
-      <select name="paymentPreference">
-        <option value="PAY_LATER">${ar ? "الدفع لاحقاً في الفندق" : "Pay later at hotel"}</option>
-        <option value="PAY_NOW">${ar ? "ادفع الآن برابط آمن" : "Pay now by secure link"}</option>
-      </select>
-    </label>
-  </div>
+  <label>${ar ? "الدفع" : "Payment"}
+    <select name="paymentPreference">
+      <option value="PAY_LATER">${ar ? "الدفع لاحقاً في الفندق" : "Pay later at hotel"}</option>
+      <option value="PAY_NOW">${ar ? "ادفع الآن برابط آمن" : "Pay now by secure link"}</option>
+    </select>
+  </label>
   <div class="row">
     <label>${ar ? "اسم الضيف" : "Guest name"}
       <input type="text" name="guestName" value="${escapeHtml(guestName)}" placeholder="Guest name" />

@@ -80,17 +80,28 @@ export async function createFbOrdersFromMenuLines(params: {
     const item = byId.get(l.menuItemId);
     if (!item) continue;
     const qty = Math.min(99, Math.max(1, Math.floor(l.qty)));
-    const lineTotal = Number((item.unitPrice * qty).toFixed(2));
-    const row = {
-      menuItemId: item.id,
-      itemNameSnap: item.name,
-      quantity: qty,
-      unitPrice: item.unitPrice,
-      lineTotal
-    };
-    const arr = groups.get(item.outletType) ?? [];
-    arr.push(row);
-    groups.set(item.outletType, arr);
+    const outletType = item.outletType;
+    const arr = groups.get(outletType) ?? [];
+    const idx = arr.findIndex((row) => row.menuItemId === item.id);
+    if (idx >= 0) {
+      const prev = arr[idx]!;
+      const newQty = Math.min(99, prev.quantity + qty);
+      arr[idx] = {
+        ...prev,
+        quantity: newQty,
+        lineTotal: Number((prev.unitPrice * newQty).toFixed(2))
+      };
+    } else {
+      const lineTotal = Number((item.unitPrice * qty).toFixed(2));
+      arr.push({
+        menuItemId: item.id,
+        itemNameSnap: item.name,
+        quantity: qty,
+        unitPrice: item.unitPrice,
+        lineTotal
+      });
+    }
+    groups.set(outletType, arr);
   }
 
   if (groups.size === 0) throw new Error("No valid menu items.");

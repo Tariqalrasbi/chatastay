@@ -71,6 +71,13 @@ export type PersistentSessionState = {
   lastAvailabilityIssue?: string | null;
   bookingRecoveryNudgeSentAt?: string;
   bookingRecoveryRecheckSentAt?: string;
+  /** Throttle repeated in-stay WhatsApp service menus (ISO string). */
+  lastInStayMenuSentAt?: string | null;
+  /** In-stay complaint: guest chose category; next message is the description. */
+  inStayComplaintStep?: "await_description" | null;
+  inStayComplaintCategory?: string | null;
+  /** Slug like `pillow` after guest picked an extra item; next message should be quantity 1–9. */
+  inStayExtraAwaitQtyFor?: string | null;
 };
 
 export type CalendarLinkPayload = {
@@ -235,7 +242,11 @@ export async function loadConversationSession(params: {
     bookingRecoveryNudgeSentAt:
       typeof metadata.bookingRecoveryNudgeSentAt === "string" ? metadata.bookingRecoveryNudgeSentAt : undefined,
     bookingRecoveryRecheckSentAt:
-      typeof metadata.bookingRecoveryRecheckSentAt === "string" ? metadata.bookingRecoveryRecheckSentAt : undefined
+      typeof metadata.bookingRecoveryRecheckSentAt === "string" ? metadata.bookingRecoveryRecheckSentAt : undefined,
+    lastInStayMenuSentAt: typeof metadata.lastInStayMenuSentAt === "string" ? metadata.lastInStayMenuSentAt : undefined,
+    inStayComplaintStep: metadata.inStayComplaintStep === "await_description" ? "await_description" : undefined,
+    inStayComplaintCategory: typeof metadata.inStayComplaintCategory === "string" ? metadata.inStayComplaintCategory : undefined,
+    inStayExtraAwaitQtyFor: typeof metadata.inStayExtraAwaitQtyFor === "string" ? metadata.inStayExtraAwaitQtyFor : undefined
   };
 }
 
@@ -316,6 +327,11 @@ export async function saveConversationSession(params: {
 }): Promise<void> {
   const nowIso = new Date().toISOString();
   const expiresAt = new Date(Date.now() + (params.ttlMs ?? conversationInactivityTtlMs));
+  const prevRow = await prisma.conversationSession.findUnique({
+    where: { hotelId_guestId: { hotelId: params.hotelId, guestId: params.guestId } },
+    select: { metadataJson: true }
+  });
+  const prevMeta = parseMetadata(prevRow?.metadataJson);
   const metadata = {
     lastActivityAt: params.state.lastActivityAt ?? nowIso,
     conversationMode: params.state.conversationMode ?? "IDLE",
@@ -353,7 +369,31 @@ export async function saveConversationSession(params: {
     bookingFlowReturn: params.state.bookingFlowReturn ?? null,
     lastAvailabilityIssue: params.state.lastAvailabilityIssue ?? null,
     bookingRecoveryNudgeSentAt: params.state.bookingRecoveryNudgeSentAt ?? null,
-    bookingRecoveryRecheckSentAt: params.state.bookingRecoveryRecheckSentAt ?? null
+    bookingRecoveryRecheckSentAt: params.state.bookingRecoveryRecheckSentAt ?? null,
+    lastInStayMenuSentAt:
+      params.state.lastInStayMenuSentAt !== undefined
+        ? params.state.lastInStayMenuSentAt
+        : typeof prevMeta.lastInStayMenuSentAt === "string"
+          ? prevMeta.lastInStayMenuSentAt
+          : null,
+    inStayComplaintStep:
+      params.state.inStayComplaintStep !== undefined
+        ? params.state.inStayComplaintStep
+        : typeof prevMeta.inStayComplaintStep === "string"
+          ? prevMeta.inStayComplaintStep
+          : null,
+    inStayComplaintCategory:
+      params.state.inStayComplaintCategory !== undefined
+        ? params.state.inStayComplaintCategory
+        : typeof prevMeta.inStayComplaintCategory === "string"
+          ? prevMeta.inStayComplaintCategory
+          : null,
+    inStayExtraAwaitQtyFor:
+      params.state.inStayExtraAwaitQtyFor !== undefined
+        ? params.state.inStayExtraAwaitQtyFor
+        : typeof prevMeta.inStayExtraAwaitQtyFor === "string"
+          ? prevMeta.inStayExtraAwaitQtyFor
+          : null
   };
   await prisma.conversationSession.upsert({
     where: { hotelId_guestId: { hotelId: params.hotelId, guestId: params.guestId } },

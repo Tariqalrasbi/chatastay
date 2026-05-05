@@ -18,6 +18,8 @@ import {
   type GuestJourneySendWindowReason
 } from "../core/guestMessagingSchedule";
 import { parseLightGuestMemory } from "../core/lightGuestMemory";
+import { isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
+import { englishDayPeriodGreetingLine } from "../core/timeGreetings";
 import { sendWhatsAppButtons, sendWhatsAppList, trySendWhatsAppText } from "../whatsapp/send";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -109,10 +111,17 @@ function buildPreArrival24hBody(params: { guestFirstName: string; hotelName: str
   ].join("\n");
 }
 
-function buildCheckinDayBody(params: { guestFirstName: string; hotelName: string; arrivalSummary: string }): string {
+function buildCheckinDayBody(params: {
+  guestFirstName: string;
+  hotelName: string;
+  arrivalSummary: string;
+  hotelTimeZone?: string | null;
+  now?: Date;
+}): string {
   const who = params.guestFirstName.trim() || "Guest";
+  const greet = englishDayPeriodGreetingLine(params.now ?? new Date(), params.hotelTimeZone);
   return [
-    `Good morning ${who},`,
+    `${greet}, ${who},`,
     "",
     `Today is your arrival day at ${params.hotelName}. We look forward to welcoming you — your check-in is scheduled for ${params.arrivalSummary}.`,
     "",
@@ -475,11 +484,15 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
         status: BookingStatus.CONFIRMED,
         guestJourneyCheckinDaySentAt: null
       },
-      include: baseInclude
+      include: { ...baseInclude, roomUnit: { select: { notes: true } } }
     });
 
     for (const b of forCheckinDay) {
       scanned++;
+      if (isGuestEffectivelyCheckedIn(b)) {
+        skipped++;
+        continue;
+      }
       const checkInYmd = formatYmdInHotelZone(b.checkIn, tz);
       if (checkInYmd !== todayYmd) {
         skipped++;
@@ -501,7 +514,9 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       const body = buildCheckinDayBody({
         guestFirstName: firstName(b.guest.fullName),
         hotelName: hotel.displayName,
-        arrivalSummary
+        arrivalSummary,
+        hotelTimeZone: tz,
+        now
       });
 
       const ok = await sendJourneyMessage({

@@ -79,6 +79,7 @@ import { recordBookingStatusChange } from "../core/bookingStatusHistory";
 import { createBookingPaymentLink } from "../core/bookingPayments";
 import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { sendInStayWelcomeMenuIfEligible } from "../core/inStayWelcome";
+import { writeManualRoomStatusToNotes as mergeRoomBoardStatusNote } from "../core/roomBoardNotes";
 import { loadPartnerSetupConfig, savePartnerSetupConfig, applyPartnerTemplate, type PartnerSetupConfig } from "../core/partnerSetup";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
 import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
@@ -1885,7 +1886,7 @@ function renderWhatsAppPhoneFields(opts: {
 }
 
 function getBadgeClass(status: string): "ok" | "pending" | "alert" {
-  if (status === "CONFIRMED" || status === "SUCCEEDED" || status === "ACTIVE") return "ok";
+  if (status === "CONFIRMED" || status === "CHECKED_IN" || status === "SUCCEEDED" || status === "ACTIVE") return "ok";
   if (status === "CANCELLED" || status === "FAILED" || status === "NO_SHOW") return "alert";
   return "pending";
 }
@@ -6618,7 +6619,7 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
       where: {
         hotelId: hotel.id,
         roomUnitId: unit.id,
-        status: BookingStatus.CONFIRMED,
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
         checkIn: { lt: dayEndExclusive },
         checkOut: { gt: dayStart }
       },
@@ -7520,7 +7521,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         where: {
           hotelId: hotel.id,
           roomUnitId: unit.id,
-          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
           checkIn: { lt: checkOut },
           checkOut: { gt: checkIn }
         }
@@ -7557,6 +7558,12 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         refDate: new Date()
       });
 
+      const existingConv = await tx.conversation.findFirst({
+        where: { hotelId: hotel.id, guestId: guest.id },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true }
+      });
+
       await tx.booking.create({
         data: {
           id: bookingId,
@@ -7565,7 +7572,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
           roomTypeId: rt.id,
           roomUnitId: unit.id,
           guestId: guest.id,
-          conversationId: null,
+          conversationId: existingConv?.id ?? null,
           checkIn,
           checkOut,
           nights,
@@ -7573,7 +7580,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
           children,
           totalAmount,
           currency: hotel.currency,
-          status: BookingStatus.CONFIRMED,
+          status: BookingStatus.CHECKED_IN,
           source: bookingSourceChannel,
           referenceCode,
           paymentStatus,
@@ -7585,8 +7592,17 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         hotelId: hotel.id,
         bookingId,
         fromStatus: null,
-        toStatus: BookingStatus.CONFIRMED,
+        toStatus: BookingStatus.CHECKED_IN,
         source: "MANUAL_CHECK_IN"
+      });
+
+      const unitNotesRow = await tx.roomUnit.findUnique({
+        where: { id: unit.id },
+        select: { notes: true }
+      });
+      await tx.roomUnit.update({
+        where: { id: unit.id },
+        data: { notes: mergeRoomBoardStatusNote(unitNotesRow?.notes ?? null, "OCCUPIED") }
       });
 
       await ensureActiveFolio(tx, {
@@ -16359,6 +16375,7 @@ ${groupSectionHtml}
         <select name="status" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
           <option value="PENDING" ${booking.status === "PENDING" ? "selected" : ""}>Pending</option>
           <option value="CONFIRMED" ${booking.status === "CONFIRMED" ? "selected" : ""}>Confirmed</option>
+          <option value="CHECKED_IN" ${booking.status === "CHECKED_IN" ? "selected" : ""}>Checked in</option>
           <option value="CANCELLED" ${booking.status === "CANCELLED" ? "selected" : ""}>Cancelled</option>
           <option value="NO_SHOW" ${booking.status === "NO_SHOW" ? "selected" : ""}>No Show</option>
         </select>
@@ -17387,9 +17404,13 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
     return;
   }
   const rawStatus = String(req.body.status ?? "");
-  const nextStatus: BookingStatus | null = [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.CANCELLED, BookingStatus.NO_SHOW].includes(
-    rawStatus as BookingStatus
-  )
+  const nextStatus: BookingStatus | null = [
+    BookingStatus.PENDING,
+    BookingStatus.CONFIRMED,
+    BookingStatus.CHECKED_IN,
+    BookingStatus.CANCELLED,
+    BookingStatus.NO_SHOW
+  ].includes(rawStatus as BookingStatus)
     ? (rawStatus as BookingStatus)
     : null;
 
@@ -17415,6 +17436,11 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
       bookingId,
       metadata: { status: nextStatus }
     });
+    if (nextStatus === BookingStatus.CHECKED_IN && existingBooking.status !== BookingStatus.CHECKED_IN) {
+      sendInStayWelcomeMenuIfEligible(bookingId).catch((err) =>
+        console.error("in-stay welcome after status CHECKED_IN:", err instanceof Error ? err.message : String(err))
+      );
+    }
   }
   const becameConfirmed = nextStatus === BookingStatus.CONFIRMED && existingBooking.status !== BookingStatus.CONFIRMED;
   let autoInvoiceResult: { sent: boolean; skipped: boolean; error?: string } | null = null;

@@ -185,9 +185,11 @@ export function buildManualCheckInPageHtml(
 
   const br = getMealPlanUnitRate("BREAKFAST");
   const hr = getMealPlanUnitRate("HALF_BOARD");
-  const mealHints = `Breakfast +${formatMoney(br.rate, hotel.currency)}/${br.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night · Half board +${formatMoney(hr.rate, hotel.currency)}/${hr.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night`;
+  const fr = getMealPlanUnitRate("FULL_BOARD");
+  const mealHints = `Breakfast +${formatMoney(br.rate, hotel.currency)}/${br.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night · Half +${formatMoney(hr.rate, hotel.currency)}/${hr.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night · Full +${formatMoney(fr.rate, hotel.currency)}/${fr.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room"}/night`;
   const mp = (form?.mealPlan ?? "NONE").toUpperCase();
   const mealSelected = (v: string) => (mp === v ? " selected" : "");
+  const mealCardOn = (v: string) => (mp === v ? " fd-meal-card--on" : "");
   const bc = (form?.bookingChannel ?? "DIRECT").toUpperCase();
   const bcSel = (v: string) => (bc === v ? " selected" : "");
   const ps = form?.paymentStatus ?? "PENDING";
@@ -309,6 +311,30 @@ export function buildManualCheckInPageHtml(
 }
 .fd-submit:hover { filter: brightness(1.05); }
 .fd-submit:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
+.fd-meal-fieldset { border: 1px solid #cfe8e0; border-radius: 12px; padding: 12px 14px; margin: 0; background: #f7fdfb; }
+.fd-legend-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 700; font-size: 15px; padding: 0 2px; }
+.fd-meal-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 8px; }
+@media (min-width: 560px) {
+  .fd-meal-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+.fd-meal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 2px solid #d8eee5;
+  border-radius: 10px;
+  padding: 10px 8px;
+  cursor: pointer;
+  background: #fff;
+  position: relative;
+  min-height: 72px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.fd-meal-card:hover { border-color: #94d4c9; }
+.fd-meal-card--on { border-color: #128c7e; box-shadow: 0 0 0 1px #128c7e; background: #ecfff8; }
+.fd-meal-card input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.fd-meal-card-title { font-weight: 700; font-size: 14px; color: #0f172a; }
+.fd-meal-card-desc { font-size: 12px; color: #64748b; line-height: 1.35; }
 </style>
 <div class="fd-checkin-wrap">
 <h2 style="margin-bottom:8px">Manual check-in</h2>
@@ -388,14 +414,34 @@ ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991
         <input type="number" id="fd-children" name="children" value="${childrenVal}" min="0" max="8" class="fd-input" />
       </div>
     </div>
-    <div class="fd-field">
-      <label for="fd-meal-plan">Meal plan</label>
-      <select id="fd-meal-plan" name="mealPlan" class="fd-input">
-        <option value="NONE"${mealSelected("NONE")}>Room only (default)</option>
-        <option value="BREAKFAST"${mealSelected("BREAKFAST")}>Breakfast</option>
-        <option value="HALF_BOARD"${mealSelected("HALF_BOARD")}>Half board</option>
-      </select>
-    </div>
+    <fieldset class="fd-field fd-meal-fieldset" aria-labelledby="fd-meal-legend">
+      <legend id="fd-meal-legend" class="fd-legend-row">
+        <span class="fd-sec-tag">Meal plan</span>
+        <span class="fd-hint" style="font-weight: 400">Pick before room category</span>
+      </legend>
+      <div class="fd-meal-grid" role="radiogroup" aria-label="Meal plan">
+        <label class="fd-meal-card${mealCardOn("NONE")}">
+          <input type="radio" name="mealPlan" value="NONE"${mealSelected("NONE")} />
+          <span class="fd-meal-card-title">Room only</span>
+          <span class="fd-meal-card-desc">No meals included</span>
+        </label>
+        <label class="fd-meal-card${mealCardOn("BREAKFAST")}">
+          <input type="radio" name="mealPlan" value="BREAKFAST"${mealSelected("BREAKFAST")} />
+          <span class="fd-meal-card-title">Breakfast</span>
+          <span class="fd-meal-card-desc">Morning meal package</span>
+        </label>
+        <label class="fd-meal-card${mealCardOn("HALF_BOARD")}">
+          <input type="radio" name="mealPlan" value="HALF_BOARD"${mealSelected("HALF_BOARD")} />
+          <span class="fd-meal-card-title">Half board</span>
+          <span class="fd-meal-card-desc">Breakfast + dinner</span>
+        </label>
+        <label class="fd-meal-card${mealCardOn("FULL_BOARD")}">
+          <input type="radio" name="mealPlan" value="FULL_BOARD"${mealSelected("FULL_BOARD")} />
+          <span class="fd-meal-card-title">Full board</span>
+          <span class="fd-meal-card-desc">All main meals</span>
+        </label>
+      </div>
+    </fieldset>
     <div class="fd-field">
       <label for="fd-booking-channel">Booking source <span class="fd-hint" style="font-weight:400">(reference number prefix)</span></label>
       <select id="fd-booking-channel" name="bookingChannel" class="fd-input">
@@ -673,7 +719,8 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
     var adults = Math.max(1, parseInt(document.getElementById("fd-adults").value, 10) || 1);
     var children = Math.max(0, parseInt(document.getElementById("fd-children").value, 10) || 0);
     var pax = adults + children;
-    var mp = document.getElementById("fd-meal-plan").value;
+    var mpEl = document.querySelector('input[name="mealPlan"]:checked');
+    var mp = mpEl ? mpEl.value : "NONE";
     var mealRate = (pricing.mealPlans[mp] && pricing.mealPlans[mp].perPersonPerNight) || 0;
     var roomSub = nightly * nights;
     var mealSub = mealRate * pax * nights;
@@ -738,13 +785,14 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
       recalc();
     });
   }
-  ["fd-meal-plan","fd-adjustment"].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) {
-      el.addEventListener("change", recalc);
-      el.addEventListener("input", recalc);
-    }
+  document.querySelectorAll('input[name="mealPlan"]').forEach(function (el) {
+    el.addEventListener("change", recalc);
   });
+  var adjEl = document.getElementById("fd-adjustment");
+  if (adjEl) {
+    adjEl.addEventListener("change", recalc);
+    adjEl.addEventListener("input", recalc);
+  }
   ["fd-adults","fd-children"].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) {

@@ -1,0 +1,1 @@
+-- SQLite stores Booking.status as TEXT. CHECKED_IN is a new enum value used by the app; no ALTER needed.

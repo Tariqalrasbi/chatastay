@@ -1,6 +1,8 @@
 import { ConversationState, MessageDirection } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "./partnerSetup";
+import { formatCheckInBillWhatsAppText, loadFolioSummaryForCheckInWhatsApp } from "./checkInBillSummary";
+import { IN_STAY_SERVICE_MESSAGE_SECTIONS } from "./inStayServiceMenu";
 import { sendWhatsAppList, trySendWhatsAppText } from "../whatsapp/send";
 
 async function getOrCreateGuestConversation(hotelId: string, guestId: string): Promise<{ id: string }> {
@@ -22,6 +24,95 @@ async function getOrCreateGuestConversation(hotelId: string, guestId: string): P
   });
 }
 
+export type InStayMenuBookingSlice = {
+  id: string;
+  referenceCode: string | null;
+  checkIn: Date;
+  checkOut: Date;
+  roomType: { name: string };
+};
+
+export function buildInStayServiceMenuIntroBody(params: { hotelName: string; booking: InStayMenuBookingSlice }): string {
+  const ref = params.booking.referenceCode ? ` (${params.booking.referenceCode})` : "";
+  return [
+    `You're in-house at ${params.hotelName}${ref}.`,
+    `Room: ${params.booking.roomType.name}`,
+    `Stay: ${params.booking.checkIn.toISOString().slice(0, 10)} → ${params.booking.checkOut.toISOString().slice(0, 10)}`,
+    "",
+    "How can we help during your stay? Pick a service below (tap *Services*)."
+  ].join("\n");
+}
+
+async function sendInStayWhatsAppListCore(params: {
+  toDigits: string;
+  body: string;
+  phoneNumberId?: string;
+  conversationId: string;
+}): Promise<{ ok: boolean; recordedBody: string }> {
+  let recordedBody = params.body;
+  try {
+    await sendWhatsAppList({
+      to: params.toDigits,
+      body: params.body,
+      buttonText: "Services",
+      sections: IN_STAY_SERVICE_MESSAGE_SECTIONS,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+    return { ok: true, recordedBody };
+  } catch {
+    const fb = `${params.body}\n\nReply with: ${IN_STAY_SERVICE_MESSAGE_SECTIONS.flatMap((s) => s.rows)
+      .map((r) => r.id)
+      .join(" | ")}`;
+    const r = await trySendWhatsAppText({
+      to: params.toDigits,
+      body: fb,
+      phoneNumberId: params.phoneNumberId,
+      conversationId: params.conversationId
+    });
+    if (!r.ok) return { ok: false, recordedBody: fb };
+    return { ok: true, recordedBody: fb };
+  }
+}
+
+/**
+ * Sends the expanded in-stay service menu on an existing conversation (does not set welcome idempotency flag).
+ */
+export async function sendInStayServiceMenuForActiveConversation(params: {
+  hotelId: string;
+  displayName: string;
+  booking: InStayMenuBookingSlice;
+  conversationId: string;
+  normalizedPhoneDigits: string;
+  phoneNumberId?: string;
+}): Promise<{ ok: boolean; recordedBody: string }> {
+  const body = buildInStayServiceMenuIntroBody({ hotelName: params.displayName, booking: params.booking });
+  const r = await sendInStayWhatsAppListCore({
+    toDigits: params.normalizedPhoneDigits,
+    body,
+    phoneNumberId: params.phoneNumberId,
+    conversationId: params.conversationId
+  });
+  if (!r.ok) return r;
+  await prisma.$transaction([
+    prisma.message.create({
+      data: {
+        hotelId: params.hotelId,
+        conversationId: params.conversationId,
+        direction: MessageDirection.OUTBOUND,
+        body: r.recordedBody.slice(0, 4000),
+        aiIntent: "IN_STAY_SERVICE_MENU",
+        aiConfidence: 0.97
+      }
+    }),
+    prisma.conversation.update({
+      where: { id: params.conversationId },
+      data: { lastMessageAt: new Date() }
+    })
+  ]);
+  return r;
+}
+
 /**
  * Sends the in-stay service WhatsApp menu once per booking (idempotent via `guestJourneyInStayWelcomeSentAt`).
  * Call after manual check-in or when the room board marks a unit OCCUPIED with an active booking.
@@ -33,12 +124,20 @@ export async function sendInStayWelcomeMenuIfEligible(bookingId: string): Promis
       id: true,
       hotelId: true,
       guestId: true,
+      conversationId: true,
       guestJourneyInStayWelcomeSentAt: true,
       referenceCode: true,
       checkIn: true,
       checkOut: true,
+      nights: true,
+      totalAmount: true,
+      currency: true,
+      paymentStatus: true,
+      mealPlan: true,
       roomType: { select: { name: true } },
-      guest: { select: { phoneE164: true, fullName: true } }
+      roomUnit: { select: { id: true, name: true, notes: true } },
+      guest: { select: { phoneE164: true, fullName: true } },
+      paymentIntents: { select: { status: true, amount: true } }
     }
   });
   if (!booking) return { sent: false, reason: "booking_not_found" };
@@ -52,72 +151,109 @@ export async function sendInStayWelcomeMenuIfEligible(bookingId: string): Promis
 
   const hotel = await prisma.hotel.findUnique({
     where: { id: booking.hotelId },
-    select: { displayName: true }
+    select: { displayName: true, timezone: true }
   });
   const hotelName = hotel?.displayName ?? "Hotel";
 
-  const ref = booking.referenceCode ? ` (${booking.referenceCode})` : "";
-  const body = [
-    `Welcome — you are checked in at ${hotelName}${ref}.`,
-    `Room: ${booking.roomType.name}`,
-    `Stay: ${booking.checkIn.toISOString().slice(0, 10)} → ${booking.checkOut.toISOString().slice(0, 10)}`,
-    "",
-    "How can we help during your stay? Pick a service below."
-  ].join("\n");
+  const paidSucceeded = booking.paymentIntents
+    .filter((p) => p.status === "SUCCEEDED")
+    .reduce((sum, p) => sum + p.amount, 0);
+  const folio = await loadFolioSummaryForCheckInWhatsApp({
+    hotelId: booking.hotelId,
+    booking: {
+      id: booking.id,
+      referenceCode: booking.referenceCode,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      nights: booking.nights,
+      totalAmount: booking.totalAmount,
+      currency: booking.currency,
+      paymentStatus: booking.paymentStatus,
+      mealPlan: booking.mealPlan
+    },
+    paymentIntentsSucceededTotal: paidSucceeded
+  });
+  const roomName = booking.roomUnit?.name?.trim() || booking.roomType.name;
+  const billBody = formatCheckInBillWhatsAppText({
+    hotelName,
+    roomName,
+    guestName: booking.guest.fullName?.trim() || "Guest",
+    booking: {
+      id: booking.id,
+      referenceCode: booking.referenceCode,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      nights: booking.nights,
+      totalAmount: booking.totalAmount,
+      currency: booking.currency,
+      paymentStatus: booking.paymentStatus,
+      mealPlan: booking.mealPlan
+    },
+    folio
+  });
 
   const conversation = await getOrCreateGuestConversation(booking.hotelId, booking.guestId);
 
-  let recordedBody = body;
-  try {
-    await sendWhatsAppList({
-      to: phone,
-      body,
-      buttonText: "Services",
-      sections: [
-        {
-          title: "In-stay",
-          rows: [
-            { id: "isv_view_stay", title: "View my stay", description: "Booking summary" },
-            { id: "isv_book_meal", title: "Book meal time", description: "Buffet / set menu" },
-            { id: "isv_order_meal", title: "Order meal / room svc", description: "Kitchen / folio" },
-            { id: "isv_coffee", title: "Coffee / café", description: "Café" },
-            { id: "isv_bike", title: "Bike / activity", description: "Activities" },
-            { id: "isv_hk", title: "Housekeeping", description: "Room refresh" },
-            { id: "isv_reception", title: "Reception", description: "Staff handoff" }
-          ]
+  const billTry = await trySendWhatsAppText({
+    to: phone,
+    body: billBody,
+    phoneNumberId,
+    conversationId: conversation.id
+  });
+  const billRecorded = billTry.ok ? billBody : "";
+
+  const body = [
+    `Welcome — you are checked in at ${hotelName}${booking.referenceCode ? ` (${booking.referenceCode})` : ""}.`,
+    `Room: ${roomName}`,
+    `Stay: ${booking.checkIn.toISOString().slice(0, 10)} → ${booking.checkOut.toISOString().slice(0, 10)}`,
+    "",
+    "How can we help during your stay? Pick a service below (tap *Services*)."
+  ].join("\n");
+
+  const r = await sendInStayWhatsAppListCore({
+    toDigits: phone,
+    body,
+    phoneNumberId,
+    conversationId: conversation.id
+  });
+  if (!r.ok) return { sent: false, reason: "send_failed" };
+
+  const msgCreates = [];
+  if (billRecorded) {
+    msgCreates.push(
+      prisma.message.create({
+        data: {
+          hotelId: booking.hotelId,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: billRecorded.slice(0, 4000),
+          aiIntent: "CHECK_IN_BILL_SUMMARY",
+          aiConfidence: 0.99
         }
-      ],
-      phoneNumberId,
-      conversationId: conversation.id
-    });
-  } catch {
-    const fallback = `${body}
-
-Reply: isv_view_stay | isv_book_meal | isv_order_meal | isv_coffee | isv_bike | isv_hk | isv_reception`;
-    const r = await trySendWhatsAppText({
-      to: phone,
-      body: fallback,
-      phoneNumberId,
-      conversationId: conversation.id
-    });
-    if (!r.ok) return { sent: false, reason: r.errorMessage.slice(0, 200) };
-    recordedBody = fallback;
+      })
+    );
   }
-
-  await prisma.$transaction([
+  msgCreates.push(
     prisma.message.create({
       data: {
         hotelId: booking.hotelId,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: recordedBody.slice(0, 4000),
+        body: r.recordedBody.slice(0, 4000),
         aiIntent: "IN_STAY_WELCOME_MENU",
         aiConfidence: 0.98
       }
-    }),
+    })
+  );
+
+  await prisma.$transaction([
+    ...msgCreates,
     prisma.booking.update({
       where: { id: booking.id },
-      data: { guestJourneyInStayWelcomeSentAt: new Date() }
+      data: {
+        guestJourneyInStayWelcomeSentAt: new Date(),
+        conversationId: booking.conversationId ?? conversation.id
+      }
     }),
     prisma.conversation.update({
       where: { id: conversation.id },
