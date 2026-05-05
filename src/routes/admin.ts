@@ -5480,10 +5480,17 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
   }
 
   const config = loadPartnerSetupConfig(hotel.id);
-  const whatsappConfigured = Boolean(config.whatsappPhoneNumberId?.trim());
+  const partnerWhatsAppPhoneNumberId = config.whatsappPhoneNumberId?.trim() ?? "";
+  const envWhatsAppPhoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "";
+  const effectiveWhatsAppPhoneNumberId = partnerWhatsAppPhoneNumberId || envWhatsAppPhoneNumberId;
+  const whatsappConfigured = Boolean(effectiveWhatsAppPhoneNumberId);
   const whatsappStatus = whatsappConfigured ? "Connected" : "Not connected";
   const whatsappStatusClass = whatsappConfigured ? "ok" : "pending";
-  const whatsappDisplay = hotel.whatsappPhone || config.whatsappPhoneNumberId || "—";
+  const whatsappDisplay = hotel.whatsappPhone || effectiveWhatsAppPhoneNumberId || "—";
+  const whatsappRoutingNote =
+    whatsappConfigured && !partnerWhatsAppPhoneNumberId && envWhatsAppPhoneNumberId
+      ? '<p class="muted" style="font-size:12px;margin:0 0 8px">Phone Number ID is loaded from the server environment (<code>WHATSAPP_PHONE_NUMBER_ID</code>), same as outbound messages. Add it under Partner Setup to pin it to this property in config.</p>'
+      : "";
 
   const sub = hotel.subscriptions[0];
   const subscriptionStart = sub?.currentPeriodStart ?? sub?.startedAt ?? sub?.createdAt;
@@ -5830,6 +5837,7 @@ ${profilePropertyOnboarded}
 <div class="grid-2">
   <section>
     <h3>WhatsApp number status</h3>
+    ${whatsappRoutingNote}
     <table>
       <tbody>
         <tr><th>Status</th><td><span class="badge ${whatsappStatusClass}">${escapeHtml(whatsappStatus)}</span></td></tr>

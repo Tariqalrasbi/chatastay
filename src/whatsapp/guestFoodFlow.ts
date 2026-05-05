@@ -1,10 +1,10 @@
 import { FbServiceMode } from "@prisma/client";
 import { prisma } from "../db";
-import { hotelTimezoneOrUtc } from "../core/guestMessagingSchedule";
+import { hotelTimezoneOrUtc, readWallClockInZone } from "../core/guestMessagingSchedule";
 import { isBookingCalendarActiveOnDate, isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
 import type { FbCartDraftState, FbCartLine, FbCartPurpose } from "./foodTypes";
 import { buildResolvedMenuItemMap, findCategoryById, getAbrCategories, menuItemKey } from "./menuCatalog";
-import { validateMealServiceTime } from "./restaurantHours";
+import { isWithinRestaurantWindows, validateMealServiceTime } from "./restaurantHours";
 
 export type { FbCartDraftState, FbCartLine } from "./foodTypes";
 
@@ -189,6 +189,12 @@ function parseService(text: string): FbServiceMode | null {
 function parseTimeNote(text: string): string | null {
   const t = text.trim().toLowerCase();
   if (t.includes("fb_time_asap") || t === "asap" || t === "now") return "ASAP";
+  const listHm = text.match(/fb_tm_(\d{2})(\d{2})/i);
+  if (listHm) {
+    const h = parseInt(listHm[1], 10);
+    const m = parseInt(listHm[2], 10);
+    if (h >= 0 && h <= 23 && m >= 0 && m <= 59) return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
   const hm = t.match(/^(\d{1,2}):(\d{2})$/);
   if (hm) {
     const h = parseInt(hm[1], 10);
@@ -197,6 +203,88 @@ function parseTimeNote(text: string): string | null {
   }
   if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}$/.test(t)) return t;
   return null;
+}
+
+function formatHmFromMinutes(minutesFromMidnight: number): string {
+  const h = Math.floor(minutesFromMidnight / 60);
+  const mm = minutesFromMidnight % 60;
+  return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+/** WhatsApp list: tap quantity beside the dish (×1…×10); 11+ still via typed number. */
+function buildQuantityPickerList(params: { itemName: string; currency: string; unitPrice: number }): FoodFlowOutbound {
+  const rows: Array<{ id: string; title: string; description?: string }> = [];
+  for (let n = 1; n <= 10; n++) {
+    const lineTotal = (params.unitPrice * n).toFixed(2);
+    rows.push({
+      id: `fb_qty_${n}`,
+      title: `×${n}`.slice(0, 24),
+      description: `${params.itemName} · ${lineTotal} ${params.currency}`.slice(0, 72)
+    });
+  }
+  return {
+    kind: "list",
+    body: `How many *${params.itemName}*? Tap a quantity in the list (same step as the dish). For *11 or more*, reply with a number only.`,
+    buttonText: "Quantity",
+    sections: [{ title: "Portions", rows }]
+  };
+}
+
+/** Scrollable time slots (15 min) + ASAP; optional last row to type HH:MM. */
+function buildTimePickerList(params: { hotelTimezone: string; now: Date; serviceMode: FbServiceMode }): FoodFlowOutbound {
+  const tz = params.hotelTimezone;
+  const { minOfDay } = readWallClockInZone(params.now, tz);
+  let cur = Math.ceil(minOfDay / 15) * 15;
+  if (cur <= minOfDay) cur += 15;
+
+  const rows: Array<{ id: string; title: string; description?: string }> = [
+    { id: "fb_time_asap", title: "ASAP / Now", description: "As soon as possible" }
+  ];
+
+  const maxSlots = 8;
+  let added = 0;
+  while (added < maxSlots && cur < 24 * 60) {
+    if (params.serviceMode === "ROOM_SERVICE" || isWithinRestaurantWindows(cur)) {
+      const hm = formatHmFromMinutes(cur);
+      rows.push({
+        id: `fb_tm_${hm.replace(":", "")}`,
+        title: hm,
+        description: params.serviceMode === "DINING_IN" ? "Restaurant (hotel time)" : "Hotel local time"
+      });
+      added += 1;
+    }
+    cur += 15;
+  }
+
+  if (rows.length < 10) {
+    rows.push({
+      id: "fb_time_custom",
+      title: "Other time…",
+      description: "Reply next message as HH:MM"
+    });
+  }
+
+  const body =
+    params.serviceMode === "DINING_IN"
+      ? "When should we serve? *Restaurant dining*: lunch *12:00–15:00*, dinner *18:30–22:00* (hotel time). Scroll the list and tap a time."
+      : "When should we prepare or deliver? Scroll the list and tap a time (hotel local).";
+
+  return {
+    kind: "list",
+    body,
+    buttonText: "Pick time",
+    sections: [{ title: "Time", rows: rows.slice(0, 10) }]
+  };
+}
+
+function parseQtyReply(raw: string): number | null {
+  const t = raw.trim();
+  const m = t.match(/fb_qty_(\d{1,2})/i);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 10) return n;
+  }
+  return parseQty(t);
 }
 
 function cartSummaryLines(cart: FbCartLine[], currency: string): string {
@@ -313,14 +401,11 @@ export async function advanceFbCartDraft(params: {
       return {
         draft,
         outbound: [
-          {
-            kind: "buttons",
-            body: "When would you like this prepared/served?",
-            buttons: [
-              { id: "fb_time_asap", title: "ASAP / Now" },
-              { id: "fb_time_type", title: "Type HH:MM" }
-            ]
-          }
+          buildTimePickerList({
+            hotelTimezone: hotelTz,
+            now: nowClock,
+            serviceMode: draft.serviceMode ?? "ROOM_SERVICE"
+          })
         ]
       };
     }
@@ -380,7 +465,16 @@ export async function advanceFbCartDraft(params: {
           pendingName: last.name,
           pendingUnitPrice: last.unitPrice
         };
-        return { draft, outbound: [{ kind: "text", body: `How many *${last.name}*? Reply with a number (1–99).` }] };
+        return {
+          draft,
+          outbound: [
+            buildQuantityPickerList({
+              itemName: last.name,
+              currency,
+              unitPrice: last.unitPrice
+            })
+          ]
+        };
       }
       draft = { ...draft, step: "category" };
       return { draft, outbound: [buildCategoryList(draft.purpose)] };
@@ -416,13 +510,38 @@ export async function advanceFbCartDraft(params: {
       pendingName: row.name,
       pendingUnitPrice: row.unitPrice
     };
-    return { draft, outbound: [{ kind: "text", body: `How many *${row.name}*? Reply with a number (1–99).` }] };
+    return {
+      draft,
+      outbound: [
+        buildQuantityPickerList({
+          itemName: row.name,
+          currency,
+          unitPrice: row.unitPrice
+        })
+      ]
+    };
   }
 
   if (draft.step === "qty") {
-    const q = parseQty(raw);
+    const q = parseQtyReply(raw);
     if (q === null) {
-      return { draft, outbound: [{ kind: "text", body: "Reply with a whole number from 1 to 99." }] };
+      if (!draft.pendingMenuItemId || draft.pendingUnitPrice === undefined || !draft.pendingName) {
+        return { draft: null, outbound: [{ kind: "text", body: "Session expired." }] };
+      }
+      return {
+        draft,
+        outbound: [
+          {
+            kind: "text",
+            body: "Tap a quantity in the list above (×1–×10), or reply with a whole number from *11* to *99*."
+          },
+          buildQuantityPickerList({
+            itemName: draft.pendingName,
+            currency,
+            unitPrice: draft.pendingUnitPrice
+          })
+        ]
+      };
     }
     if (!draft.pendingMenuItemId || draft.pendingUnitPrice === undefined || !draft.pendingName) {
       return { draft: null, outbound: [{ kind: "text", body: "Session expired." }] };
@@ -518,20 +637,17 @@ export async function advanceFbCartDraft(params: {
     return {
       draft,
       outbound: [
-        {
-          kind: "buttons",
-          body: "When would you like this prepared/served?",
-          buttons: [
-            { id: "fb_time_asap", title: "ASAP / Now" },
-            { id: "fb_time_type", title: "Type HH:MM" }
-          ]
-        }
+        buildTimePickerList({
+          hotelTimezone: hotelTz,
+          now: nowClock,
+          serviceMode: svc
+        })
       ]
     };
   }
 
   if (draft.step === "time") {
-    if (raw.includes("fb_time_type")) {
+    if (raw.includes("fb_time_custom")) {
       const diningHint =
         draft.serviceMode === "DINING_IN"
           ? " Restaurant dining: *12:00–15:00* or *18:30–22:00* (hotel local time)."
@@ -555,13 +671,14 @@ export async function advanceFbCartDraft(params: {
         draft,
         outbound: [
           {
-            kind: "buttons",
-            body: "Tap *ASAP* or type a time.",
-            buttons: [
-              { id: "fb_time_asap", title: "ASAP / Now" },
-              { id: "fb_time_type", title: "Type HH:MM" }
-            ]
-          }
+            kind: "text",
+            body: "Scroll the list below and tap a time, or tap *Other time…* to type *HH:MM*."
+          },
+          buildTimePickerList({
+            hotelTimezone: hotelTz,
+            now: nowClock,
+            serviceMode: draft.serviceMode ?? "ROOM_SERVICE"
+          })
         ]
       };
     }
@@ -573,7 +690,17 @@ export async function advanceFbCartDraft(params: {
       hotelTimezone: hotelTz
     });
     if (!validated.ok) {
-      return { draft, outbound: [{ kind: "text", body: validated.message }] };
+      return {
+        draft,
+        outbound: [
+          { kind: "text", body: validated.message },
+          buildTimePickerList({
+            hotelTimezone: hotelTz,
+            now: nowClock,
+            serviceMode: sm
+          })
+        ]
+      };
     }
 
     draft = { ...draft, step: "confirm", timeNote: note };

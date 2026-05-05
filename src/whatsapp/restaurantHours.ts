@@ -20,7 +20,8 @@ function minutesNowInTimeZone(now: Date, timeZone: string): number {
   return hour * 60 + minute;
 }
 
-function isWithinRestaurantWindows(minutesFromMidnight: number): boolean {
+/** Hotel-local minutes-from-midnight — true if within published dining-in windows. */
+export function isWithinRestaurantWindows(minutesFromMidnight: number): boolean {
   const lunch = minutesFromMidnight >= LUNCH_START_MIN && minutesFromMidnight < LUNCH_END_MIN;
   const dinner = minutesFromMidnight >= DINNER_START_MIN && minutesFromMidnight < DINNER_END_MIN;
   return lunch || dinner;
