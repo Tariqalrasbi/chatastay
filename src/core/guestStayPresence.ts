@@ -21,6 +21,25 @@ export function isGuestEffectivelyCheckedIn(booking: {
   return false;
 }
 
+/**
+ * In-stay WhatsApp (services menu, extras, etc.): same as {@link isGuestEffectivelyCheckedIn}, plus a
+ * practical fallback when staff have **not** set the room board to OCCUPIED and have **not** flipped
+ * the booking to CHECKED_IN — if the guest has a **CONFIRMED** stay with a **room unit assigned** and
+ * the caller already scoped to active stay dates, treat them as in-house.
+ *
+ * Automated journey logic (e.g. check-in day nudges) still uses {@link isGuestEffectivelyCheckedIn} only.
+ */
+export function isGuestInHouseForWhatsAppServices(booking: {
+  status?: string;
+  guestJourneyInStayWelcomeSentAt: Date | null;
+  roomUnit: { notes: string | null } | null;
+  roomUnitId?: string | null;
+}): boolean {
+  if (isGuestEffectivelyCheckedIn(booking)) return true;
+  if (booking.status === "CONFIRMED" && booking.roomUnitId) return true;
+  return false;
+}
+
 /** Calendar overlap in hotel zone: arrival date through checkout date (inclusive). */
 export function isBookingCalendarActiveOnDate(
   checkIn: Date,

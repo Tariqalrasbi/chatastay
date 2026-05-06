@@ -1,4 +1,5 @@
 import {
+  BookingStatus,
   ChannelProvider,
   ConversationState as DbConversationState,
   FbServiceMode,
@@ -2669,7 +2670,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     where: {
       hotelId: hotel.id,
       guestId: guest.id,
-      status: "CONFIRMED",
+      status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
       guestJourneyReviewRequestSentAt: { not: null },
       checkOut: { lte: new Date() },
       feedbacks: { none: {} }

@@ -1,7 +1,7 @@
 import { FbServiceMode } from "@prisma/client";
 import { prisma } from "../db";
 import { hotelTimezoneOrUtc, readWallClockInZone } from "../core/guestMessagingSchedule";
-import { isBookingCalendarActiveOnDate, isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
+import { isBookingCalendarActiveOnDate, isGuestInHouseForWhatsAppServices } from "../core/guestStayPresence";
 import type { FbCartDraftState, FbCartLine, FbCartPurpose } from "./foodTypes";
 import { buildResolvedMenuItemMap, findCategoryById, getAbrCategories, menuItemKey } from "./menuCatalog";
 import { isWithinRestaurantWindows, validateMealServiceTime } from "./restaurantHours";
@@ -50,7 +50,7 @@ export async function findGuestActiveStayBooking(hotelId: string, guestId: strin
   return null;
 }
 
-/** In-house guest: active stay + (welcome sent or room board OCCUPIED). */
+/** In-house guest: active stay + CHECKED_IN / welcome / OCCUPIED board — or CONFIRMED with room assigned (no board flip required). */
 export async function findGuestInHouseForServices(hotelId: string, guestId: string, hotelTimezone?: string | null) {
   const tz = hotelTimezoneOrUtc(hotelTimezone);
   const asOf = new Date();
@@ -62,7 +62,16 @@ export async function findGuestInHouseForServices(hotelId: string, guestId: stri
   });
   for (const b of rows) {
     if (!isBookingCalendarActiveOnDate(b.checkIn, b.checkOut, tz, asOf)) continue;
-    if (!isGuestEffectivelyCheckedIn({ ...b, status: b.status })) continue;
+    if (
+      !isGuestInHouseForWhatsAppServices({
+        status: b.status,
+        guestJourneyInStayWelcomeSentAt: b.guestJourneyInStayWelcomeSentAt,
+        roomUnit: b.roomUnit,
+        roomUnitId: b.roomUnitId
+      })
+    ) {
+      continue;
+    }
     return b;
   }
   return null;

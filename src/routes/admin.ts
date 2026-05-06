@@ -7846,7 +7846,7 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
         where: {
           hotelId: hotel.id,
           roomUnitId: unit.id,
-          status: BookingStatus.CONFIRMED,
+          status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
           checkIn: { lte: departureDate },
           checkOut: { gt: departureDate }
         },

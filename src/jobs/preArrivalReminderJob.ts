@@ -431,6 +431,9 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       property: { select: { checkInTime: true, checkOutTime: true } }
     };
 
+    /** Post-stay journey applies to guests who were checked in on the PMS (`CHECKED_IN`) or never flipped from `CONFIRMED`. */
+    const postStayBookingStatuses: BookingStatus[] = [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN];
+
     // --- PRE_ARRIVAL_24H ---
     const for24h = await prisma.booking.findMany({
       where: {
@@ -536,7 +539,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     const forPostCheckout = await prisma.booking.findMany({
       where: {
         hotelId: hotel.id,
-        status: BookingStatus.CONFIRMED,
+        status: { in: postStayBookingStatuses },
         guestJourneyPostCheckoutThankYouSentAt: null,
         checkOut: { lte: now }
       },
@@ -609,7 +612,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     const forReview = await prisma.booking.findMany({
       where: {
         hotelId: hotel.id,
-        status: BookingStatus.CONFIRMED,
+        status: { in: postStayBookingStatuses },
         guestJourneyReviewRequestSentAt: null,
         guestJourneyPostCheckoutThankYouSentAt: { not: null }
       },
@@ -687,7 +690,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     const forReviewReminder = await prisma.booking.findMany({
       where: {
         hotelId: hotel.id,
-        status: BookingStatus.CONFIRMED,
+        status: { in: postStayBookingStatuses },
         guestJourneyReviewRequestSentAt: { not: null },
         guestJourneyReviewReminderSentAt: null,
         guestJourneyPostCheckoutThankYouSentAt: { not: null },
@@ -760,7 +763,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     const forRepeatPromo = await prisma.booking.findMany({
       where: {
         hotelId: hotel.id,
-        status: BookingStatus.CONFIRMED,
+        status: { in: postStayBookingStatuses },
         guestJourneyRepeatPromoSentAt: null,
         guestJourneyPostCheckoutThankYouSentAt: { not: null }
       },
