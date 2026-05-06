@@ -841,16 +841,20 @@
         };
         var currentPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
         var groupByPath = function (path) {
-          if (path.startsWith("/admin/workspaces")) return "modules";
+          if (path.startsWith("/admin/workspaces")) return "dashboard";
           if (path.startsWith("/admin/module/")) return "dashboard";
-          if (path === "/admin/profile") return "dashboard";
+          if (path === "/admin/profile") return "account";
+          if (path.startsWith("/admin/leads") || path.startsWith("/admin/onboard")) return "dashboard";
           if (
             path.startsWith("/admin/users") ||
             path.startsWith("/admin/audit-trail") ||
             path.startsWith("/admin/subscription") ||
             path.startsWith("/admin/billing") ||
             path.startsWith("/admin/integrations") ||
-            path.startsWith("/admin/leads") ||
+            path.startsWith("/admin/handover-sheet") ||
+            path.startsWith("/admin/shifts") ||
+            path.startsWith("/admin/shift-close") ||
+            path.startsWith("/admin/shift-report") ||
             path.startsWith("/admin/setup")
           )
             return "account";
@@ -884,15 +888,7 @@
             path.startsWith("/admin/offers")
           )
             return "inventory";
-          if (
-            path.startsWith("/admin/room-board") ||
-            path.startsWith("/admin/handover-sheet") ||
-            path.startsWith("/admin/front-desk") ||
-            path.startsWith("/admin/shifts") ||
-            path.startsWith("/admin/shift-close") ||
-            path.startsWith("/admin/shift-report")
-          )
-            return "frontdesk";
+          if (path.startsWith("/admin/room-board") || path.startsWith("/admin/front-desk")) return "frontdesk";
           if (path.startsWith("/admin/housekeeping") || path.startsWith("/admin/hk")) return "housekeeping";
           return "dashboard";
         };
@@ -906,7 +902,7 @@
           comms: "WhatsApp Center",
           fb: "Restaurant / Café",
           insights: "Reports",
-          account: "Property Setup",
+          account: "Settings",
           modules: "Workspaces",
         };
         var escapeText = function (value) {

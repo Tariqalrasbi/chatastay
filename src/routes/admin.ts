@@ -103,6 +103,16 @@ import {
 import { computeRoomUnitFolioSummary, mapChargeCategoryToFolio, parsePostingTarget, round2 } from "../core/roomUnitFolio";
 import { DEFAULT_FB_MENU_2026, appendMissingFbMenuItems } from "../core/defaultFbMenuSeed";
 import { manualCheckInFitsRoomType } from "../core/roomOccupancy";
+import {
+  renderCommandCenterDashboard,
+  type CommandCenterArrivalRow,
+  type CommandCenterDashboardVm,
+  type CommandCenterDepartureRow,
+  type CommandCenterInHouseRow,
+  type CommandCenterOutletRow,
+  type CommandCenterServiceRow,
+  type CommandCenterWhatsAppRow
+} from "../core/commandCenterDashboardHtml";
 import { allocateBookingReferenceCode, displayBookingReference } from "../core/bookingReference";
 import {
   formatGuestVipAndTagsHtml,
@@ -1232,6 +1242,9 @@ function renderLayout(
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
   const canNavBookings = !perm || hasPermission(perm, "BOOKINGS", "VIEW");
   const canNavRooms = !perm || hasPermission(perm, "ROOMS", "VIEW");
+  const canNavReports = !perm || hasPermission(perm, "REPORTS", "VIEW");
+  const canCreateBookings = Boolean(perm && hasPermission(perm, "BOOKINGS", "CREATE"));
+  const showPlatformInsightsLinks = Boolean(sess && isPlatformAcquisitionSession(sess));
   type AdminNavGroup =
     | "dashboard"
     | "reservations"
@@ -1266,57 +1279,62 @@ function renderLayout(
         ].join("")
       )
       .join("");
-  const moduleSwitcher: AdminNavItem | false =
-    workspaces.length > 1 ? { group: "modules", href: "/admin/workspaces", label: "Workspaces" } : false;
+  const primaryTodayHref =
+    sess && permLike && typeof activeWs !== "undefined"
+      ? workspaceHomeUrl(activeWs, String(role ?? ""))
+      : "/admin/profile";
   const navHtml = authenticated
-    ? useOwnerChrome
+    ? role === "HOUSEKEEPING"
       ? renderNavLinks([
-          { group: "dashboard", href: "/admin/module/owner", label: "Today" },
-          perm && hasPermission(perm, "BOOKINGS", "VIEW")
-            ? { group: "reservations", href: "/admin/bookings", label: "Reservations" }
-            : false,
-          perm && hasPermission(perm, "ROOMS", "VIEW")
-            ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" }
-            : false,
-          { group: "insights", href: "/admin/management-kpi", label: "Reports" },
-          { group: "account", href: "/admin/setup", label: "Property Setup" },
-          moduleSwitcher
+          { group: "dashboard", href: primaryTodayHref, label: "Today" },
+          { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" }
         ])
-      : useRestaurantChrome
+      : useOwnerChrome
         ? renderNavLinks([
-            { group: "dashboard", href: "/admin/module/restaurant", label: "Today" },
-            canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant / Café" } : false,
-            moduleSwitcher
+            { group: "dashboard", href: "/admin/module/owner", label: "Today" },
+            canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
+            canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
+            canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+            canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
+            canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
+            canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
+            canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
+            { group: "account", href: "/admin/setup", label: "Settings" }
           ])
-        : useHousekeepingManagerChrome
+        : useRestaurantChrome
           ? renderNavLinks([
-              { group: "dashboard", href: "/admin/module/housekeeping", label: "Today" },
-              { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" },
-              moduleSwitcher
+              { group: "dashboard", href: "/admin/module/restaurant", label: "Today" },
+              canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false
             ])
-          : useFrontDeskChrome
+          : useHousekeepingManagerChrome
             ? renderNavLinks([
-                { group: "dashboard", href: "/admin/module/front-desk", label: "Today" },
-                canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
-                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
-                canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
-                canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
-                canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
-                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant / Café" } : false,
-                moduleSwitcher
+                { group: "dashboard", href: "/admin/module/housekeeping", label: "Today" },
+                { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" },
+                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Room grid" } : false
               ])
-            : renderNavLinks([
-                { group: "dashboard", href: "/admin/profile", label: "Today" },
-                canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
-                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
-                canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
-                canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
-                canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
-                canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant / Café" } : false,
-                { group: "insights", href: "/admin/reports-center", label: "Reports" },
-                { group: "account", href: "/admin/setup", label: "Property Setup" },
-                moduleSwitcher
-              ])
+            : useFrontDeskChrome
+              ? renderNavLinks([
+                  { group: "dashboard", href: primaryTodayHref, label: "Today" },
+                  canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
+                  canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
+                  canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+                  canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
+                  canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
+                  canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
+                  canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
+                  { group: "account", href: "/admin/setup", label: "Settings" }
+                ])
+              : renderNavLinks([
+                  { group: "dashboard", href: primaryTodayHref, label: "Today" },
+                  canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
+                  canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
+                  canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+                  canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
+                  canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
+                  canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
+                  canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
+                  { group: "account", href: "/admin/setup", label: "Settings" }
+                ])
     : '<a href="/admin/login">Login</a>';
   const moduleSwitchHtml =
     authenticated && workspaces.length > 1
@@ -1336,45 +1354,51 @@ function renderLayout(
   const todayTabs: AdminSection = {
     group: "dashboard",
     links: [
-      { href: workspaceHomeUrl(activeWs ?? "front_desk", String(role ?? "")), label: "Today" },
-      { href: "/admin/profile", label: "Property profile" }
+      { href: primaryTodayHref, label: "Command center" },
+      ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room rack" }] : []),
+      ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Arrivals / check-in" }] : []),
+      ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Departures / check-out" }] : []),
+      ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "In-house &amp; folio lookup" }] : []),
+      { href: "/admin/daily-digest", label: "Alerts &amp; briefing" }
     ]
   };
   const reservationTabs: AdminSection = {
     group: "reservations",
     links: [
-      { href: "/admin/bookings", label: "All reservations" },
-      { href: "/admin/calendar", label: "Calendar" },
-      { href: "/admin/bookings?status=PENDING", label: "Pending" },
-      { href: "/admin/bookings?status=CONFIRMED", label: "Confirmed" },
-      { href: "/admin/bookings?status=CANCELLED", label: "Cancellations" }
+      ...(canNavBookings
+        ? [
+            { href: "/admin/bookings", label: "All reservations" },
+            { href: "/admin/calendar", label: "Calendar" },
+            ...(canCreateBookings
+              ? [{ href: "/admin/front-desk/check-in", label: "New reservation / walk-in" }]
+              : [])
+          ]
+        : [])
     ]
   };
   const frontDeskTabs: AdminSection = {
     group: "frontdesk",
     links: [
-      { href: "/admin/room-board", label: "Room rack" },
-      { href: "/admin/front-desk/check-in", label: "Check-in" },
-      { href: "/admin/front-desk/check-out", label: "Check-out" },
-      { href: "/admin/handover-sheet", label: "Handover" },
-      { href: "/admin/shifts", label: "Shifts" },
-      { href: "/admin/shift-close", label: "Shift close" }
+      ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room grid" }] : []),
+      ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Check-in" }] : []),
+      ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Check-out" }] : []),
+      ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "Guest bills &amp; folios" }] : [])
     ]
   };
   const inventoryTabs: AdminSection = {
     group: "inventory",
     links: [
-      { href: "/admin/rooms", label: "Room types &amp; rates" },
-      { href: "/admin/inventory", label: "Availability" },
-      { href: "/admin/offers", label: "Offers &amp; promotions" }
+      { href: "/admin/rooms", label: "Room types &amp; units" },
+      { href: "/admin/offers", label: "Pricing &amp; offers" },
+      { href: "/admin/inventory", label: "Availability" }
     ]
   };
   const housekeepingTabs: AdminSection = {
     group: "housekeeping",
     links: [
-      { href: "/admin/housekeeping", label: "Housekeeping board" },
-      { href: "/admin/hk", label: "My tasks" },
       { href: "/admin/hk/room-board", label: "Room status" },
+      { href: "/admin/housekeeping", label: "Cleaning tasks" },
+      { href: "/admin/hk", label: "My tasks" },
       '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>'
     ]
   };
@@ -1386,42 +1410,59 @@ function renderLayout(
         label: 'Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span>',
         attrs: "data-admin-conv-link"
       },
-      { href: "/admin/conversations/group-messages", label: "Group messages" },
-      '<span class="nav-tab-placeholder" title="Uses existing conversation error logs" aria-disabled="true">Failed messages</span>',
-      '<span class="nav-tab-placeholder" title="Configured from property setup and WhatsApp flow settings" aria-disabled="true">Bot flow</span>'
+      { href: "/admin/setup", label: "Chatbot &amp; auto-replies" },
+      { href: "/admin/conversations/group-messages", label: "Guest messages (broadcast)" }
     ]
   };
   const foodBeverageTabs: AdminSection = {
     group: "fb",
     links: [
       { href: "/admin/module/restaurant", label: "Service today" },
-      { href: "/admin/fb/menu", label: "Menu items" },
+      { href: "/admin/fb/menu", label: "Menu" },
       ...(canNavOutlet
         ? [
             { href: "/admin/outlet-dashboard", label: "Orders / KOT" },
+            { href: "/admin/fb/menu#fb-inhouse", label: "Room service (folio)" },
             { href: "/admin/outlet-orders", label: "Order history" },
             { href: "/admin/restaurant-ops", label: "Operations guide" }
           ]
-        : [])
+        : canNavFb
+          ? [{ href: "/admin/fb/menu#fb-inhouse", label: "Room service (folio)" }]
+          : [])
     ]
   };
   const reportTabs: AdminSection = {
     group: "insights",
     links: [
-      { href: "/admin/reports-center", label: "Reports" },
-      { href: "/admin/management-kpi", label: "KPI dashboard" },
+      { href: "/admin/reports-center", label: "Reports center" },
+      { href: "/admin/management-kpi", label: "Revenue &amp; occupancy (KPI)" },
       { href: "/admin/daily-digest", label: "Daily digest" },
-      { href: "/admin/ai-analytics", label: "AI analytics" },
-      { href: "/admin/booking-funnel", label: "Booking funnel" },
-      { href: "/admin/routing-health", label: "Routing health" }
+      ...(showPlatformInsightsLinks
+        ? [
+            { href: "/admin/ai-analytics", label: "AI analytics" },
+            { href: "/admin/booking-funnel", label: "Booking funnel" },
+            { href: "/admin/routing-health", label: "Routing health" }
+          ]
+        : [])
     ]
   };
   const adminTabs: AdminSection = {
     group: "account",
     links: [
-      { href: "/admin/setup", label: "Property profile" },
-      ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Staff users &amp; roles" }] : []),
+      { href: "/admin/profile", label: "Hotel profile &amp; status" },
+      { href: "/admin/setup", label: "Property setup" },
+      ...(sess && isPlatformAcquisitionSession(sess)
+        ? [{ href: "/admin/leads", label: "Lead pipeline (platform)" }]
+        : []),
+      ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Staff &amp; permissions" }] : []),
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/audit-trail", label: "Audit trail" }] : []),
+      ...(perm && hasPermission(perm, "ROOMS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover sheet" }] : []),
+      ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
+        ? [
+            { href: "/admin/shifts", label: "Shifts (history)" },
+            { href: "/admin/shift-close", label: "Shift close (cashier)" }
+          ]
+        : []),
       ...(perm && hasPermission(perm, "BILLING", "VIEW")
         ? [
             { href: "/admin/billing", label: "Billing" },
@@ -1431,10 +1472,11 @@ function renderLayout(
       { href: "/admin/integrations", label: "Integrations" }
     ]
   };
+  const showFrontDeskSection = canNavRooms || canCreateBookings || canNavBookings;
   const fdTabs = renderSections([
     todayTabs,
     canNavBookings ? reservationTabs : false,
-    canNavRooms ? frontDeskTabs : false,
+    showFrontDeskSection ? frontDeskTabs : false,
     canNavRooms ? inventoryTabs : false,
     canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
@@ -1443,7 +1485,12 @@ function renderLayout(
   const ownerTabs = renderSections([
     todayTabs,
     perm && hasPermission(perm, "BOOKINGS", "VIEW") ? reservationTabs : false,
-    perm && hasPermission(perm, "ROOMS", "VIEW") ? frontDeskTabs : false,
+    perm &&
+    (hasPermission(perm, "ROOMS", "VIEW") ||
+      hasPermission(perm, "BOOKINGS", "CREATE") ||
+      hasPermission(perm, "BOOKINGS", "VIEW"))
+      ? frontDeskTabs
+      : false,
     perm && hasPermission(perm, "ROOMS", "VIEW") ? inventoryTabs : false,
     reportTabs,
     adminTabs
@@ -1463,7 +1510,7 @@ function renderLayout(
   const fullTabs = renderSections([
     todayTabs,
     canNavBookings ? reservationTabs : false,
-    canNavRooms ? frontDeskTabs : false,
+    showFrontDeskSection ? frontDeskTabs : false,
     canNavRooms ? inventoryTabs : false,
     canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
@@ -1622,6 +1669,49 @@ const pmsWorkspacePageStyles = `<style>
 .pms-picker button:hover { border-color:#0f766e; transform:translateY(-1px); }
 .pms-picker .t { font-weight:800; color:#0f172a; display:block; margin-bottom:4px; font-size:15px; }
 .pms-picker .d { font-size:13px; color:#5f6b7a; line-height:1.4; }
+</style>`;
+
+const commandCenterExtraStyles = `<style>
+.cc-shell { max-width:1320px; margin:0 auto; }
+.cc-meta { margin-top:-8px; margin-bottom:16px; font-size:13px; color:#475569; display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; }
+.cc-meta code { background:#f1f5f9; padding:2px 8px; border-radius:6px; font-size:12px; color:#0f172a; }
+.cc-alert-strip { margin-bottom:16px; padding:12px 14px; border-radius:12px; border:1px solid #fecaca; background:#fef2f2; color:#991b1b; font-size:13px; }
+.cc-alert-strip ul { margin:8px 0 0 18px; padding:0; }
+.cc-alert-strip li { margin:4px 0; }
+.cc-alert-strip a { color:#b45309; font-weight:700; }
+.cc-grid-main { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); gap:14px; align-items:start; }
+.cc-grid-wide { display:grid; grid-template-columns:1fr; gap:14px; margin-top:14px; }
+@media (min-width:900px) {
+  .cc-grid-main.duplicate-cols { grid-template-columns:repeat(2, minmax(0,1fr)); }
+}
+.cc-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:14px 16px 16px; box-shadow:0 10px 28px rgba(15,23,42,.05); min-width:0; }
+.cc-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+.cc-card-head h2 { margin:0; font-size:16px; font-weight:800; color:#0f172a; letter-spacing:-0.02em; }
+.cc-card-head .cc-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.cc-card-head .cc-actions a { font-size:13px; font-weight:700; color:#0f766e; text-decoration:none; }
+.cc-card-head .cc-actions a:hover { text-decoration:underline; }
+.cc-kpis { display:grid; grid-template-columns:repeat(auto-fill,minmax(108px,1fr)); gap:8px; margin-bottom:12px; }
+.cc-kpi { border:1px solid #e2e8f0; border-radius:10px; padding:8px 10px; background:#f8fafc; text-align:center; }
+.cc-kpi strong { display:block; font-size:1.25rem; font-weight:800; color:#0f172a; line-height:1.2; }
+.cc-kpi span { font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; }
+.cc-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid #e2e8f0; border-radius:10px; }
+.cc-table { width:100%; border-collapse:collapse; font-size:13px; }
+.cc-table th, .cc-table td { padding:8px 10px; text-align:left; border-bottom:1px solid #f1f5f9; vertical-align:top; }
+.cc-table th { background:#f8fafc; color:#475569; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; font-weight:700; }
+.cc-table tr:last-child td { border-bottom:0; }
+.cc-table .cc-guest { font-weight:700; color:#0f172a; }
+.cc-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; }
+.cc-badge-warn { background:#fef3c7; color:#92400e; }
+.cc-badge-ok { background:#dcfce7; color:#166534; }
+.cc-badge-info { background:#e0f2fe; color:#075985; }
+.cc-badge-muted { background:#f1f5f9; color:#64748b; }
+.cc-empty { margin:0; padding:12px 4px; color:#64748b; font-size:13px; line-height:1.5; }
+.cc-stack { display:flex; flex-direction:column; gap:8px; }
+.cc-rowline { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:13px; border-bottom:1px dashed #e2e8f0; padding-bottom:8px; }
+.cc-rowline:last-child { border-bottom:0; padding-bottom:0; }
+@media (max-width:520px) {
+  .cc-table th:nth-child(4), .cc-table td:nth-child(4) { display:none; }
+}
 </style>`;
 
 function renderPage(pageFile: string, authenticated: boolean): string {
@@ -3238,34 +3328,35 @@ adminRouter.get("/module/owner", requireAuth, requirePmsModule("owner"), (_req, 
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"), (req, res) => {
-  const session = getSession(req);
-  const canOpenComms = !session?.permissions || hasPermission(session.permissions, "CONVERSATIONS", "VIEW");
-  const canOpenFb = !session?.permissions || hasPermission(session.permissions, "OUTLET", "VIEW") || hasPermission(session.permissions, "BOOKINGS", "VIEW");
-  const canOpenBookings = !session?.permissions || hasPermission(session.permissions, "BOOKINGS", "VIEW");
-  const canOpenRooms = !session?.permissions || hasPermission(session.permissions, "ROOMS", "VIEW");
-  const content = `${pmsWorkspacePageStyles}
-<div class="pms-hero">
-  <h1>Today / Command Center</h1>
-  <p>Daily PMS command screen: arrivals, departures, in-house guests, room readiness, folios, balances, and urgent guest work.</p>
-</div>
-<div class="pms-grid">
-  ${canOpenRooms ? '<div class="pms-card"><h3>Room rack</h3><p>Live room state, assignments, occupancy, and housekeeping linkage.</p><a href="/admin/room-board">Open room rack →</a></div>' : ""}
-  ${canOpenBookings ? '<div class="pms-card"><h3>Reservations</h3><p>Arrivals, pending bookings, confirmations, changes, and guest records.</p><a href="/admin/bookings">Open reservations →</a></div>' : ""}
-  ${canOpenBookings ? '<div class="pms-card"><h3>Check-in</h3><p>Walk-ins and scheduled arrivals with room assignment and folio creation.</p><a href="/admin/front-desk/check-in">Start check-in →</a></div>' : ""}
-  ${canOpenRooms ? '<div class="pms-card"><h3>Check-out</h3><p>Departures, folio settlement, room status change, and housekeeping trigger.</p><a href="/admin/front-desk/check-out">Start check-out →</a></div>' : ""}
-  ${
-    canOpenComms
-      ? '<div class="pms-card"><h3>WhatsApp center</h3><p>Guest conversations, receptionist handoff, and booking follow-up.</p><a href="/admin/conversations">Open WhatsApp center →</a></div>'
-      : ""
+adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"), async (req, res) => {
+  try {
+    const vm = await buildFrontDeskCommandCenterVm(req);
+    const styles = `${pmsWorkspacePageStyles}${commandCenterExtraStyles}`;
+    if (!vm) {
+      res
+        .type("html")
+        .send(
+          renderLayout(
+            `${styles}<div class="cc-shell"><div class="pms-hero"><h1>Command Center</h1><p>Could not load hotel context. Try signing in again.</p></div></div>`,
+            true
+          )
+        );
+      return;
+    }
+    const content = renderCommandCenterDashboard(styles, vm);
+    res.type("html").send(renderLayout(content, true));
+  } catch (e) {
+    console.error("command center", e);
+    const styles = `${pmsWorkspacePageStyles}${commandCenterExtraStyles}`;
+    res
+      .type("html")
+      .send(
+        renderLayout(
+          `${styles}<div class="cc-shell"><div class="pms-hero"><h1>Command Center</h1><p>Something went wrong loading this dashboard. Refresh the page or jump to <a class="inline-link" href="/admin/room-board">room grid</a>.</p></div></div>`,
+          true
+        )
+      );
   }
-  ${
-    canOpenFb
-      ? '<div class="pms-card"><h3>Restaurant / café</h3><p>Orders, direct sales, KOT, and folio posting for in-house guests.</p><a href="/admin/fb/menu">Open restaurant →</a></div>'
-      : ""
-  }
-</div>`;
-  res.type("html").send(renderLayout(content, true));
 });
 
 adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"), (_req, res) => {
@@ -3339,8 +3430,9 @@ adminRouter.get("/login", async (req, res) => {
     req.query.hk_moved === "1"
       ? '<p class="badge ok">Housekeeping now uses this same staff sign-in (not a separate URL). Use the email/username and PIN or password from your administrator. After login, housekeeping accounts go straight to your task board.</p>'
       : "";
-  const onboardLink =
-    '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
+  const onboardLink = loginHotel.id
+    ? ""
+    : '<p class="muted" style="margin-top:12px">New partner? <a class="inline-link" href="/admin/onboard">Start property onboarding</a></p>';
   const content =
     hkMovedNotice +
     resetNotice +
@@ -5949,7 +6041,12 @@ type RoomBoardCardRow = {
   bookingNights: number | null;
 };
 
-type RoomBoardLoadViewOpts = { omitFilters?: boolean; boardPath?: string };
+type RoomBoardLoadViewOpts = {
+  omitFilters?: boolean;
+  boardPath?: string;
+  /** Skip DB writes used to heal inventory/board rows — faster for read-only dashboards (command center). */
+  skipBoardMaintenanceWrites?: boolean;
+};
 
 type RoomBoardLoadViewResult = {
   hotelId: string;
@@ -6023,15 +6120,17 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
     ? `<script>(function(){var u=${JSON.stringify(`/admin/bookings/${encodeURIComponent(printBookingIdRaw)}/invoice-print`)};window.open(u,"_blank","noopener");})();</script>`
     : "";
 
-  await ensureDefaultRoomUnitsForBoard(
-    hotel.id,
-    hotel.roomTypes.map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
-  );
-  await backfillMissingRoomUnitAssignmentsForDate({
-    hotelId: hotel.id,
-    dateStart,
-    dateEndExclusive
-  });
+  if (!opts?.skipBoardMaintenanceWrites) {
+    await ensureDefaultRoomUnitsForBoard(
+      hotel.id,
+      hotel.roomTypes.map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
+    );
+    await backfillMissingRoomUnitAssignmentsForDate({
+      hotelId: hotel.id,
+      dateStart,
+      dateEndExclusive
+    });
+  }
   const roomTypes = await prisma.roomType.findMany({
     where: { hotelId: hotel.id, isActive: true },
     orderBy: { name: "asc" },
@@ -6192,6 +6291,353 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
     invoiceSentFromCheckIn,
     invoiceErrFromCheckIn,
     printInvoiceScript
+  };
+}
+
+async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCenterDashboardVm | null> {
+  const session = getSession(req);
+  if (!session) return null;
+  const perm = session.permissions;
+  const show = {
+    bookings: !perm || hasPermission(perm, "BOOKINGS", "VIEW"),
+    rooms: !perm || hasPermission(perm, "ROOMS", "VIEW"),
+    comms: !perm || hasPermission(perm, "CONVERSATIONS", "VIEW"),
+    fb: !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW"),
+    hk: !perm || hasPermission(perm, "HOUSEKEEPING", "VIEW") || hasPermission(perm, "ROOMS", "EDIT")
+  };
+  const canCreateBooking = !perm || hasPermission(perm, "BOOKINGS", "CREATE");
+
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true, currency: true, timezone: true }
+  });
+  if (!hotel) return null;
+
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const propBooking = isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {};
+  const opDay = startOfDay(new Date());
+  const opNext = addDays(opDay, 1);
+  const dateLabel = formatDateForInput(opDay);
+  const roomBoardHref = `/admin/room-board?date=${encodeURIComponent(dateLabel)}`;
+
+  let roomView: Awaited<ReturnType<typeof loadRoomBoardViewData>> = null;
+  if (show.rooms) {
+    try {
+      roomView = await loadRoomBoardViewData(req, { omitFilters: true, skipBoardMaintenanceWrites: true });
+    } catch (e) {
+      console.error("command center room board", e);
+    }
+  }
+
+  const payShort = (ps: PaymentStatus) => {
+    switch (ps) {
+      case PaymentStatus.SUCCEEDED:
+        return "Paid";
+      case PaymentStatus.PENDING:
+        return "Pending";
+      case PaymentStatus.REQUIRES_ACTION:
+        return "Action needed";
+      case PaymentStatus.FAILED:
+        return "Failed";
+      case PaymentStatus.REFUNDED:
+        return "Refunded";
+      case PaymentStatus.LPO:
+        return "LPO";
+      case PaymentStatus.FRIENDS_TRANSFER:
+        return "Transfer";
+      default:
+        return String(ps);
+    }
+  };
+
+  const [
+    arrivals,
+    departures,
+    inHouse,
+    conversations,
+    outletTickets,
+    hkTasks,
+    feedbackCases,
+    revenueAgg,
+    unpaidBookingsCount,
+    pendingPayIntents,
+    failedNotifs,
+    unassignedArrivals,
+    pendingOutletCount
+  ] = await Promise.all([
+    show.bookings
+      ? prisma.booking.findMany({
+          where: {
+            hotelId: hotel.id,
+            ...propBooking,
+            checkIn: { gte: opDay, lt: opNext },
+            status: { in: [BookingStatus.CONFIRMED, BookingStatus.PENDING, BookingStatus.CHECKED_IN] }
+          },
+          include: { guest: true, roomType: true, roomUnit: true },
+          orderBy: { checkIn: "asc" },
+          take: 12
+        })
+      : Promise.resolve([]),
+    show.bookings
+      ? prisma.booking.findMany({
+          where: {
+            hotelId: hotel.id,
+            ...propBooking,
+            checkOut: { gte: opDay, lt: opNext },
+            status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN, BookingStatus.PENDING] }
+          },
+          include: { guest: true, roomUnit: true },
+          orderBy: { checkOut: "asc" },
+          take: 12
+        })
+      : Promise.resolve([]),
+    show.bookings
+      ? prisma.booking.findMany({
+          where: { hotelId: hotel.id, ...propBooking, status: BookingStatus.CHECKED_IN },
+          include: { guest: true, roomUnit: true },
+          orderBy: { checkOut: "asc" },
+          take: 12
+        })
+      : Promise.resolve([]),
+    show.comms
+      ? prisma.conversation.findMany({
+          where: {
+            hotelId: hotel.id,
+            ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {})
+          },
+          include: { guest: true, messages: { orderBy: { createdAt: "desc" }, take: 1 } },
+          orderBy: { updatedAt: "desc" },
+          take: 30
+        })
+      : Promise.resolve([]),
+    show.fb
+      ? prisma.outletOrderTicket.findMany({
+          where: {
+            hotelId: hotel.id,
+            ticketStatus: { in: [OutletTicketStatus.NEW, OutletTicketStatus.ACKNOWLEDGED, OutletTicketStatus.PREPARING] },
+            ...(isScopedPropertyId(activePropertyId) ? { booking: { propertyId: activePropertyId } } : {})
+          },
+          include: { booking: { include: { guest: true, roomUnit: true } } },
+          orderBy: { createdAt: "desc" },
+          take: 12
+        })
+      : Promise.resolve([]),
+    show.hk || show.rooms
+      ? prisma.housekeepingTask.findMany({
+          where: {
+            hotelId: hotel.id,
+            status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] },
+            ...(isScopedPropertyId(activePropertyId)
+              ? { roomUnit: { roomType: { propertyId: activePropertyId } } }
+              : {})
+          },
+          include: { roomUnit: { include: { roomType: true } }, booking: { include: { guest: true } } },
+          orderBy: { createdAt: "desc" },
+          take: 10
+        })
+      : Promise.resolve([]),
+    prisma.guestFeedback.findMany({
+      where: {
+        hotelId: hotel.id,
+        ...(isScopedPropertyId(activePropertyId) ? { booking: { propertyId: activePropertyId } } : {}),
+        OR: [
+          { managerFollowUpRequestedAt: { not: null }, managerFollowUpClosedAt: null },
+          { rating: { lte: 2 }, createdAt: { gte: addDays(opDay, -30) } }
+        ]
+      },
+      include: { booking: { include: { guest: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 8
+    }),
+    show.bookings
+      ? prisma.booking.aggregate({
+          where: {
+            hotelId: hotel.id,
+            ...propBooking,
+            status: BookingStatus.CONFIRMED,
+            checkIn: { gte: opDay, lt: opNext }
+          },
+          _sum: { totalAmount: true }
+        })
+      : Promise.resolve({ _sum: { totalAmount: null as number | null } }),
+    show.bookings
+      ? prisma.booking.count({
+          where: {
+            hotelId: hotel.id,
+            ...propBooking,
+            status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+            paymentStatus: { not: PaymentStatus.SUCCEEDED }
+          }
+        })
+      : Promise.resolve(0),
+    show.bookings
+      ? prisma.paymentIntent.count({
+          where: {
+            hotelId: hotel.id,
+            status: { in: [PaymentStatus.PENDING, PaymentStatus.REQUIRES_ACTION] },
+            ...(isScopedPropertyId(activePropertyId) ? { booking: { propertyId: activePropertyId } } : {})
+          }
+        })
+      : Promise.resolve(0),
+    prisma.notification.count({
+      where: {
+        hotelId: hotel.id,
+        status: NotificationStatus.FAILED,
+        createdAt: { gte: addDays(opDay, -7) }
+      }
+    }),
+    show.bookings
+      ? prisma.booking.count({
+          where: {
+            hotelId: hotel.id,
+            ...propBooking,
+            roomUnitId: null,
+            checkIn: { gte: opDay, lt: opNext },
+            status: { in: [BookingStatus.CONFIRMED, BookingStatus.PENDING] }
+          }
+        })
+      : Promise.resolve(0),
+    show.fb
+      ? prisma.outletOrderTicket.count({
+          where: {
+            hotelId: hotel.id,
+            ticketStatus: { in: [OutletTicketStatus.NEW, OutletTicketStatus.ACKNOWLEDGED, OutletTicketStatus.PREPARING] },
+            ...(isScopedPropertyId(activePropertyId) ? { booking: { propertyId: activePropertyId } } : {})
+          }
+        })
+      : Promise.resolve(0)
+  ]);
+
+  const arrivalRows: CommandCenterArrivalRow[] = arrivals.map((b) => {
+    const guestLabel = b.guest?.fullName?.trim() || b.guest?.phoneE164 || "Guest";
+    const unit = b.roomUnit?.name ?? "—";
+    const rt = b.roomType?.name ?? "";
+    const roomLine = `${rt} · ${unit}`;
+    const arrivalTime = formatDateTime(b.checkIn);
+    const statusHtml =
+      b.status === BookingStatus.CHECKED_IN
+        ? '<span class="cc-badge cc-badge-ok">In house</span>'
+        : `<span class="cc-badge cc-badge-info">${escapeHtml(String(b.status))}</span>`;
+    const primaryHref = `/admin/bookings/${encodeURIComponent(b.id)}`;
+    const primaryLabel =
+      b.status === BookingStatus.CHECKED_IN ? "View booking" : canCreateBooking ? "Open / check-in" : "View booking";
+    return { guestLabel, roomLine, arrivalTime, statusHtml, primaryHref, primaryLabel };
+  });
+
+  const departureRows: CommandCenterDepartureRow[] = departures.map((b) => {
+    const guestLabel = b.guest?.fullName?.trim() || b.guest?.phoneE164 || "Guest";
+    const roomLine = b.roomUnit?.name ?? "Unassigned";
+    const balanceLine = `${payShort(b.paymentStatus)} · ${formatMoney(b.totalAmount, b.currency)}`;
+    const primaryHref = `/admin/bookings/${encodeURIComponent(b.id)}`;
+    const primaryLabel = "Folio / check-out";
+    return { guestLabel, roomLine, balanceLine, primaryHref, primaryLabel };
+  });
+
+  const inHouseRows: CommandCenterInHouseRow[] = inHouse.map((b) => {
+    const guestLabel = b.guest?.fullName?.trim() || b.guest?.phoneE164 || "Guest";
+    const roomLine = b.roomUnit?.name ?? "—";
+    const stayLine = `${formatDateForInput(b.checkIn)} → ${formatDateForInput(b.checkOut)}`;
+    const bookingHref = `/admin/bookings/${encodeURIComponent(b.id)}`;
+    const waHref = b.conversationId ? `/admin/conversations/${encodeURIComponent(b.conversationId)}` : null;
+    return { guestLabel, roomLine, stayLine, bookingHref, waHref };
+  });
+
+  const inboundPending = conversations.filter((c) => c.messages[0]?.direction === MessageDirection.INBOUND);
+  const whatsappRows: CommandCenterWhatsAppRow[] = inboundPending.slice(0, 8).map((c) => ({
+    conversationId: c.id,
+    guestLabel: c.guest?.fullName?.trim() || c.guest?.phoneE164 || "Guest",
+    snippet: (c.messages[0]?.body ?? "").trim().slice(0, 140) || "—",
+    badgeHtml: '<span class="cc-badge cc-badge-warn">Needs reply</span>'
+  }));
+
+  const outletRows: CommandCenterOutletRow[] = outletTickets.map((t) => ({
+    ticketId: t.id,
+    outletKey: t.outletKey,
+    status: String(t.ticketStatus),
+    guestLabel: t.booking?.guest?.fullName?.trim() || t.booking?.guest?.phoneE164 || "Guest",
+    href: "/admin/outlet-dashboard"
+  }));
+
+  const serviceRows: CommandCenterServiceRow[] = [];
+  for (const t of hkTasks) {
+    serviceRows.push({
+      kindLabel: "Housekeeping",
+      summary: `${t.roomUnit.roomType.name} · ${t.roomUnit.name}`,
+      detail: `${t.status}${t.notes ? ` · ${t.notes}` : ""}`.slice(0, 160),
+      href: "/admin/housekeeping",
+      actionLabel: "Queue"
+    });
+  }
+  for (const f of feedbackCases) {
+    serviceRows.push({
+      kindLabel: "Guest case",
+      summary: f.booking?.guest?.fullName?.trim() || f.booking?.guest?.phoneE164 || "Guest",
+      detail: `Rating ${f.rating}${f.comment ? ` · ${f.comment}` : ""}`.slice(0, 160),
+      href: `/admin/bookings/${encodeURIComponent(f.bookingId)}`,
+      actionLabel: "Booking"
+    });
+  }
+  const serviceRowsLimited = serviceRows.slice(0, 12);
+
+  const alertItemsHtml: string[] = [];
+  if (unassignedArrivals > 0) {
+    alertItemsHtml.push(
+      `<strong>Unassigned arrivals</strong> — ${unassignedArrivals} booking(s) still need a room. <a href="${escapeHtml(roomBoardHref)}">Room grid</a>`
+    );
+  }
+  if (roomView && roomView.statusCounts.CLEANING >= 5) {
+    alertItemsHtml.push(
+      `<strong>Cleaning queue</strong> — ${roomView.statusCounts.CLEANING} rooms in dirty / cleaning. <a href="/admin/housekeeping">Housekeeping</a>`
+    );
+  }
+  if (pendingOutletCount > 0 && show.fb) {
+    alertItemsHtml.push(
+      `<strong>Outlet tickets open</strong> — ${pendingOutletCount} active ticket(s). <a href="/admin/outlet-dashboard">Kitchen board</a>`
+    );
+  }
+  if (failedNotifs > 0) {
+    alertItemsHtml.push(
+      `<strong>Failed notifications (7d)</strong> — ${failedNotifs}. Verify WhatsApp / Meta. <a href="/admin/setup">Partner setup</a>`
+    );
+  }
+  if (unpaidBookingsCount > 5 && show.bookings) {
+    alertItemsHtml.push(
+      `<strong>Outstanding balances</strong> — ${unpaidBookingsCount} bookings not marked paid on the header. <a href="/admin/bookings">Reservations</a>`
+    );
+  }
+
+  const roomSnapshot = roomView
+    ? {
+        total: roomView.totalRooms,
+        available: roomView.statusCounts.AVAILABLE,
+        reserved: roomView.statusCounts.RESERVED,
+        occupied: roomView.statusCounts.OCCUPIED,
+        cleaning: roomView.statusCounts.CLEANING,
+        maintenance: roomView.statusCounts.MAINTENANCE
+      }
+    : null;
+
+  return {
+    hotelDisplayName: hotel.displayName,
+    currency: hotel.currency,
+    timezone: hotel.timezone,
+    dateLabel,
+    roomBoardHref,
+    show,
+    roomSnapshot,
+    arrivals: arrivalRows,
+    departures: departureRows,
+    inHouse: inHouseRows,
+    whatsappRows,
+    whatsappPendingInbound: inboundPending.length,
+    outletRows,
+    serviceRows: serviceRowsLimited,
+    financial: {
+      expectedRevenueToday: revenueAgg._sum.totalAmount ?? 0,
+      unpaidBookings: unpaidBookingsCount,
+      pendingPaymentIntents: pendingPayIntents
+    },
+    alertItemsHtml
   };
 }
 

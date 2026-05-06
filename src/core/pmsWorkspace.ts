@@ -53,7 +53,12 @@ export function inferDefaultWorkspace(role: string, perm: PermissionMatrixLike):
     return "front_desk";
   }
   if (role === "HOUSEKEEPING") return "housekeeping";
-  if (role === "OWNER" || role === "FINANCE") return acc.includes("owner") ? "owner" : acc[0];
+  if (role === "OWNER") {
+    if (acc.includes("front_desk")) return "front_desk";
+    if (acc.includes("owner")) return "owner";
+    return acc[0];
+  }
+  if (role === "FINANCE") return acc.includes("owner") ? "owner" : acc[0];
   if (role === "MANAGER") return acc.includes("front_desk") ? "front_desk" : acc[0];
   if (role === "FRONTDESK") return acc.includes("front_desk") ? "front_desk" : acc[0];
   if (acc.includes("front_desk")) return "front_desk";
