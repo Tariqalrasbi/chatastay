@@ -2423,16 +2423,19 @@ function inferEvent(state: ConversationState, text: string, parsed: ReturnType<t
 async function resolveHotel(
   inboundPhoneNumberId?: string
 ): Promise<{ id: string; displayName: string; currency: string; timezone: string; phoneNumberId?: string }> {
+  // Only active (non-suspended) hotels can receive WhatsApp traffic. This enforces the SaaS lifecycle
+  // rule "SUSPENDED / ARCHIVED properties must not receive WhatsApp messages." A platform admin
+  // suspends a hotel via /owner/hotels/:id/toggle-active (Hotel.isActive=false) and from that moment
+  // the WABA routing here refuses to bind, the inbound is dropped at the AI layer, and no Conversation
+  // / Message / Notification rows are created for that tenant. Reactivation is the same toggle.
   const hotels = await prisma.hotel.findMany({
+    where: { isActive: true },
     orderBy: { createdAt: "asc" },
     select: { id: true, displayName: true, currency: true, timezone: true }
   });
   if (!hotels.length) {
-    throw new Error("No hotels configured");
+    throw new Error("No active hotels configured");
   }
-  // Strict per-tenant routing: only match a hotel that has explicitly registered this WABA phone-number-id.
-  // `loadPartnerSetupConfig` no longer inherits `whatsappPhoneNumberId` from the `default` block, so the
-  // match here is unique per property.
   if (inboundPhoneNumberId) {
     for (const hotel of hotels) {
       const config = loadPartnerSetupConfig(hotel.id);
@@ -2446,13 +2449,29 @@ async function resolveHotel(
         };
       }
     }
-    // No hotel claims this inbound phone-number-id. Log loudly so operators see the routing miss; we keep
-    // serving (single-tenant dev / not-yet-configured environments) by using the first hotel and replying via
-    // the inbound id (always valid for the receiving WhatsApp Business token).
+    // Defence-in-depth: if a SUSPENDED hotel still owns this WABA id we want to know loudly so the
+    // operator either reactivates the hotel OR reassigns the WABA id to a different active property.
+    // We deliberately do NOT silently fall back to the first active hotel here when the inbound id is
+    // claimed by a suspended one — that would route Sur Hotel's guests to Al Ashkhara's flows.
+    const suspendedClaimer = await prisma.hotel.findFirst({
+      where: { isActive: false },
+      select: { id: true, displayName: true }
+    });
+    if (suspendedClaimer) {
+      const config = loadPartnerSetupConfig(suspendedClaimer.id);
+      if (config.whatsappPhoneNumberId === inboundPhoneNumberId) {
+        console.warn(
+          `[whatsapp-routing] phone_number_id=${inboundPhoneNumberId} is claimed by SUSPENDED hotel ` +
+            `"${suspendedClaimer.displayName}". Refusing to route. Reactivate the hotel via /owner/hotels ` +
+            `or reassign the WABA id to an active property in Settings → Property setup.`
+        );
+        throw new Error("WhatsApp number is bound to a suspended hotel; routing refused.");
+      }
+    }
     if (hotels.length > 1) {
       console.warn(
-        `[whatsapp-routing] No hotel matches inbound phone_number_id=${inboundPhoneNumberId}. ` +
-          `Configure Settings → WhatsApp setup for the receiving property. Falling back to first hotel "${hotels[0].displayName}" for this turn only.`
+        `[whatsapp-routing] No active hotel matches inbound phone_number_id=${inboundPhoneNumberId}. ` +
+          `Configure Settings → WhatsApp setup for the receiving property. Falling back to first active hotel "${hotels[0].displayName}" for this turn only.`
       );
     } else {
       console.info(

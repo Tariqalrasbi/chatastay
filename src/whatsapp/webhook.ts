@@ -1071,12 +1071,16 @@ async function getHotelRuntimeContext(hotelId: string): Promise<{
 }
 
 async function resolveHotelContext(phoneNumberId?: string): Promise<{ id: string; displayName: string; currency: string; outboundPhoneNumberId?: string }> {
+  // Mirror of resolveHotel() in conversationController: only ACTIVE hotels are eligible for inbound
+  // routing. Suspended hotels are dropped here as well so cron-driven webhook re-checks (status,
+  // template feedback, etc.) don't accidentally write into a tenant the platform owner has archived.
   const hotels = await prisma.hotel.findMany({
+    where: { isActive: true },
     select: { id: true, displayName: true, currency: true, slug: true },
     orderBy: { createdAt: "asc" }
   });
   if (!hotels.length) {
-    throw new Error("No hotels configured");
+    throw new Error("No active hotels configured");
   }
   if (phoneNumberId) {
     for (const hotel of hotels) {

@@ -189,10 +189,14 @@ async function seedPendingRequest(now: Date, pendingDelayMs: number): Promise<vo
 }
 
 async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
+  // Skip suspended hotels — when a tenant is archived (Hotel.isActive=false) we must stop enqueuing
+  // pre-arrival and post-stay follow-ups for its bookings. The booking row stays in the DB; we just
+  // don't act on it until the hotel is reactivated.
   const bookings = await prisma.booking.findMany({
     where: {
       status: BookingStatus.CONFIRMED,
-      OR: [{ checkIn: { gt: now } }, { checkOut: { lt: now } }]
+      OR: [{ checkIn: { gt: now } }, { checkOut: { lt: now } }],
+      hotel: { isActive: true }
     },
     include: {
       conversation: { select: { id: true } },
@@ -200,7 +204,10 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
     },
     take: 400
   });
-  const hotelRows = await prisma.hotel.findMany({ select: { id: true, timezone: true } });
+  const hotelRows = await prisma.hotel.findMany({
+    where: { isActive: true },
+    select: { id: true, timezone: true }
+  });
   const tzByHotelId = new Map(hotelRows.map((h) => [h.id, hotelTimezoneOrUtc(h.timezone)]));
   for (const b of bookings) {
     const tz = tzByHotelId.get(b.hotelId) ?? "UTC";
@@ -257,10 +264,16 @@ async function seedPreArrivalAndPostStay(now: Date): Promise<void> {
 
 async function seedReEngagement(now: Date): Promise<void> {
   const reengageAfterMs = envDaysToMs("AUTO_FOLLOWUP_REENGAGE_DAYS", 60);
-  const hotelRows = await prisma.hotel.findMany({ select: { id: true, timezone: true } });
+  const hotelRows = await prisma.hotel.findMany({
+    where: { isActive: true },
+    select: { id: true, timezone: true }
+  });
   const tzByHotelId = new Map(hotelRows.map((h) => [h.id, hotelTimezoneOrUtc(h.timezone)]));
+  // Re-engagement also respects suspended-tenant boundaries: only consider guests whose most recent
+  // confirmed stay is at an active hotel.
   const guests = await prisma.guest.findMany({
     where: {
+      hotel: { isActive: true },
       bookings: {
         some: {
           status: BookingStatus.CONFIRMED,
