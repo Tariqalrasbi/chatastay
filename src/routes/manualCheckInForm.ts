@@ -14,6 +14,16 @@ export type ManualCheckInFormValues = {
   idNumber: string;
   /** Maps to ChannelProvider for booking reference prefix (WI, PH, CO, RF). */
   bookingChannel: string;
+  /**
+   * Hospitality "Booked by" (Direct, OTA, Tour company, Walk-in, Corporate, Friend/Gift, Phone).
+   * Stored on the per-stay `ROOM_UNIT_GUEST_DETAILS` audit so it surfaces in the room-unit details
+   * view alongside the rest of the registration card.
+   */
+  bookedBy: string;
+  /** Free-text company name; only meaningful when `bookedBy === "TOUR_COMPANY"`. */
+  tourCompany: string;
+  /** Card / bank-transfer reference number — captured at desk for finance reconciliation. */
+  transactionNumber: string;
   internalNotes: string;
   checkIn: string;
   checkOut: string;
@@ -76,6 +86,9 @@ export function manualCheckInFormFromBody(req: Request): ManualCheckInFormValues
     nationality: String(req.body.nationality ?? ""),
     idNumber: String(req.body.idNumber ?? ""),
     bookingChannel: String(req.body.bookingChannel ?? "DIRECT"),
+    bookedBy: String(req.body.bookedBy ?? "WALK_IN"),
+    tourCompany: String(req.body.tourCompany ?? ""),
+    transactionNumber: String(req.body.transactionNumber ?? ""),
     internalNotes: String(req.body.internalNotes ?? ""),
     checkIn: String(req.body.checkIn ?? ""),
     checkOut: String(req.body.checkOut ?? ""),
@@ -211,6 +224,13 @@ export function buildManualCheckInPageHtml(
   const totalVal = form?.totalAmount?.trim() ? escapeHtml(form.totalAmount) : "";
   const invWhats = form?.sendInvoiceWhatsApp ? " checked" : "";
   const invPrint = form?.openInvoicePrint ? " checked" : "";
+  const bookedBy = (form?.bookedBy ?? "WALK_IN").toUpperCase();
+  const bookedBySel = (v: string) => (bookedBy === v ? " selected" : "");
+  const tourCompany = escapeHtml(form?.tourCompany ?? "");
+  const transactionNumber = escapeHtml(form?.transactionNumber ?? "");
+  const tourCompanyHidden = bookedBy === "TOUR_COMPANY" ? "" : "display:none";
+  // Card / bank-transfer / OTA-prepaid all need a finance reference; cash usually does not.
+  const txnFieldHidden = (form?.paymentMethod ?? "") && ["CARD", "BANK_TRANSFER", "OTA_PREPAID"].includes((form?.paymentMethod ?? "").toUpperCase()) ? "" : "display:none";
 
   const nationalityDatalistHtml = MANUAL_CHECK_IN_NATIONALITY_OPTIONS.map(
     (n) => `<option value="${escapeHtml(n)}"></option>`
@@ -341,7 +361,7 @@ export function buildManualCheckInPageHtml(
 <p class="muted" style="margin-top:0;line-height:1.5">${escapeHtml(hotel.displayName)} — Walk-in or phone booking: one room, confirmed stay, board updated. <strong>Tab</strong> moves top-to-bottom; start with guest name.</p>
 <p class="fd-legend"><span class="fd-req">*</span> = required before confirm.</p>
 ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:10px 14px;font-size:14px">${escapeHtml(errorMsg)}</p>` : ""}
-<form method="post" action="/admin/front-desk/check-in" class="fd-checkin-form">
+<form method="post" action="/admin/front-desk/check-in" enctype="multipart/form-data" class="fd-checkin-form">
   <input type="hidden" name="returnBoardDate" value="${escapeHtml(returnBoardHidden)}" />
   <section class="fd-sec fd-sec--guest" aria-labelledby="fd-sec-guest-title">
     <div class="fd-sec-head">
@@ -386,6 +406,30 @@ ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991
         <label for="fd-id-number">ID / passport #</label>
         <input type="text" id="fd-id-number" name="idNumber" autocomplete="off" value="${idNumber}" class="fd-input" placeholder="Optional" />
       </div>
+    </div>
+    <div class="fd-grid-2">
+      <div class="fd-field">
+        <label for="fd-booked-by">Booked by</label>
+        <select id="fd-booked-by" name="bookedBy" class="fd-input">
+          <option value="WALK_IN"${bookedBySel("WALK_IN")}>Walk-in</option>
+          <option value="DIRECT"${bookedBySel("DIRECT")}>Direct (web / call)</option>
+          <option value="OTAS"${bookedBySel("OTAS")}>OTA (Booking.com / Airbnb / Expedia)</option>
+          <option value="TOUR_COMPANY"${bookedBySel("TOUR_COMPANY")}>Tour company</option>
+          <option value="CORPORATE"${bookedBySel("CORPORATE")}>Corporate</option>
+          <option value="PHONE"${bookedBySel("PHONE")}>Phone</option>
+          <option value="WHATSAPP"${bookedBySel("WHATSAPP")}>WhatsApp</option>
+          <option value="FRIEND_GIFT"${bookedBySel("FRIEND_GIFT")}>Friend / gift</option>
+        </select>
+      </div>
+      <div class="fd-field" id="fd-tour-company-wrap" style="${tourCompanyHidden}">
+        <label for="fd-tour-company">Tour company name</label>
+        <input type="text" id="fd-tour-company" name="tourCompany" value="${tourCompany}" class="fd-input" placeholder="e.g. Oman Tours LLC" />
+      </div>
+    </div>
+    <div class="fd-field">
+      <label for="fd-id-upload">ID / passport scan <span class="fd-hint" style="font-weight:400">(image or PDF, max 5 MB)</span></label>
+      <input type="file" id="fd-id-upload" name="idCard" accept=".jpg,.jpeg,.png,.pdf,.webp" class="fd-input" />
+      <p class="fd-hint">Saved to the room-unit registration card. You can also re-upload from the Reservation details page.</p>
     </div>
   </section>
   <section class="fd-sec fd-sec--stay" aria-labelledby="fd-sec-stay-title">
@@ -522,6 +566,11 @@ ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991
           <option value="OTA_PREPAID"${methodSel("OTA_PREPAID")}>OTA / prepaid</option>
         </select>
       </div>
+    </div>
+    <div class="fd-field" id="fd-txn-wrap" style="${txnFieldHidden}">
+      <label for="fd-txn-number">Transaction / reference number <span class="fd-hint" style="font-weight:400">(card receipt, bank ref, OTA voucher)</span></label>
+      <input type="text" id="fd-txn-number" name="transactionNumber" value="${transactionNumber}" class="fd-input" placeholder="POS approval / bank reference" autocomplete="off" />
+      <p class="fd-hint">Future-ready: this field is also where a card terminal / payment gateway callback can write back the auth code.</p>
     </div>
     <div class="fd-field">
       <label for="fd-internal-notes">Internal notes <span class="fd-hint" style="font-weight:400">(staff only)</span></label>
@@ -706,6 +755,21 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
     box.textContent = "Assigning: " + unitLabel + " · " + rtLabel;
     box.className = "fd-room-summary fd-room-summary--ok";
   }
+  // Mirror of the server formula in src/core/frontDeskPricing.ts (computeManualCheckInTotal +
+  // computeMealPlanSurchargeForStay). The previous implementation read only the legacy
+  // perPersonPerNight key and applied it per-pax even when the config was PER_ROOM_PER_NIGHT —
+  // which is the hospitality-industry default and what the server actually uses. That caused the
+  // breakdown shown to receptionists to disagree with the saved total. This now respects
+  // pricingMode, falls back through perRoomPerNight → perPersonPerNight legacy, and prints a
+  // transparent line so the rate × units × nights computation is auditable on the form itself.
+  function resolveMealPlanRate(row) {
+    if (!row) return { mode: "PER_ROOM_PER_NIGHT", rate: 0 };
+    var mode = (row.pricingMode === "PER_GUEST_PER_NIGHT") ? "PER_GUEST_PER_NIGHT" : "PER_ROOM_PER_NIGHT";
+    if (mode === "PER_GUEST_PER_NIGHT") {
+      return { mode: mode, rate: Number(row.perGuestPerNight != null ? row.perGuestPerNight : (row.perPersonPerNight || 0)) || 0 };
+    }
+    return { mode: mode, rate: Number(row.perRoomPerNight != null ? row.perRoomPerNight : (row.perPersonPerNight || 0)) || 0 };
+  }
   function recalc() {
     var pricing = window.__FD_PRICING__;
     if (!pricing || !pricing.mealPlans) return;
@@ -719,11 +783,16 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
     var adults = Math.max(1, parseInt(document.getElementById("fd-adults").value, 10) || 1);
     var children = Math.max(0, parseInt(document.getElementById("fd-children").value, 10) || 0);
     var pax = adults + children;
+    var rooms = 1; // manual check-in is always one physical room
     var mpEl = document.querySelector('input[name="mealPlan"]:checked');
     var mp = mpEl ? mpEl.value : "NONE";
-    var mealRate = (pricing.mealPlans[mp] && pricing.mealPlans[mp].perPersonPerNight) || 0;
-    var roomSub = nightly * nights;
-    var mealSub = mealRate * pax * nights;
+    var mpResolved = resolveMealPlanRate(pricing.mealPlans[mp]);
+    var roomSub = nightly * nights * rooms;
+    var mealUnits = mpResolved.mode === "PER_GUEST_PER_NIGHT" ? pax : rooms;
+    var mealUnitLabel = mpResolved.mode === "PER_GUEST_PER_NIGHT"
+      ? (pax + " guest" + (pax === 1 ? "" : "s"))
+      : (rooms + " room" + (rooms === 1 ? "" : "s"));
+    var mealSub = mp === "NONE" ? 0 : mpResolved.rate * mealUnits * nights;
     var extrasSub = 0;
     var extraLines = [];
     document.querySelectorAll(".fd-extra:checked").forEach(function (cb) {
@@ -736,13 +805,13 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
         var h = hi ? parseFloat(hi.value) : 1;
         if (isNaN(h) || h < 0.25) h = 1;
         amt = ex.amount * h;
-        extraLines.push(ex.label + " (" + h + " h): " + amt.toFixed(2) + " " + cur);
+        extraLines.push(ex.label + " (" + h + " h × " + ex.amount.toFixed(2) + " " + cur + "): " + amt.toFixed(2) + " " + cur);
       } else if (ex.applyPerNight) {
         amt = ex.amount * nights;
-        extraLines.push(ex.label + ": " + amt.toFixed(2) + " " + cur);
+        extraLines.push(ex.label + " (" + nights + " night" + (nights === 1 ? "" : "s") + " × " + ex.amount.toFixed(2) + " " + cur + "): " + amt.toFixed(2) + " " + cur);
       } else {
         amt = ex.amount;
-        extraLines.push(ex.label + ": " + amt.toFixed(2) + " " + cur);
+        extraLines.push(ex.label + " (flat): " + amt.toFixed(2) + " " + cur);
       }
       extrasSub += amt;
     });
@@ -751,13 +820,19 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
     var total = roomSub + mealSub + extrasSub + adj;
     document.getElementById("fd-total").value = total >= 0 ? total.toFixed(2) : "0";
     var br = document.getElementById("fd-breakdown");
-    var lines = [
-      "Room (rack × " + nights + " night" + (nights === 1 ? "" : "s") + "): " + roomSub.toFixed(2) + " " + cur,
-      "Meals (" + mp + ", " + pax + " guest" + (pax === 1 ? "" : "s") + "): " + mealSub.toFixed(2) + " " + cur
-    ];
-    extraLines.forEach(function (l) { lines.push(l); });
-    lines.push("Adjustment: " + adj.toFixed(2) + " " + cur);
-    lines.push("<strong>Total: " + total.toFixed(2) + " " + cur + "</strong>");
+    var lines = [];
+    lines.push("Room: " + nightly.toFixed(2) + " " + cur + "/night × " + nights + " night" + (nights === 1 ? "" : "s") + " × " + rooms + " room = <strong>" + roomSub.toFixed(2) + " " + cur + "</strong>");
+    if (mp !== "NONE" && mpResolved.rate > 0) {
+      lines.push("Meals (" + mp + "): " + mpResolved.rate.toFixed(2) + " " + cur + "/" + (mpResolved.mode === "PER_GUEST_PER_NIGHT" ? "guest" : "room") + "/night × " + mealUnitLabel + " × " + nights + " night" + (nights === 1 ? "" : "s") + " = <strong>" + mealSub.toFixed(2) + " " + cur + "</strong>");
+    } else {
+      lines.push("Meals: room only (no surcharge)");
+    }
+    extraLines.forEach(function (l) { lines.push("Extras · " + l); });
+    if (adj !== 0) {
+      lines.push("Adjustment: " + (adj > 0 ? "+" : "") + adj.toFixed(2) + " " + cur);
+    }
+    lines.push('<hr style="border:0;border-top:1px solid #cbd5e1;margin:6px 0" />');
+    lines.push('<strong style="font-size:14px">Total: ' + total.toFixed(2) + " " + cur + "</strong>");
     br.innerHTML = lines.join("<br/>");
   }
   var ciEl = document.getElementById("fd-check-in");
@@ -826,6 +901,26 @@ window.__FD_ROOM_SNAPSHOT__ = ${JSON.stringify(roomSelection)};
     el.addEventListener("change", recalc);
     el.addEventListener("input", recalc);
   });
+  // Conditional field visibility — hospitality UX: hide irrelevant inputs to keep the form scannable.
+  function syncBookedBy() {
+    var sel = document.getElementById("fd-booked-by");
+    var wrap = document.getElementById("fd-tour-company-wrap");
+    if (!sel || !wrap) return;
+    wrap.style.display = sel.value === "TOUR_COMPANY" ? "" : "none";
+  }
+  function syncTxnVisibility() {
+    var sel = document.getElementById("fd-pay-method");
+    var wrap = document.getElementById("fd-txn-wrap");
+    if (!sel || !wrap) return;
+    var v = (sel.value || "").toUpperCase();
+    wrap.style.display = (v === "CARD" || v === "BANK_TRANSFER" || v === "OTA_PREPAID") ? "" : "none";
+  }
+  var bbEl = document.getElementById("fd-booked-by");
+  if (bbEl) bbEl.addEventListener("change", syncBookedBy);
+  var pmEl = document.getElementById("fd-pay-method");
+  if (pmEl) pmEl.addEventListener("change", syncTxnVisibility);
+  syncBookedBy();
+  syncTxnVisibility();
   updateRoomSummary();
   recalc();
 })();

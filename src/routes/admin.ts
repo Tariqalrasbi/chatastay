@@ -1423,14 +1423,13 @@ function renderLayout(
   const logoutHtml = authenticated
     ? `${moduleSwitchHtml}<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
     : "";
+  // Hospitality PMS dedup: receptionists were seeing Room rack / Check-in / Check-out twice
+  // (in Today and again in Front Desk). The "Today" group is now strictly the briefing surface
+  // (Command center + Alerts). All operational actions live exclusively in the Front Desk group.
   const todayTabs: AdminSection = {
     group: "dashboard",
     links: [
       { href: primaryTodayHref, label: "Command center" },
-      ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room rack" }] : []),
-      ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Arrivals / check-in" }] : []),
-      ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Departures / check-out" }] : []),
-      ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "In-house &amp; folio lookup" }] : []),
       { href: "/admin/daily-digest", label: "Alerts &amp; briefing" }
     ]
   };
@@ -1448,13 +1447,23 @@ function renderLayout(
         : [])
     ]
   };
+  // Front Desk owns ALL receptionist operational actions: Room rack, Check-in, Check-out,
+  // Guest bills, plus the desk handover/shift workflow that was incorrectly under "Account".
+  // Mirrors Cloudbeds / Mews / Opera front-desk navigation grouping.
   const frontDeskTabs: AdminSection = {
     group: "frontdesk",
     links: [
-      ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room grid" }] : []),
-      ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Check-in" }] : []),
-      ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Check-out" }] : []),
-      ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "Guest bills &amp; folios" }] : [])
+      ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room rack" }] : []),
+      ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Arrivals / check-in" }] : []),
+      ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Departures / check-out" }] : []),
+      ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "Guest bills &amp; folios" }] : []),
+      ...(perm && hasPermission(perm, "ROOMS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover sheet" }] : []),
+      ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
+        ? [
+            { href: "/admin/shift-close", label: "Shift close (cashier)" },
+            { href: "/admin/shifts", label: "Shifts (history)" }
+          ]
+        : [])
     ]
   };
   const inventoryTabs: AdminSection = {
@@ -1518,6 +1527,9 @@ function renderLayout(
         : [])
     ]
   };
+  // "Account / Settings" is for property + staff + finance configuration. Operational shift &
+  // handover actions moved to the Front Desk group above (best practice: receptionist actions
+  // belong in receptionist navigation, not under admin/settings).
   const adminTabs: AdminSection = {
     group: "account",
     links: [
@@ -1528,13 +1540,6 @@ function renderLayout(
         : []),
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Staff &amp; permissions" }] : []),
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/audit-trail", label: "Audit trail" }] : []),
-      ...(perm && hasPermission(perm, "ROOMS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover sheet" }] : []),
-      ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
-        ? [
-            { href: "/admin/shifts", label: "Shifts (history)" },
-            { href: "/admin/shift-close", label: "Shift close (cashier)" }
-          ]
-        : []),
       ...(perm && hasPermission(perm, "BILLING", "VIEW")
         ? [
             { href: "/admin/billing", label: "Billing" },
@@ -7919,7 +7924,7 @@ adminRouter.get("/front-desk/check-in/room-options", requirePermission("BOOKINGS
   res.json(roomSelection);
 });
 
-adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), async (req, res) => {
+adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), idCardUpload.single("idCard"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
@@ -7937,6 +7942,16 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
   const nationality = String(req.body.nationality ?? "").trim();
   const idNumber = String(req.body.idNumber ?? "").trim();
   const internalNotes = String(req.body.internalNotes ?? "").trim();
+  // Hospitality registration card: persist Booked-by + tour company + finance reference + ID
+  // upload using the same `ROOM_UNIT_GUEST_DETAILS` audit metadata shape the room-unit details
+  // page already reads from. This way the data shows up immediately in the receptionist's
+  // "Reservation details" view without needing a second save step.
+  const bookedByRaw = String(req.body.bookedBy ?? "").trim().toUpperCase();
+  const allowedBookedBy = new Set(["WALK_IN", "DIRECT", "OTAS", "TOUR_COMPANY", "CORPORATE", "PHONE", "WHATSAPP", "FRIEND_GIFT"]);
+  const bookedBy = allowedBookedBy.has(bookedByRaw) ? bookedByRaw : "WALK_IN";
+  const tourCompany = bookedBy === "TOUR_COMPANY" ? String(req.body.tourCompany ?? "").trim() : "";
+  const transactionNumber = String(req.body.transactionNumber ?? "").trim();
+  const uploadedIdPath = req.file ? `/static/uploads/id-cards/${req.file.filename}` : "";
   const roomUnitId = String(req.body.roomUnitId ?? "").trim();
   const returnBoardDate = String(req.body.returnBoardDate ?? "").trim();
   const checkIn = startOfDay(parseDateInput(req.body.checkIn, startOfDay(new Date())));
@@ -8231,8 +8246,11 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         adults,
         children,
         mealPlan,
-        idCardPath: "",
+        idCardPath: uploadedIdPath,
         paymentMethod,
+        transactionNumber,
+        bookedBy,
+        tourCompany,
         paymentAmount: manualPaidAmount > 0 ? manualPaidAmount : null,
         balanceAmount: manualPaidAmount > 0 ? 0 : totalAmount
       }
@@ -9784,7 +9802,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
 <div class="rud-page">
   <header class="rud-page-head">
     <div>
-      <h2 class="rud-title">Room unit &amp; guest</h2>
+      <h2 class="rud-title">Reservation details</h2>
       <p class="rud-sub muted">${escapeHtml(unit.name)} · ${escapeHtml(unit.roomType.name)} · Board date <strong>${escapeHtml(dateKey)}</strong></p>
     </div>
   </header>
@@ -9794,8 +9812,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
 
   <nav class="rud-toolbar" aria-label="Page actions">
     <div class="rud-toolbar-row rud-toolbar-secondary">
-      <a class="btn-link" href="/admin/profile">Back to Hotel Profile</a>
-      <a class="btn-link primary" href="/admin/room-board?date=${dateKey}">Back to Room Board</a>
+      <a class="btn-link primary" href="/admin/room-board?date=${dateKey}">Back to Room Rack</a>
+      <a class="btn-link" href="/admin/front-desk/check-in?date=${dateKey}">Front Desk</a>
       ${rudChangeRoomLink}
       <a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/invoice?date=${dateKey}">Open guest invoice</a>
       <form method="post" action="/admin/room-board/unit/${encodeURIComponent(unit.id)}/send-whatsapp" style="display:inline-flex;margin:0">
