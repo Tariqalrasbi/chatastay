@@ -17,6 +17,7 @@ import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
 import { extractMarketplaceIntentToken } from "../routes/marketplace";
 import { claimMarketplaceIntent } from "./marketplaceIntentClaim";
+import { computeGuestLifecycleState, type GuestLifecycleState } from "../core/guestLifecycleState";
 import { BookingPaymentLinkUnavailableError, createBookingPaymentLink } from "../core/bookingPayments";
 import {
   computeMealPlanSurchargeForStay,
@@ -2813,6 +2814,40 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   } catch (err) {
     console.error(
       "marketplace intent claim failed:",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
+  /// Phase F: derive the relationship lifecycle state for the inbound turn.
+  /// Used downstream by future menu copy / outreach branches and surfaced on
+  /// the PMS conversation page. Counts only completed prior bookings for
+  /// "returning guest" detection; the helper itself stays pure / read-only.
+  let _guestLifecycleState: GuestLifecycleState = "UNKNOWN_GUEST";
+  try {
+    const guestBookings = await prisma.booking.findMany({
+      where: { hotelId: hotel.id, guestId: guest.id },
+      select: { id: true, status: true, checkIn: true, checkOut: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+      take: 20
+    });
+    const priorStaysCount = await prisma.booking.count({
+      where: {
+        hotelId: hotel.id,
+        guestId: guest.id,
+        status: "CHECKED_IN",
+        checkOut: { lte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+      }
+    });
+    const lifecycle = computeGuestLifecycleState({
+      guest: { id: guest.id, fullName: guest.fullName, priorStaysCount },
+      bookings: guestBookings,
+      conversation: { hasInboundMessage: true, sessionStage: null }
+    });
+    _guestLifecycleState = lifecycle.state;
+  } catch (err) {
+    // Lifecycle derivation is purely advisory; never break a real guest turn.
+    console.error(
+      "lifecycle derivation failed:",
       err instanceof Error ? err.message : String(err)
     );
   }

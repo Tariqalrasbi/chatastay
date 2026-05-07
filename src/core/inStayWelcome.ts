@@ -4,6 +4,7 @@ import { loadPartnerSetupConfig } from "./partnerSetup";
 import { formatCheckInBillWhatsAppText, loadFolioSummaryForCheckInWhatsApp } from "./checkInBillSummary";
 import { IN_STAY_SERVICE_MESSAGE_SECTIONS } from "./inStayServiceMenu";
 import { sendWhatsAppList, trySendWhatsAppText } from "../whatsapp/send";
+import { computeGuestLifecycleState } from "./guestLifecycleState";
 
 async function getOrCreateGuestConversation(hotelId: string, guestId: string): Promise<{ id: string }> {
   const existing = await prisma.conversation.findFirst({
@@ -142,6 +143,27 @@ export async function sendInStayWelcomeMenuIfEligible(bookingId: string): Promis
   });
   if (!booking) return { sent: false, reason: "booking_not_found" };
   if (booking.guestJourneyInStayWelcomeSentAt) return { sent: false, reason: "already_sent" };
+
+  /// Phase F: refuse to send the in-stay menu unless the lifecycle helper says
+  /// the guest is actually IN_HOUSE (or CHECKED_IN with stale checkout date).
+  /// This consolidates what was previously implicit ("checkin past, checkout
+  /// future") into one rule. Returning a soft `lifecycle_not_in_house` keeps
+  /// callers from short-circuiting unrelated paths.
+  const lifecycle = computeGuestLifecycleState({
+    guest: { id: booking.guestId },
+    bookings: [
+      {
+        id: booking.id,
+        status: "CHECKED_IN" as const,
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        createdAt: new Date()
+      }
+    ]
+  });
+  if (lifecycle.state !== "IN_HOUSE" && lifecycle.state !== "CHECKED_IN") {
+    return { sent: false, reason: `lifecycle_not_in_house:${lifecycle.state}` };
+  }
 
   const phone = booking.guest.phoneE164.replace(/\D/g, "");
   if (phone.length < 8) return { sent: false, reason: "no_phone" };

@@ -31,6 +31,11 @@ import {
 } from "@prisma/client";
 import { sendEmail } from "../core/email";
 import {
+  computeGuestLifecycleState,
+  lifecycleBadgeClass,
+  lifecycleStateLabel
+} from "../core/guestLifecycleState";
+import {
   generateSecureToken,
   hashPassword as hashSecret,
   hashToken,
@@ -18712,6 +18717,36 @@ adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW")
     where: { hotelId_guestId: { hotelId: conversation.hotelId, guestId: conversation.guestId } },
     select: { metadataJson: true, stage: true, updatedAt: true }
   });
+
+  /// Phase F: derive the relationship lifecycle state for the staff badge.
+  const priorStaysCount = await prisma.booking.count({
+    where: {
+      hotelId: conversation.hotelId,
+      guestId: conversation.guestId,
+      status: BookingStatus.CHECKED_IN,
+      checkOut: { lte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    }
+  });
+  const lifecycle = computeGuestLifecycleState({
+    guest: {
+      id: conversation.guest.id,
+      fullName: conversation.guest.fullName,
+      priorStaysCount
+    },
+    bookings: conversation.bookings.map((b) => ({
+      id: b.id,
+      status: b.status,
+      checkIn: b.checkIn,
+      checkOut: b.checkOut,
+      createdAt: b.createdAt
+    })),
+    conversation: {
+      hasInboundMessage: conversation.messages.some((m) => m.direction === MessageDirection.INBOUND),
+      sessionStage: session?.stage ?? null
+    }
+  });
+  const lifecycleBadgeCls = lifecycleBadgeClass(lifecycle.state);
+  const lifecycleBadgeHtml = `<span class="badge ${lifecycleBadgeCls}" title="ChatAstay relationship lifecycle (Phase F)">${escapeHtml(lifecycleStateLabel(lifecycle.state))}</span>`;
   const sessionMeta = parseConversationMetadata(session?.metadataJson);
   const bookingContextHtml = renderBookingSessionContextHtml(session?.stage ?? null, sessionMeta);
 
@@ -18785,6 +18820,7 @@ ${replyError}
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
         <span class="badge ${getConversationBadgeClass(conversation.state)}" style="margin:0;">${escapeHtml(conversation.state)}</span>
+        ${lifecycleBadgeHtml}
         <span class="${handlerBadgeClass}" title="${handledByHuman ? "Guest requested human; staff is handling" : "Chatbot is handling"}">Handled by: ${escapeHtml(handlerLabel)}</span>
       </div>
     </div>
