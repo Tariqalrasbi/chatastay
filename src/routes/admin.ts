@@ -1316,7 +1316,6 @@ function renderLayout(
   const canNavRooms = !perm || hasPermission(perm, "ROOMS", "VIEW");
   const canNavReports = !perm || hasPermission(perm, "REPORTS", "VIEW");
   const canCreateBookings = Boolean(perm && hasPermission(perm, "BOOKINGS", "CREATE"));
-  const showPlatformInsightsLinks = Boolean(sess && isPlatformAcquisitionSession(sess));
   type AdminNavGroup =
     | "dashboard"
     | "reservations"
@@ -1512,19 +1511,19 @@ function renderLayout(
           : [])
     ]
   };
+  // Reports group: every link here is hotel-scoped (filtered by activeHotelSlug()) and sits behind REPORTS:VIEW.
+  // AI analytics / booking funnel / routing health used to be platform-acquisition-only in the sidebar but the
+  // hotel-owner workspace landing card (/admin/module/owner) already advertised them; the route guards now mirror
+  // REPORTS:VIEW so sidebar visibility, route protection, and workspace landing all agree.
   const reportTabs: AdminSection = {
     group: "insights",
     links: [
       { href: "/admin/reports-center", label: "Reports center" },
       { href: "/admin/management-kpi", label: "Revenue &amp; occupancy (KPI)" },
       { href: "/admin/daily-digest", label: "Daily digest" },
-      ...(showPlatformInsightsLinks
-        ? [
-            { href: "/admin/ai-analytics", label: "AI analytics" },
-            { href: "/admin/booking-funnel", label: "Booking funnel" },
-            { href: "/admin/routing-health", label: "Routing health" }
-          ]
-        : [])
+      { href: "/admin/ai-analytics", label: "AI analytics" },
+      { href: "/admin/booking-funnel", label: "Booking funnel" },
+      { href: "/admin/routing-health", label: "Routing health" }
     ]
   };
   // "Account / Settings" is for property + staff + finance configuration. Operational shift &
@@ -3069,7 +3068,27 @@ function isPlatformOwnerEmail(email: string | undefined | null): boolean {
   return extra.includes(normalized);
 }
 
-/** Leads + client property onboarding — platform owner / super-admin only (not hotel partner staff). */
+/**
+ * SaaS boundary helper: identifies a session that is allowed to operate the platform-acquisition surface
+ * (lead pipeline + new-property onboarding form). This is intentionally narrower than ordinary hotel admin:
+ *
+ *   PMS surface     (hotel partner staff: OWNER / MANAGER / FINANCE / FRONTDESK / HOUSEKEEPING)
+ *     - everything under /admin/* that operates a single property: bookings, rooms, folios, conversations,
+ *       reports (REPORTS:VIEW), housekeeping, F&B, settings.
+ *
+ *   Platform-acquisition surface  ↳ requirePlatformAcquisition (this file)
+ *     - /admin/leads, /admin/leads/:id/*, /admin/onboard
+ *     - reserved for the platform owner email + the SUPERADMIN staff seed used by the founders.
+ *
+ *   Platform-owner surface  ↳ requirePlatformOwner (this file)
+ *     - /admin/rooms/.../units/* mutations (physical inventory structure)
+ *     - reserved for the platform owner email only.
+ *
+ *   Owner console (separate router /owner/*) lives in src/routes/owner.ts and uses its own session
+ *   (`requireOwnerAuth`) — never touched by the helpers in this file.
+ *
+ * Hotel partner staff must never reach `/admin/leads` or `/admin/onboard` even if they craft the URL.
+ */
 function isPlatformAcquisitionSession(session: AdminSession | undefined): boolean {
   if (!session) return false;
   if (session.staffId === "STAFF-SUPERADMIN") return true;
@@ -3097,6 +3116,13 @@ function requirePlatformAcquisition(req: Request, res: Response, next: NextFunct
   next();
 }
 
+/**
+ * SaaS boundary helper (stricter): only the configured platform owner email can mutate physical
+ * inventory structure (room units add/rename/toggle). Hotel partner staff — even with ROOMS:MANAGE —
+ * are intentionally blocked, because changing physical room units affects billing capacity and the
+ * SaaS audit trail. Pair with `requirePermission("ROOMS", "MANAGE")` so the route still requires the
+ * tenant-side permission first.
+ */
 function requirePlatformOwner(req: Request, res: Response, next: NextFunction): void {
   const session = getSession(req);
   if (!session) {
@@ -11511,7 +11537,10 @@ adminRouter.post("/room-board/unit/:unitId/send-whatsapp", requirePermission("RO
   redirectInvoice(params);
 });
 
-adminRouter.get("/ai-analytics", requireAuth, async (req, res) => {
+// Hotel-scoped diagnostic dashboard: aiIntent / aiConfidence breakdowns for the active property.
+// Listed in /admin/module/owner (hotel-owner workspace) → must follow the same gate as the rest of /admin/reports-* (REPORTS:VIEW),
+// not platform-acquisition. Tenancy is enforced via activeHotelSlug() like every other /admin route.
+adminRouter.get("/ai-analytics", requirePermission("REPORTS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>AI Analytics</h2><p>No hotel data found.</p>", true));
@@ -12020,7 +12049,9 @@ ${sentNotice}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/booking-funnel", requireAuth, async (req, res) => {
+// Hotel-scoped funnel diagnostic: session → draft → confirmed booking conversion for the active property.
+// Mirrors REPORTS:VIEW gating used elsewhere; not platform-only.
+adminRouter.get("/booking-funnel", requirePermission("REPORTS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Booking Funnel</h2><p>No hotel data found.</p>", true));
@@ -12109,7 +12140,9 @@ adminRouter.get("/booking-funnel", requireAuth, async (req, res) => {
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/routing-health", requireAuth, async (req, res) => {
+// Hotel-scoped routing diagnostic: inbound vs outbound message counts and reply-rate for the active property.
+// REPORTS:VIEW is the right gate (same as other reports), not platform-only.
+adminRouter.get("/routing-health", requirePermission("REPORTS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Routing Health</h2><p>No hotel data found.</p>", true));
