@@ -21,7 +21,19 @@ export type DecisionEventType =
   | "repeat_booking"
   | "lead_contacted"
   | "lead_responded"
-  | "lead_converted";
+  | "lead_converted"
+  /// Phase H marketplace KPI events. Stored as `DECISION_EVENT` AuditLog rows
+  /// so the existing analytics primitives keep working; marketplace-only
+  /// events use the synthetic platform hotelId to mark "no specific tenant".
+  | "marketplace_search"
+  | "marketplace_property_view"
+  | "marketplace_intent_minted"
+  | "marketplace_intent_claimed";
+
+/// Synthetic hotelId used for platform-level decision events (e.g. marketplace
+/// searches that aren't tied to a specific tenant). Mirrors the pattern in
+/// /owner/plans audit-log writes (`PLATFORM_PLAN_*`).
+export const PLATFORM_HOTEL_ID = "PLATFORM";
 
 type TrackParams = {
   hotelId: string;

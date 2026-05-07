@@ -34,6 +34,7 @@ import {
   type MarketplaceOffer,
   type RoomOffer
 } from "../core/availability";
+import { PLATFORM_HOTEL_ID, trackDecisionEventSafe } from "../core/decisionAnalytics";
 
 /// Phase E: how long a marketplace intent token is valid (30 days). After
 /// expiry the wa.me link still opens WhatsApp, but the webhook silently
@@ -336,6 +337,21 @@ marketplaceRouter.get("/search", async (req: Request, res: Response) => {
         : `<div class="grid">${cardsHtml}</div>`}
   `;
 
+  /// Phase H: record the search as a platform-level decision event so the
+  /// /owner/marketplace KPI dashboard can chart searches/day.
+  await trackDecisionEventSafe({
+    hotelId: PLATFORM_HOTEL_ID,
+    eventType: "marketplace_search",
+    metadata: {
+      city: city || null,
+      checkIn: toIsoDate(checkIn),
+      checkOut: toIsoDate(checkOut),
+      guests,
+      rooms,
+      offerCount: offers.length
+    }
+  });
+
   res.type("html").send(renderShell({ title: `Search · ChatAstay marketplace`, body }));
 });
 
@@ -471,6 +487,21 @@ marketplaceRouter.get("/h/:slug", async (req: Request, res: Response) => {
   ).map((p) => p.code);
   const eligible = marketplacePlanCodes.length === 0 || (hotel.subscriptionPlanCode != null && marketplacePlanCodes.includes(hotel.subscriptionPlanCode));
 
+  /// Phase H: record the property view as a per-hotel decision event so the
+  /// KPI dashboard can chart view-to-book conversion per hotel.
+  await trackDecisionEventSafe({
+    hotelId: hotel.id,
+    eventType: "marketplace_property_view",
+    metadata: {
+      slug: hotel.slug,
+      checkIn: toIsoDate(checkIn),
+      checkOut: toIsoDate(checkOut),
+      guests,
+      rooms,
+      eligible
+    }
+  });
+
   res.type("html").send(
     renderShell({
       title: `${hotel.displayName} · ChatAstay`,
@@ -573,6 +604,22 @@ marketplaceRouter.get("/m/start", async (req: Request, res: Response) => {
   const phoneDigits = hotel.whatsappPhone.replace(/\D/g, "");
   const messageText = `Hi! I'd like to book ${hotel.displayName} from ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)} for ${guests} guest${guests > 1 ? "s" : ""}. ${MARKETPLACE_INTENT_MARKER_PREFIX}${token}${MARKETPLACE_INTENT_MARKER_SUFFIX}`;
   const waUrl = `https://wa.me/${encodeURIComponent(phoneDigits)}?text=${encodeURIComponent(messageText)}`;
+
+  /// Phase H: record the intent mint as a per-hotel event for funnel analytics.
+  await trackDecisionEventSafe({
+    hotelId: hotel.id,
+    eventType: "marketplace_intent_minted",
+    metadata: {
+      slug: hotel.slug,
+      token,
+      checkIn: toIsoDate(checkIn),
+      checkOut: toIsoDate(checkOut),
+      guests,
+      rooms
+    },
+    dedupeKey: `intent:${token}`
+  });
+
   res.redirect(waUrl);
 });
 

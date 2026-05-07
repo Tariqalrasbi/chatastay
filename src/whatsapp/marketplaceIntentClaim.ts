@@ -19,6 +19,7 @@
 
 import type { PrismaClient } from "@prisma/client";
 import { prisma as defaultPrisma } from "../db";
+import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 
 export type MarketplaceClaimInput = {
   token: string;
@@ -82,6 +83,18 @@ export async function claimMarketplaceIntent(
     });
 
     return draftRow;
+  });
+
+  /// Phase H: record the intent claim as a per-hotel decision event so the
+  /// KPI dashboard can compute mint-to-claim conversion. Dedupes on the token
+  /// so re-deliveries (rare but possible at the WhatsApp layer) don't double-count.
+  await trackDecisionEventSafe({
+    hotelId: input.hotelId,
+    eventType: "marketplace_intent_claimed",
+    guestId: input.guestId,
+    conversationId: input.conversationId ?? null,
+    metadata: { token: input.token, bookingDraftId: draft.id },
+    dedupeKey: `intent_claim:${input.token}`
   });
 
   return { claimed: true, bookingDraftId: draft.id };

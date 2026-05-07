@@ -587,6 +587,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
         '<a href="/owner/hotels">Hotels</a>',
         '<a href="/owner/plans">Plans</a>',
         '<a href="/owner/subscriptions">Subscriptions</a>',
+        '<a href="/owner/marketplace">Marketplace KPI</a>',
         '<a href="/owner/commissions">Commissions</a>',
       '<a href="/owner/billing">Billing</a>',
       '<a href="/owner/users">Platform Users</a>',
@@ -3473,6 +3474,170 @@ ownerRouter.post("/subscriptions/:id/update", requireOwnerAuth, async (req, res)
     }
   });
   res.redirect("/owner/subscriptions");
+});
+
+// =============================================================================
+// /owner/marketplace — Phase H KPI dashboard
+// -----------------------------------------------------------------------------
+// Read-only funnel + conversion dashboard for the marketplace surface. Built
+// on existing primitives:
+//   • decisionAnalytics events (DECISION_EVENT AuditLog rows) for searches,
+//     property views, intent mints, and intent claims.
+//   • Booking.source = CHATASTAY_MARKETPLACE for confirmed marketplace bookings.
+//   • Commission rows for realized GMV.
+// No new event store. CSV export deferred to a follow-up if needed.
+// =============================================================================
+ownerRouter.get("/marketplace", requireOwnerAuth, async (req, res) => {
+  const days = Math.max(1, Math.min(365, Number(req.query.days ?? 30) || 30));
+  const since = new Date();
+  since.setUTCDate(since.getUTCDate() - days);
+  since.setUTCHours(0, 0, 0, 0);
+
+  const decisionEvents = await prisma.auditLog.findMany({
+    where: {
+      action: "DECISION_EVENT",
+      entityType: "ANALYTICS_EVENT",
+      createdAt: { gte: since }
+    },
+    select: { hotelId: true, metadataJson: true, createdAt: true },
+    orderBy: { createdAt: "desc" },
+    take: 5000
+  });
+
+  type ParsedEvent = { type: string; hotelId: string; createdAt: Date };
+  const parsed: ParsedEvent[] = [];
+  for (const ev of decisionEvents) {
+    if (!ev.metadataJson) continue;
+    try {
+      const meta = JSON.parse(ev.metadataJson) as { eventType?: unknown };
+      if (typeof meta.eventType === "string" && meta.eventType.startsWith("marketplace_")) {
+        parsed.push({ type: meta.eventType, hotelId: ev.hotelId, createdAt: ev.createdAt });
+      }
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const counts = parsed.reduce<Record<string, number>>((acc, ev) => {
+    acc[ev.type] = (acc[ev.type] ?? 0) + 1;
+    return acc;
+  }, {});
+  const searchCount = counts["marketplace_search"] ?? 0;
+  const viewCount = counts["marketplace_property_view"] ?? 0;
+  const mintCount = counts["marketplace_intent_minted"] ?? 0;
+  const claimCount = counts["marketplace_intent_claimed"] ?? 0;
+
+  const marketplaceBookings = await prisma.booking.findMany({
+    where: { source: ChannelProvider.CHATASTAY_MARKETPLACE, createdAt: { gte: since } },
+    select: { id: true, hotelId: true, totalAmount: true, currency: true, status: true }
+  });
+  const bookingCount = marketplaceBookings.length;
+
+  const commissionTotals = await prisma.commission.groupBy({
+    by: ["status", "currency"],
+    where: { createdAt: { gte: since } },
+    _sum: { amountCalc: true },
+    _count: { _all: true }
+  });
+
+  const viewsByHotelId = new Map<string, number>();
+  for (const ev of parsed) {
+    if (ev.type !== "marketplace_property_view") continue;
+    if (ev.hotelId === "PLATFORM") continue;
+    viewsByHotelId.set(ev.hotelId, (viewsByHotelId.get(ev.hotelId) ?? 0) + 1);
+  }
+  const bookingsByHotelId = marketplaceBookings.reduce<Map<string, number>>((acc, b) => {
+    acc.set(b.hotelId, (acc.get(b.hotelId) ?? 0) + 1);
+    return acc;
+  }, new Map());
+
+  const topHotelIds = Array.from(new Set([...viewsByHotelId.keys(), ...bookingsByHotelId.keys()]));
+  const topHotelRows = topHotelIds.length
+    ? await prisma.hotel.findMany({
+        where: { id: { in: topHotelIds } },
+        select: { id: true, displayName: true, slug: true, currency: true }
+      })
+    : [];
+  const topHotelById = new Map(topHotelRows.map((h) => [h.id, h]));
+  const topHotels = topHotelIds
+    .map((id) => {
+      const h = topHotelById.get(id);
+      const views = viewsByHotelId.get(id) ?? 0;
+      const books = bookingsByHotelId.get(id) ?? 0;
+      const conversionPct = views > 0 ? (books / views) * 100 : 0;
+      return { id, name: h?.displayName ?? "(unknown)", slug: h?.slug, views, books, conversionPct };
+    })
+    .sort((a, b) => b.books - a.books || b.views - a.views)
+    .slice(0, 10);
+
+  const searchToView = searchCount > 0 ? (viewCount / searchCount) * 100 : 0;
+  const viewToMint = viewCount > 0 ? (mintCount / viewCount) * 100 : 0;
+  const mintToClaim = mintCount > 0 ? (claimCount / mintCount) * 100 : 0;
+  const claimToBook = claimCount > 0 ? (bookingCount / claimCount) * 100 : 0;
+  const overallSearchToBook = searchCount > 0 ? (bookingCount / searchCount) * 100 : 0;
+
+  function kpi(label: string, value: string, sub?: string): string {
+    return `<div class="card" style="flex:1;min-width:160px"><div class="muted" style="font-size:12px">${escapeHtml(label)}</div><div style="font-size:24px;font-weight:800">${value}</div>${sub ? `<div class="muted" style="font-size:11px">${escapeHtml(sub)}</div>` : ""}</div>`;
+  }
+
+  const commissionCards = commissionTotals
+    .map((t) => {
+      const cls = t.status === "EARNED" ? "ok" : t.status === "REVERSED" ? "alert" : "pending";
+      return `<div class="card" style="flex:1;min-width:160px"><div class="muted" style="font-size:12px">Commissions ${escapeHtml(t.status)} (${t.currency})</div><div style="font-size:20px;font-weight:800"><span class="badge ${cls}">${t._count._all}</span> · ${formatMoney(t._sum.amountCalc ?? 0, t.currency)}</div></div>`;
+    })
+    .join("");
+
+  const topHotelRowsHtml = topHotels
+    .map(
+      (h) => `<tr>
+      <td><a class="inline-link" href="${h.slug ? `/h/${encodeURIComponent(h.slug)}` : "#"}">${escapeHtml(h.name)}</a></td>
+      <td>${h.views}</td>
+      <td>${h.books}</td>
+      <td>${h.conversionPct.toFixed(1)}%</td>
+    </tr>`
+    )
+    .join("");
+
+  const content = `
+    <h2>Marketplace KPI</h2>
+    <p class="muted">Funnel + conversion for the public ChatAstay marketplace. Window: last <strong>${days}</strong> days.</p>
+    <form method="get" action="/owner/marketplace" style="margin:8px 0 16px">
+      <label>Window (days)
+        <select name="days" onchange="this.form.submit()" style="padding:6px;border:1px solid #d8dee6;border-radius:8px;margin-left:6px">
+          ${[7, 14, 30, 60, 90, 180, 365].map((n) => `<option value="${n}" ${n === days ? "selected" : ""}>${n}</option>`).join("")}
+        </select>
+      </label>
+    </form>
+
+    <h3 style="margin:16px 0 8px;font-size:16px">Funnel volumes</h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      ${kpi("Searches", String(searchCount), "/search hits")}
+      ${kpi("Property views", String(viewCount), "/h/:slug hits")}
+      ${kpi("Intents minted", String(mintCount), "/m/start tokens")}
+      ${kpi("Intents claimed", String(claimCount), "WhatsApp side picked up token")}
+      ${kpi("Marketplace bookings", String(bookingCount), "Booking.source = CHATASTAY_MARKETPLACE")}
+    </div>
+
+    <h3 style="margin:24px 0 8px;font-size:16px">Funnel conversion</h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      ${kpi("Search → View", `${searchToView.toFixed(1)}%`, `${viewCount} of ${searchCount}`)}
+      ${kpi("View → Mint", `${viewToMint.toFixed(1)}%`, `${mintCount} of ${viewCount}`)}
+      ${kpi("Mint → Claim", `${mintToClaim.toFixed(1)}%`, `${claimCount} of ${mintCount}`)}
+      ${kpi("Claim → Book", `${claimToBook.toFixed(1)}%`, `${bookingCount} of ${claimCount}`)}
+      ${kpi("Search → Book", `${overallSearchToBook.toFixed(2)}%`, "end-to-end conversion")}
+    </div>
+
+    <h3 style="margin:24px 0 8px;font-size:16px">Realized commissions</h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${commissionCards || '<div class="card muted" style="flex:1">No commissions in window.</div>'}</div>
+
+    <h3 style="margin:24px 0 8px;font-size:16px">Top hotels by marketplace activity</h3>
+    <table>
+      <thead><tr><th>Hotel</th><th>Views</th><th>Bookings</th><th>View→Book</th></tr></thead>
+      <tbody>${topHotelRowsHtml || '<tr><td colspan="4">No marketplace activity in window.</td></tr>'}</tbody>
+    </table>
+
+    <p class="muted" style="margin-top:18px;font-size:12px">Tip: marketplace events use the existing decisionAnalytics audit-log primitives (no new event store). To enable full marketplace exposure, set <a class="inline-link" href="/owner/plans">Plan.supportsMarketplace</a> on at least one plan.</p>`;
+  res.type("html").send(ownerLayout(content, true));
 });
 
 // =============================================================================
