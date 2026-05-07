@@ -280,6 +280,19 @@ enum HousekeepingAssignmentMode {
   SELF_CLAIMED
 }
 
+/// SaaS lifecycle for a Property (physical building inside a Hotel tenant).
+/// Operational paths (bookings, WhatsApp routing, property switcher, automation) must only see ACTIVE properties.
+/// DRAFT = newly onboarded, not yet ready for guests.
+/// ACTIVE = fully operational; this is the default for existing data and new onboardings.
+/// SUSPENDED = temporary pause (billing dispute, owner request); reversible via owner console.
+/// ARCHIVED = permanently closed; kept for historical reporting only.
+enum PropertyStatus {
+  DRAFT
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
 model Hotel {
   id                     String                  @id @default(cuid())
   slug                   String                  @unique
@@ -463,6 +476,13 @@ model Property {
   addressLine1     String?
   checkInTime      String?
   checkOutTime     String?
+  /// SaaS lifecycle. Existing rows are migrated to ACTIVE so behaviour is preserved on upgrade.
+  /// Only ACTIVE properties may participate in bookings, WhatsApp routing, property-switcher, and automation jobs.
+  status           PropertyStatus    @default(ACTIVE)
+  /// Set when transitioning to SUSPENDED/ARCHIVED so the owner console can show "since when".
+  statusChangedAt  DateTime?
+  /// Free-text reason captured at the moment of suspension/archival; surfaced in the owner console.
+  statusReason     String?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   roomTypes        RoomType[]

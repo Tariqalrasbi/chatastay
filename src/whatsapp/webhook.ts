@@ -304,7 +304,7 @@ whatsappWebhookRouter.post("/", async (req, res) => {
 
 import { Router } from "express";
 import { extractSingleDates, parseGuestMessage } from "../core/parse";
-import { ChannelProvider, ConversationState, MessageDirection } from "@prisma/client";
+import { ChannelProvider, ConversationState, MessageDirection, PropertyStatus } from "@prisma/client";
 import { prisma } from "../db";
 import {
   findAvailableRoomType as findAvailableRoomTypeShared,
@@ -1052,9 +1052,14 @@ async function getHotelRuntimeContext(hotelId: string): Promise<{
   if (cached && cached.expiresAt > now) {
     return cached;
   }
+  // SaaS lifecycle: WhatsApp guest-facing context must only reflect ACTIVE properties.
+  // A DRAFT/SUSPENDED/ARCHIVED property's check-in/check-out times must never leak into guest replies.
   const [hotelProfile, primaryProperty, cheapestRoomType] = await Promise.all([
     prisma.hotel.findUnique({ where: { id: hotelId }, select: { city: true, country: true } }),
-    prisma.property.findFirst({ where: { hotelId }, orderBy: { createdAt: "asc" } }),
+    prisma.property.findFirst({
+      where: { hotelId, status: PropertyStatus.ACTIVE },
+      orderBy: { createdAt: "asc" }
+    }),
     prisma.roomType.findFirst({ where: { hotelId, isActive: true }, orderBy: { baseNightlyRate: "asc" } })
   ]);
   const next = {
@@ -1920,7 +1925,10 @@ whatsappWebhookRouter.post("/", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const property = await prisma.property.findFirst({ where: { id: availableOffer.propertyId } });
+    // Defense in depth: even if a stale offer pointed to a non-ACTIVE property, refuse the booking.
+    const property = await prisma.property.findFirst({
+      where: { id: availableOffer.propertyId, status: PropertyStatus.ACTIVE }
+    });
     if (!property) {
       await sendReply(texts.unavailable, "WAITING_EDIT", ConversationState.QUALIFYING);
       return res.sendStatus(200);

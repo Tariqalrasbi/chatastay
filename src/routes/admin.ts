@@ -24,6 +24,7 @@ import {
   OutletTicketSource,
   OutletTicketStatus,
   PaymentStatus,
+  PropertyStatus,
   SegmentTagKind,
   SegmentTagSource,
   UserRole
@@ -346,8 +347,11 @@ function isScopedPropertyId(propertyId: string | null | undefined): propertyId i
 
 async function resolveActivePropertyIdForHotel(req: Request, hotelId: string): Promise<string | null> {
   const session = getSession(req);
+  // SaaS lifecycle: the property switcher and operational paths must only see ACTIVE properties.
+  // DRAFT (still being onboarded), SUSPENDED (paused), and ARCHIVED (closed) are intentionally excluded
+  // so a stale session cannot pin an operational request to a non-operational property.
   const properties = await prisma.property.findMany({
-    where: { hotelId },
+    where: { hotelId, status: PropertyStatus.ACTIVE },
     select: { id: true },
     orderBy: { createdAt: "asc" }
   });
@@ -4501,8 +4505,9 @@ authRouter.get("/property-context", async (req, res) => {
     res.status(404).json({ ok: false, error: "hotel_not_found" });
     return;
   }
+  // Property-context API only exposes ACTIVE properties — DRAFT/SUSPENDED/ARCHIVED are owner-console-only.
   const properties = await prisma.property.findMany({
-    where: { hotelId: hotel.id },
+    where: { hotelId: hotel.id, status: PropertyStatus.ACTIVE },
     select: { id: true, name: true, city: true },
     orderBy: { createdAt: "asc" }
   });
@@ -4536,15 +4541,19 @@ authRouter.post("/property-context", async (req, res) => {
     return;
   }
   if (propertyId === allPropertiesKey) {
-    const propertyCount = await prisma.property.count({ where: { hotelId: hotel.id } });
+    // "All properties" only makes sense when 2+ ACTIVE properties exist; non-ACTIVE properties are owner-console-only.
+    const propertyCount = await prisma.property.count({
+      where: { hotelId: hotel.id, status: PropertyStatus.ACTIVE }
+    });
     if (propertyCount > 1) {
       session.activePropertyId = allPropertiesKey;
       res.json({ ok: true, activePropertyId: allPropertiesKey });
       return;
     }
   }
+  // Refuse to switch into a non-ACTIVE property — DRAFT/SUSPENDED/ARCHIVED are not operational.
   const property = await prisma.property.findFirst({
-    where: { id: propertyId, hotelId: hotel.id },
+    where: { id: propertyId, hotelId: hotel.id, status: PropertyStatus.ACTIVE },
     select: { id: true }
   });
   if (!property) {
@@ -8043,7 +8052,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
 
   const unit = await prisma.roomUnit.findFirst({
     where: { id: roomUnitId, hotelId: hotel.id, isActive: true },
-    include: { roomType: true }
+    include: { roomType: { include: { property: { select: { status: true, name: true } } } } }
   });
   if (!unit) {
     await fail("Room unit not found.");
@@ -8052,6 +8061,15 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
   const rt = unit.roomType;
   if (!rt.isActive) {
     await fail("Room type is inactive.");
+    return;
+  }
+  // Property lifecycle guard: refuse a brand-new check-in on a non-ACTIVE property. Existing bookings on
+  // a property that was just suspended can still be checked out / billed (wind-down path), but creating a
+  // new stay on DRAFT/SUSPENDED/ARCHIVED would silently bypass the platform-owner control.
+  if (rt.property?.status !== PropertyStatus.ACTIVE) {
+    await fail(
+      `Cannot start a check-in: the property "${rt.property?.name ?? ""}" is ${String(rt.property?.status ?? "unknown")}. Reactivate it in the platform owner console first.`
+    );
     return;
   }
   const occ = manualCheckInFitsRoomType(rt, adults, children);

@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, Prisma, SubscriptionStatus, UserRole } from "@prisma/client";
+import { ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, Prisma, PropertyStatus, SubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerSetup";
 import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
@@ -2057,6 +2057,72 @@ ownerRouter.post("/hotels/:id/toggle-active", requireOwnerAuth, async (req, res)
   res.redirect("/owner/hotels");
 });
 
+/**
+ * Transition a Property between SaaS lifecycle states (DRAFT/ACTIVE/SUSPENDED/ARCHIVED).
+ * Safety rails:
+ *   - target must be a known PropertyStatus value
+ *   - if leaving ACTIVE, the tenant must keep at least one other ACTIVE property
+ *     (a hotel with zero ACTIVE properties is operationally dead — bookings, WhatsApp,
+ *     and switcher all go blank, which is almost certainly an accident)
+ *   - every transition writes an AuditLog entry on the surviving hotel for traceability
+ */
+ownerRouter.post("/hotels/:id/properties/:propertyId/status", requireOwnerAuth, async (req, res) => {
+  const hotelId = String(req.params.id ?? "");
+  const propertyId = String(req.params.propertyId ?? "");
+  const rawStatus = String((req.body as { status?: unknown })?.status ?? "").trim();
+  const reason = String((req.body as { reason?: unknown })?.reason ?? "").trim().slice(0, 200) || null;
+  const validStatuses: ReadonlyArray<PropertyStatus> = [
+    PropertyStatus.DRAFT,
+    PropertyStatus.ACTIVE,
+    PropertyStatus.SUSPENDED,
+    PropertyStatus.ARCHIVED
+  ];
+  if (!validStatuses.includes(rawStatus as PropertyStatus)) {
+    res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}?propertyStatus=invalid`);
+    return;
+  }
+  const nextStatus = rawStatus as PropertyStatus;
+  const property = await prisma.property.findFirst({
+    where: { id: propertyId, hotelId },
+    select: { id: true, status: true, name: true, hotelId: true }
+  });
+  if (!property) {
+    res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}?propertyStatus=invalid`);
+    return;
+  }
+  if (property.status === nextStatus) {
+    res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}?propertyStatus=updated`);
+    return;
+  }
+  if (property.status === PropertyStatus.ACTIVE && nextStatus !== PropertyStatus.ACTIVE) {
+    const otherActive = await prisma.property.count({
+      where: { hotelId, status: PropertyStatus.ACTIVE, id: { not: property.id } }
+    });
+    if (otherActive === 0) {
+      res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}?propertyStatus=last_active`);
+      return;
+    }
+  }
+  await prisma.property.update({
+    where: { id: property.id },
+    data: { status: nextStatus, statusChangedAt: new Date(), statusReason: reason }
+  });
+  await logOwnerAudit({
+    hotelId,
+    action: `PROPERTY_STATUS_${nextStatus}`,
+    entityType: "Property",
+    entityId: property.id,
+    metadata: {
+      propertyId: property.id,
+      propertyName: property.name,
+      previousStatus: property.status,
+      nextStatus,
+      reason
+    }
+  });
+  res.redirect(`/owner/hotels/${encodeURIComponent(hotelId)}?propertyStatus=updated`);
+});
+
 ownerRouter.get("/hotels/:id/setup", requireOwnerAuth, async (req, res) => {
   if (!canManageRoomCapacity(req)) {
     res.status(403).type("html").send(ownerLayout("<h2>Hotel Setup</h2><p>Access denied.</p>", true));
@@ -2638,6 +2704,7 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
     where: { id: hotelId },
     include: {
       roomTypes: { where: { isActive: true }, orderBy: { name: "asc" } },
+      properties: { orderBy: { createdAt: "asc" } },
       bookings: { orderBy: { createdAt: "desc" }, take: 10, include: { guest: true, roomType: true } },
       conversations: { orderBy: { createdAt: "desc" }, take: 10 },
       subscriptions: {
@@ -2655,6 +2722,60 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
   }
 
   const sub = hotel.subscriptions[0];
+  const propertyStatusFlash =
+    typeof req.query.propertyStatus === "string" ? String(req.query.propertyStatus) : "";
+  const propertyStatusFlashHtml =
+    propertyStatusFlash === "updated"
+      ? '<p class="badge ok" style="margin:8px 0 0">Property status updated.</p>'
+      : propertyStatusFlash === "invalid"
+        ? '<p class="badge alert" style="margin:8px 0 0">Refused: invalid status target.</p>'
+        : propertyStatusFlash === "last_active"
+          ? '<p class="badge alert" style="margin:8px 0 0">Refused: this is the last ACTIVE property for the tenant. Activate another before suspending or archiving this one.</p>'
+          : "";
+  const propertyStatusBadge = (status: string): string => {
+    if (status === PropertyStatus.ACTIVE) return '<span class="badge ok">Active</span>';
+    if (status === PropertyStatus.DRAFT) return '<span class="badge pending">Draft</span>';
+    if (status === PropertyStatus.SUSPENDED) return '<span class="badge alert">Suspended</span>';
+    if (status === PropertyStatus.ARCHIVED) return '<span class="badge alert">Archived</span>';
+    return `<span class="badge">${escapeHtml(status)}</span>`;
+  };
+  const renderPropertyTransitionForm = (
+    propertyId: string,
+    currentStatus: string,
+    targetStatus: PropertyStatus,
+    label: string
+  ): string => {
+    if (currentStatus === targetStatus) return "";
+    return `<form method="post" action="/owner/hotels/${encodeURIComponent(hotel.id)}/properties/${encodeURIComponent(propertyId)}/status" style="display:inline-block;margin:0 4px 4px 0">
+      <input type="hidden" name="status" value="${escapeHtml(targetStatus)}" />
+      <input type="hidden" name="reason" value="" />
+      <button type="submit" class="btn-link" onclick="return confirm('Move this property to ${escapeHtml(targetStatus)}?')">${escapeHtml(label)}</button>
+    </form>`;
+  };
+  const propertyRows = hotel.properties
+    .map((property) => {
+      const transitions = [
+        renderPropertyTransitionForm(property.id, property.status, PropertyStatus.ACTIVE, "Activate"),
+        renderPropertyTransitionForm(property.id, property.status, PropertyStatus.DRAFT, "Move to draft"),
+        renderPropertyTransitionForm(property.id, property.status, PropertyStatus.SUSPENDED, "Suspend"),
+        renderPropertyTransitionForm(property.id, property.status, PropertyStatus.ARCHIVED, "Archive")
+      ]
+        .filter(Boolean)
+        .join("");
+      const statusContext = property.statusChangedAt
+        ? `<div class="muted" style="font-size:11px;margin-top:2px">Since ${escapeHtml(formatDate(property.statusChangedAt))}${
+            property.statusReason ? ` · ${escapeHtml(property.statusReason)}` : ""
+          }</div>`
+        : "";
+      return `<tr>
+        <td><strong>${escapeHtml(property.name)}</strong>${
+          property.city ? `<div class="muted" style="font-size:11px">${escapeHtml(property.city)}</div>` : ""
+        }</td>
+        <td>${propertyStatusBadge(property.status)}${statusContext}</td>
+        <td>${transitions || '<span class="muted">No transitions available.</span>'}</td>
+      </tr>`;
+    })
+    .join("");
   const bookingRows = hotel.bookings
     .map(
       (booking) => `<tr>
@@ -2705,6 +2826,15 @@ ownerRouter.get("/hotels/:id", requireOwnerAuth, async (req, res) => {
     </table>
   </section>
 </div>
+<section style="margin-top:14px">
+  <h3>Properties (SaaS lifecycle)</h3>
+  <p class="muted" style="font-size:12px;margin:0 0 8px">DRAFT/SUSPENDED/ARCHIVED properties are hidden from booking, WhatsApp, and the property switcher. Only ACTIVE properties are operational.</p>
+  ${propertyStatusFlashHtml}
+  <table>
+    <thead><tr><th>Property</th><th>Status</th><th>Transitions</th></tr></thead>
+    <tbody>${propertyRows || '<tr><td colspan="3">No properties yet.</td></tr>'}</tbody>
+  </table>
+</section>
 <section style="margin-top:14px">
   <h3>Recent Bookings</h3>
   <table>

@@ -1,4 +1,4 @@
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, PropertyStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { inventoryDayRangeExclusive } from "./inventoryDate";
 import { roomTypeAllowsOccupancy } from "./roomOccupancy";
@@ -50,8 +50,16 @@ export async function findAvailableRoomType(params: {
   if (nights <= 0) return null;
 
   const capacityPerRoom = Math.ceil(params.guests / Math.max(1, params.rooms));
+  // SaaS lifecycle: never quote / book on a non-ACTIVE property. RoomType.isActive is property-staff configurable;
+  // Property.status is platform-controlled (DRAFT during onboarding, SUSPENDED for billing/owner action, ARCHIVED on close)
+  // so both gates must pass for a room type to be eligible.
   const roomTypes = await prisma.roomType.findMany({
-    where: { hotelId: params.hotelId, isActive: true, capacity: { gte: capacityPerRoom } },
+    where: {
+      hotelId: params.hotelId,
+      isActive: true,
+      capacity: { gte: capacityPerRoom },
+      property: { status: PropertyStatus.ACTIVE }
+    },
     orderBy: { baseNightlyRate: "asc" }
   });
 
@@ -116,8 +124,14 @@ export async function findAvailableRoomTypes(params: {
   if (nights <= 0) return [];
 
   const capacityPerRoom = Math.ceil(params.guests / Math.max(1, params.rooms));
+  // Mirror of findAvailableRoomType(): exclude room types whose Property is non-ACTIVE.
   const roomTypes = await prisma.roomType.findMany({
-    where: { hotelId: params.hotelId, isActive: true, capacity: { gte: capacityPerRoom } },
+    where: {
+      hotelId: params.hotelId,
+      isActive: true,
+      capacity: { gte: capacityPerRoom },
+      property: { status: PropertyStatus.ACTIVE }
+    },
     orderBy: { baseNightlyRate: "asc" }
   });
 

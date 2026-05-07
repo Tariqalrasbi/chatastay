@@ -7,7 +7,7 @@
  */
 import "dotenv/config";
 import request from "supertest";
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, PropertyStatus } from "@prisma/client";
 import { createHttpApp } from "../src/httpApp";
 import { prisma } from "../src/db";
 import { addDays, startOfDay, toIsoDate } from "../src/core/availability";
@@ -40,6 +40,27 @@ function ymdLocal(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+async function assertActivePropertyExists(): Promise<void> {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: HOTEL_SLUG }, select: { id: true } });
+  if (!hotel) {
+    fail(`property lifecycle: demo hotel '${HOTEL_SLUG}' not found in DB`);
+    return;
+  }
+  const allProperties = await prisma.property.count({ where: { hotelId: hotel.id } });
+  const activeProperties = await prisma.property.count({
+    where: { hotelId: hotel.id, status: PropertyStatus.ACTIVE }
+  });
+  assert(allProperties > 0, "property lifecycle: demo hotel has at least one Property row");
+  assert(
+    activeProperties >= 1,
+    "property lifecycle: demo hotel has >=1 ACTIVE property (operational paths must be unblocked)"
+  );
+  assert(
+    activeProperties === allProperties,
+    "property lifecycle: existing properties were migrated to ACTIVE (no DRAFT/SUSPENDED/ARCHIVED leftovers)"
+  );
+}
+
 function assertDigestTimezoneWindow(): void {
   const tz = "Asia/Muscat";
   const sampleUtc = new Date("2026-05-07T08:00:00.000Z");
@@ -63,6 +84,7 @@ async function main(): Promise<void> {
   assertDigestTimezoneWindow();
 
   await prisma.$connect();
+  await assertActivePropertyExists();
 
   const hotel =
     (await prisma.hotel.findUnique({ where: { slug: HOTEL_SLUG }, select: { id: true, displayName: true } })) ??
