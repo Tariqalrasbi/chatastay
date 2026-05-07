@@ -69,9 +69,9 @@ async function describe(slug) {
     outletCodes: (
       await prisma.outlet.findMany({
         where: { hotelId: hotel.id },
-        select: { code: true, displayName: true, isActive: true }
+        select: { code: true, name: true, outletType: true, isActive: true }
       })
-    ).map((o) => `${o.code} · ${o.displayName} (${o.isActive ? "active" : "inactive"})`),
+    ).map((o) => `${o.code} · ${o.name} · ${o.outletType} (${o.isActive ? "active" : "inactive"})`),
     userEmails: (
       await prisma.hotelUser.findMany({
         where: { hotelId: hotel.id },
