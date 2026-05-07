@@ -305,6 +305,13 @@ model Hotel {
   currency               String                  @default("OMR")
   whatsappPhone          String?
   isActive               Boolean                 @default(true)
+  /// Cached subscription posture (mirror of latest Subscription.plan.code) for fast read-side checks.
+  /// Source-of-truth remains the Subscription/Plan rows; refreshed by /owner UI on plan/subscription changes.
+  subscriptionPlanCode   String?
+  /// Cached subscription status (mirror of latest Subscription.status). Same provenance rules as above.
+  subscriptionStatusCached SubscriptionStatus?
+  /// When the trial ends (mirror of derived value); null when no trial is active.
+  trialEndsAt            DateTime?
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   users                  HotelUser[]

@@ -2,8 +2,9 @@ import { Router, Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, Prisma, PropertyStatus, SubscriptionStatus, UserRole } from "@prisma/client";
+import { BillingCycle, ChannelProvider, InvoiceStatus, MessageDirection, OutletKind, Prisma, PropertyStatus, SubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
+import { getHotelBillingPosture, refreshHotelBillingCache } from "../core/billingPosture";
 import { loadPartnerSetupConfig, savePartnerSetupConfig } from "../core/partnerSetup";
 import { loadOwnerPortfolioKpis } from "../core/ownerPortfolioKpi";
 import { parseKpiPreset } from "../core/managementKpiDashboard";
@@ -584,6 +585,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
         '<a href="/owner/alerts">Alerts</a>',
         '<a href="/owner/digest">Daily digest</a>',
         '<a href="/owner/hotels">Hotels</a>',
+        '<a href="/owner/plans">Plans</a>',
         '<a href="/owner/subscriptions">Subscriptions</a>',
       '<a href="/owner/billing">Billing</a>',
       '<a href="/owner/users">Platform Users</a>',
@@ -3007,6 +3009,314 @@ ownerRouter.post("/hotels/:id/whatsapp", requireOwnerAuth, async (req, res) => {
   res.redirect(`/owner/hotels/${encodeURIComponent(hotel.id)}/whatsapp?updated=1`);
 });
 
+// =============================================================================
+// /owner/plans — Plans CRUD (Phase C-D)
+// -----------------------------------------------------------------------------
+// The Plan model has existed since the initial subscription scaffolding, but
+// only the founder could edit it via direct DB writes. This UI exposes safe
+// CRUD with audit logging so plan changes ride the same approval / traceability
+// rails as every other platform-owner action.
+//
+// Plans are immutable from a billing-history perspective: deactivating a plan
+// hides it from the subscription create UI but does NOT delete it (existing
+// subscriptions keep referencing it). Activations / deactivations are logged
+// as PLATFORM-level audit entries (no hotelId).
+// =============================================================================
+
+const PLAN_AUDIT_HOTEL_ID = "PLATFORM";
+
+async function logPlatformAudit(params: {
+  action: string;
+  entityType: string;
+  entityId?: string;
+  metadata?: Record<string, unknown>;
+  actorEmail?: string;
+}): Promise<void> {
+  const email = params.actorEmail ?? ownerActorEmail;
+  await prisma.auditLog.create({
+    data: {
+      hotelId: PLAN_AUDIT_HOTEL_ID,
+      actorEmail: email,
+      actorUserId: `OWNER:${email}`,
+      action: params.action,
+      entityType: params.entityType,
+      entityId: params.entityId,
+      metadataJson: params.metadata ? JSON.stringify(params.metadata) : undefined
+    }
+  });
+}
+
+function parsePlanFormBody(body: Record<string, unknown>): {
+  code: string;
+  name: string;
+  description: string | null;
+  billingCycle: BillingCycle;
+  monthlyPrice: number;
+  maxProperties: number;
+  maxRoomTypes: number;
+  maxMonthlyConversations: number;
+  supportsChannelManager: boolean;
+  supportsCustomBranding: boolean;
+  supportsAiAutomation: boolean;
+} {
+  const code = String(body.code ?? "").trim();
+  const name = String(body.name ?? "").trim();
+  const description = String(body.description ?? "").trim() || null;
+  const cycleRaw = String(body.billingCycle ?? "MONTHLY").trim().toUpperCase();
+  const billingCycle =
+    cycleRaw === "YEARLY" ? BillingCycle.YEARLY : BillingCycle.MONTHLY;
+  const monthlyPrice = Number(body.monthlyPrice ?? 0);
+  const maxProperties = Math.max(1, Math.floor(Number(body.maxProperties ?? 1)));
+  const maxRoomTypes = Math.max(1, Math.floor(Number(body.maxRoomTypes ?? 20)));
+  const maxMonthlyConversations = Math.max(0, Math.floor(Number(body.maxMonthlyConversations ?? 2000)));
+  const supportsChannelManager = String(body.supportsChannelManager ?? "").trim() === "on";
+  const supportsCustomBranding = String(body.supportsCustomBranding ?? "").trim() === "on";
+  const supportsAiAutomation = String(body.supportsAiAutomation ?? "").trim() === "on";
+  return {
+    code,
+    name,
+    description,
+    billingCycle,
+    monthlyPrice: Number.isFinite(monthlyPrice) && monthlyPrice >= 0 ? monthlyPrice : 0,
+    maxProperties,
+    maxRoomTypes,
+    maxMonthlyConversations,
+    supportsChannelManager,
+    supportsCustomBranding,
+    supportsAiAutomation
+  };
+}
+
+function renderPlanRow(
+  plan: {
+    id: string;
+    code: string;
+    name: string;
+    monthlyPrice: number;
+    billingCycle: BillingCycle;
+    maxProperties: number;
+    maxRoomTypes: number;
+    maxMonthlyConversations: number;
+    supportsChannelManager: boolean;
+    supportsCustomBranding: boolean;
+    supportsAiAutomation: boolean;
+    isActive: boolean;
+    description: string | null;
+  },
+  subscriberCount: number
+): string {
+  const featureBadges = [
+    plan.supportsChannelManager ? '<span class="badge ok">Channel Mgr</span>' : "",
+    plan.supportsCustomBranding ? '<span class="badge ok">Branding</span>' : "",
+    plan.supportsAiAutomation ? '<span class="badge ok">AI</span>' : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `<tr>
+    <td><strong>${escapeHtml(plan.code)}</strong><div class="muted" style="font-size:12px">${escapeHtml(plan.name)}</div></td>
+    <td>${formatMoney(plan.monthlyPrice, "OMR")}<div class="muted" style="font-size:12px">${escapeHtml(plan.billingCycle)}</div></td>
+    <td>${plan.maxProperties} prop / ${plan.maxRoomTypes} rt / ${plan.maxMonthlyConversations} msg</td>
+    <td>${featureBadges || '<span class="muted">—</span>'}</td>
+    <td>${plan.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge alert">Disabled</span>'}</td>
+    <td>${subscriberCount}</td>
+    <td>
+      <div style="display:flex; gap:6px; flex-wrap:wrap">
+        <a class="btn-link" href="/owner/plans/${encodeURIComponent(plan.id)}/edit">Edit</a>
+        <form method="post" action="/owner/plans/${encodeURIComponent(plan.id)}/toggle-active" style="display:inline">
+          <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:${plan.isActive ? "#fee2e2" : "#dcfce7"}; color:${plan.isActive ? "#991b1b" : "#166534"}; font-weight:700; cursor:pointer">${plan.isActive ? "Disable" : "Enable"}</button>
+        </form>
+      </div>
+    </td>
+  </tr>`;
+}
+
+function renderPlanForm(opts: {
+  action: string;
+  submitLabel: string;
+  plan?: {
+    code: string;
+    name: string;
+    description: string | null;
+    billingCycle: BillingCycle;
+    monthlyPrice: number;
+    maxProperties: number;
+    maxRoomTypes: number;
+    maxMonthlyConversations: number;
+    supportsChannelManager: boolean;
+    supportsCustomBranding: boolean;
+    supportsAiAutomation: boolean;
+  };
+  isEdit: boolean;
+}): string {
+  const p = opts.plan;
+  const checked = (b: boolean | undefined): string => (b ? "checked" : "");
+  return `<form method="post" action="${escapeHtml(opts.action)}" style="display:grid; gap:12px; max-width:760px">
+    <label>Code (immutable identifier, e.g. STARTER, PRO)
+      <input name="code" value="${escapeHtml(p?.code ?? "")}" required ${opts.isEdit ? "readonly" : ""} style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%;${opts.isEdit ? "background:#f1f5f9;color:#475569" : ""}" />
+    </label>
+    <label>Display name
+      <input name="name" value="${escapeHtml(p?.name ?? "")}" required style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%" />
+    </label>
+    <label>Description
+      <textarea name="description" rows="2" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%">${escapeHtml(p?.description ?? "")}</textarea>
+    </label>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px">
+      <label>Billing cycle
+        <select name="billingCycle" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%">
+          <option value="MONTHLY" ${p?.billingCycle === BillingCycle.MONTHLY ? "selected" : ""}>MONTHLY</option>
+          <option value="YEARLY" ${p?.billingCycle === BillingCycle.YEARLY ? "selected" : ""}>YEARLY</option>
+        </select>
+      </label>
+      <label>Monthly price (OMR)
+        <input type="number" step="0.01" min="0" name="monthlyPrice" value="${p?.monthlyPrice ?? 0}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%" />
+      </label>
+    </div>
+    <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px">
+      <label>Max properties
+        <input type="number" min="1" name="maxProperties" value="${p?.maxProperties ?? 1}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%" />
+      </label>
+      <label>Max room types
+        <input type="number" min="1" name="maxRoomTypes" value="${p?.maxRoomTypes ?? 20}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%" />
+      </label>
+      <label>Max monthly conversations
+        <input type="number" min="0" name="maxMonthlyConversations" value="${p?.maxMonthlyConversations ?? 2000}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px;width:100%" />
+      </label>
+    </div>
+    <fieldset style="border:1px solid #e2e8f0;border-radius:8px;padding:12px">
+      <legend>Feature flags</legend>
+      <label style="display:block"><input type="checkbox" name="supportsChannelManager" ${checked(p?.supportsChannelManager)} /> Channel manager</label>
+      <label style="display:block"><input type="checkbox" name="supportsCustomBranding" ${checked(p?.supportsCustomBranding)} /> Custom branding</label>
+      <label style="display:block"><input type="checkbox" name="supportsAiAutomation" ${checked(p?.supportsAiAutomation ?? true)} /> AI automation</label>
+    </fieldset>
+    <div style="display:flex; gap:10px">
+      <button type="submit" style="padding:10px 16px; border:0; border-radius:10px; background:#0b6e6e; color:#fff; font-weight:700; cursor:pointer">${escapeHtml(opts.submitLabel)}</button>
+      <a class="btn-link" href="/owner/plans">Cancel</a>
+    </div>
+  </form>`;
+}
+
+ownerRouter.get("/plans", requireOwnerAuth, async (req, res) => {
+  const plans = await prisma.plan.findMany({ orderBy: [{ isActive: "desc" }, { monthlyPrice: "asc" }] });
+  const subscriptionCounts = await prisma.subscription.groupBy({
+    by: ["planId"],
+    _count: { _all: true }
+  });
+  const countByPlan = new Map<string, number>();
+  for (const row of subscriptionCounts) {
+    countByPlan.set(row.planId, row._count._all);
+  }
+
+  const flashUpdated = req.query.updated === "1";
+  const flashCreated = req.query.created === "1";
+  const flashError = typeof req.query.error === "string" ? req.query.error : null;
+
+  const rows = plans.map((p) => renderPlanRow(p, countByPlan.get(p.id) ?? 0)).join("");
+
+  const content = `
+    <h2>Plans</h2>
+    <p class="muted">Subscription plans available to onboarding hotels. Disabling a plan hides it from new sign-ups but keeps existing subscriptions intact.</p>
+    ${flashCreated ? '<div class="alert ok" style="background:#dcfce7;color:#166534;padding:10px 12px;border-radius:8px;margin:12px 0">Plan created.</div>' : ""}
+    ${flashUpdated ? '<div class="alert ok" style="background:#dcfce7;color:#166534;padding:10px 12px;border-radius:8px;margin:12px 0">Plan updated.</div>' : ""}
+    ${flashError ? `<div class="alert" style="background:#fee2e2;color:#991b1b;padding:10px 12px;border-radius:8px;margin:12px 0">${escapeHtml(flashError)}</div>` : ""}
+    <div style="display:flex; justify-content:flex-end; margin:12px 0"><a class="btn-link" href="/owner/plans/new" style="padding:8px 12px;background:#0b6e6e;color:#fff;border-radius:8px;text-decoration:none;font-weight:700">+ New plan</a></div>
+    <table>
+      <thead><tr><th>Code / Name</th><th>Price</th><th>Limits</th><th>Features</th><th>Status</th><th>Subscribers</th><th>Actions</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7">No plans yet — create your first plan.</td></tr>'}</tbody>
+    </table>`;
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.get("/plans/new", requireOwnerAuth, (_req, res) => {
+  const content = `
+    <h2>New plan</h2>
+    <p class="muted">Plan codes are immutable identifiers (use UPPER_SNAKE_CASE). Existing subscriptions reference their plan by id, so renaming or recoding is not supported once a plan has subscribers.</p>
+    ${renderPlanForm({ action: "/owner/plans", submitLabel: "Create plan", isEdit: false })}`;
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/plans", requireOwnerAuth, async (req, res) => {
+  const parsed = parsePlanFormBody(req.body as Record<string, unknown>);
+  if (!parsed.code || !parsed.name) {
+    res.redirect(`/owner/plans?error=${encodeURIComponent("Code and name are required.")}`);
+    return;
+  }
+  const existing = await prisma.plan.findUnique({ where: { code: parsed.code } });
+  if (existing) {
+    res.redirect(`/owner/plans?error=${encodeURIComponent(`Plan code "${parsed.code}" already exists.`)}`);
+    return;
+  }
+  const plan = await prisma.plan.create({ data: parsed });
+  await logPlatformAudit({
+    action: "PLATFORM_PLAN_CREATED",
+    entityType: "Plan",
+    entityId: plan.id,
+    metadata: { code: plan.code, monthlyPrice: plan.monthlyPrice }
+  });
+  res.redirect("/owner/plans?created=1");
+});
+
+ownerRouter.get("/plans/:id/edit", requireOwnerAuth, async (req, res) => {
+  const plan = await prisma.plan.findUnique({ where: { id: String(req.params.id ?? "") } });
+  if (!plan) {
+    res.redirect("/owner/plans?error=Plan+not+found");
+    return;
+  }
+  const content = `
+    <h2>Edit plan</h2>
+    ${renderPlanForm({ action: `/owner/plans/${encodeURIComponent(plan.id)}`, submitLabel: "Save changes", plan, isEdit: true })}`;
+  res.type("html").send(ownerLayout(content, true));
+});
+
+ownerRouter.post("/plans/:id", requireOwnerAuth, async (req, res) => {
+  const plan = await prisma.plan.findUnique({ where: { id: String(req.params.id ?? "") } });
+  if (!plan) {
+    res.redirect("/owner/plans?error=Plan+not+found");
+    return;
+  }
+  const parsed = parsePlanFormBody(req.body as Record<string, unknown>);
+  await prisma.plan.update({
+    where: { id: plan.id },
+    data: {
+      name: parsed.name,
+      description: parsed.description,
+      billingCycle: parsed.billingCycle,
+      monthlyPrice: parsed.monthlyPrice,
+      maxProperties: parsed.maxProperties,
+      maxRoomTypes: parsed.maxRoomTypes,
+      maxMonthlyConversations: parsed.maxMonthlyConversations,
+      supportsChannelManager: parsed.supportsChannelManager,
+      supportsCustomBranding: parsed.supportsCustomBranding,
+      supportsAiAutomation: parsed.supportsAiAutomation
+    }
+  });
+  await logPlatformAudit({
+    action: "PLATFORM_PLAN_UPDATED",
+    entityType: "Plan",
+    entityId: plan.id,
+    metadata: { code: plan.code, name: parsed.name, monthlyPrice: parsed.monthlyPrice }
+  });
+  res.redirect("/owner/plans?updated=1");
+});
+
+ownerRouter.post("/plans/:id/toggle-active", requireOwnerAuth, async (req, res) => {
+  const plan = await prisma.plan.findUnique({ where: { id: String(req.params.id ?? "") } });
+  if (!plan) {
+    res.redirect("/owner/plans?error=Plan+not+found");
+    return;
+  }
+  const updated = await prisma.plan.update({
+    where: { id: plan.id },
+    data: { isActive: !plan.isActive }
+  });
+  await logPlatformAudit({
+    action: updated.isActive ? "PLATFORM_PLAN_ACTIVATED" : "PLATFORM_PLAN_DEACTIVATED",
+    entityType: "Plan",
+    entityId: plan.id,
+    metadata: { code: plan.code }
+  });
+  res.redirect("/owner/plans?updated=1");
+});
+
 ownerRouter.get("/subscriptions", requireOwnerAuth, async (_req, res) => {
   const plans = await prisma.plan.findMany({ where: { isActive: true }, orderBy: { monthlyPrice: "asc" } });
   const subscriptions = await prisma.subscription.findMany({
@@ -3100,6 +3410,7 @@ ownerRouter.post("/subscriptions/:id/set-status", requireOwnerAuth, async (req, 
     where: { id: subscription.id },
     data: { status: status as SubscriptionStatus }
   });
+  await refreshHotelBillingCache(subscription.hotelId);
   await logOwnerAudit({
     hotelId: subscription.hotelId,
     action: status === "ACTIVE" ? "SUBSCRIPTION_ENABLED_BY_OWNER" : "SUBSCRIPTION_DISABLED_BY_OWNER",
@@ -3140,6 +3451,7 @@ ownerRouter.post("/subscriptions/:id/update", requireOwnerAuth, async (req, res)
         : subscription.status
     }
   });
+  await refreshHotelBillingCache(subscription.hotelId);
   await logOwnerAudit({
     hotelId: subscription.hotelId,
     action: "SUBSCRIPTION_UPDATED_BY_OWNER",
