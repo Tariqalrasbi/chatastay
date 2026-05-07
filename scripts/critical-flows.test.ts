@@ -137,8 +137,20 @@ async function main(): Promise<void> {
   const agent = request.agent(app);
 
   {
-    const res = await request(app).get("/");
-    assert(res.status === 200 && res.body?.status === "ok", "GET / health JSON");
+    /// Phase D: `/` serves the marketplace home as HTML by default. JSON health
+    /// probes still get `{status:"ok"}` when they advertise Accept: application/json.
+    const res = await request(app).get("/").set("Accept", "application/json");
+    assert(res.status === 200 && res.body?.status === "ok", "GET / health JSON (Accept: application/json)");
+    const homeHtml = await request(app).get("/").set("Accept", "text/html");
+    assert(
+      homeHtml.status === 200 && homeHtml.text.includes("ChatAstay"),
+      "GET / marketplace home HTML (Accept: text/html)"
+    );
+    const explicit = await request(app).get("/healthz");
+    assert(
+      explicit.status === 200 && explicit.body?.status === "ok",
+      "GET /healthz JSON (always-on monitoring endpoint)"
+    );
   }
 
   {

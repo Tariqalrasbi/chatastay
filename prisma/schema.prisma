@@ -312,6 +312,17 @@ model Hotel {
   subscriptionStatusCached SubscriptionStatus?
   /// When the trial ends (mirror of derived value); null when no trial is active.
   trialEndsAt            DateTime?
+  /// Marketplace marketing fields (Phase D). All nullable; populated from extranet/onboarding.
+  description            String?
+  coverImageUrl          String?
+  /// JSON array of hosted photo URLs in display order.
+  photoUrlsJson          String?
+  /// JSON array of canonical amenity codes (e.g. ["WIFI","POOL","BREAKFAST"]).
+  amenitiesJson          String?
+  /// Self-declared star rating (0.0–5.0); not the same as guest review average.
+  starRating             Float?
+  latitude               Float?
+  longitude              Float?
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   users                  HotelUser[]
@@ -490,6 +501,13 @@ model Property {
   statusChangedAt  DateTime?
   /// Free-text reason captured at the moment of suspension/archival; surfaced in the owner console.
   statusReason     String?
+  /// Marketplace marketing fields (Phase D). All nullable; property-level overrides hotel-level.
+  description      String?
+  coverImageUrl    String?
+  photoUrlsJson    String?
+  amenitiesJson    String?
+  latitude         Float?
+  longitude        Float?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   roomTypes        RoomType[]
@@ -562,6 +580,11 @@ model RoomType {
   baseNightlyRate   Float
   totalInventory    Int                @default(1)
   isActive          Boolean            @default(true)
+  /// Marketplace marketing fields (Phase D). All nullable.
+  description       String?
+  photoUrlsJson     String?
+  /// Free-text bed configuration, e.g. "1 KING" or "2 TWIN".
+  bedConfig         String?
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   inventory         Inventory[]
@@ -1217,6 +1240,9 @@ model Plan {
   supportsChannelManager  Boolean        @default(false)
   supportsCustomBranding  Boolean        @default(false)
   supportsAiAutomation    Boolean        @default(true)
+  /// Phase D: gates appearance on the public marketplace surface (`/` and `/search`).
+  /// Plans can opt-in to marketplace exposure independently of feature flags.
+  supportsMarketplace     Boolean        @default(false)
   isActive                Boolean        @default(true)
   createdAt               DateTime       @default(now())
   updatedAt               DateTime       @updatedAt

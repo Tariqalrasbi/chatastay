@@ -3058,6 +3058,7 @@ function parsePlanFormBody(body: Record<string, unknown>): {
   supportsChannelManager: boolean;
   supportsCustomBranding: boolean;
   supportsAiAutomation: boolean;
+  supportsMarketplace: boolean;
 } {
   const code = String(body.code ?? "").trim();
   const name = String(body.name ?? "").trim();
@@ -3072,6 +3073,7 @@ function parsePlanFormBody(body: Record<string, unknown>): {
   const supportsChannelManager = String(body.supportsChannelManager ?? "").trim() === "on";
   const supportsCustomBranding = String(body.supportsCustomBranding ?? "").trim() === "on";
   const supportsAiAutomation = String(body.supportsAiAutomation ?? "").trim() === "on";
+  const supportsMarketplace = String(body.supportsMarketplace ?? "").trim() === "on";
   return {
     code,
     name,
@@ -3083,7 +3085,8 @@ function parsePlanFormBody(body: Record<string, unknown>): {
     maxMonthlyConversations,
     supportsChannelManager,
     supportsCustomBranding,
-    supportsAiAutomation
+    supportsAiAutomation,
+    supportsMarketplace
   };
 }
 
@@ -3100,6 +3103,7 @@ function renderPlanRow(
     supportsChannelManager: boolean;
     supportsCustomBranding: boolean;
     supportsAiAutomation: boolean;
+    supportsMarketplace: boolean;
     isActive: boolean;
     description: string | null;
   },
@@ -3108,7 +3112,8 @@ function renderPlanRow(
   const featureBadges = [
     plan.supportsChannelManager ? '<span class="badge ok">Channel Mgr</span>' : "",
     plan.supportsCustomBranding ? '<span class="badge ok">Branding</span>' : "",
-    plan.supportsAiAutomation ? '<span class="badge ok">AI</span>' : ""
+    plan.supportsAiAutomation ? '<span class="badge ok">AI</span>' : "",
+    plan.supportsMarketplace ? '<span class="badge ok">Marketplace</span>' : ""
   ]
     .filter(Boolean)
     .join(" ");
@@ -3145,6 +3150,7 @@ function renderPlanForm(opts: {
     supportsChannelManager: boolean;
     supportsCustomBranding: boolean;
     supportsAiAutomation: boolean;
+    supportsMarketplace: boolean;
   };
   isEdit: boolean;
 }): string {
@@ -3187,6 +3193,7 @@ function renderPlanForm(opts: {
       <label style="display:block"><input type="checkbox" name="supportsChannelManager" ${checked(p?.supportsChannelManager)} /> Channel manager</label>
       <label style="display:block"><input type="checkbox" name="supportsCustomBranding" ${checked(p?.supportsCustomBranding)} /> Custom branding</label>
       <label style="display:block"><input type="checkbox" name="supportsAiAutomation" ${checked(p?.supportsAiAutomation ?? true)} /> AI automation</label>
+      <label style="display:block"><input type="checkbox" name="supportsMarketplace" ${checked(p?.supportsMarketplace)} /> Public marketplace exposure</label>
     </fieldset>
     <div style="display:flex; gap:10px">
       <button type="submit" style="padding:10px 16px; border:0; border-radius:10px; background:#0b6e6e; color:#fff; font-weight:700; cursor:pointer">${escapeHtml(opts.submitLabel)}</button>
@@ -3286,7 +3293,8 @@ ownerRouter.post("/plans/:id", requireOwnerAuth, async (req, res) => {
       maxMonthlyConversations: parsed.maxMonthlyConversations,
       supportsChannelManager: parsed.supportsChannelManager,
       supportsCustomBranding: parsed.supportsCustomBranding,
-      supportsAiAutomation: parsed.supportsAiAutomation
+      supportsAiAutomation: parsed.supportsAiAutomation,
+      supportsMarketplace: parsed.supportsMarketplace
     }
   });
   await logPlatformAudit({

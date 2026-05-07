@@ -7,6 +7,7 @@ import { housekeepingRouter } from "./routes/housekeeping";
 import { guestRouter } from "./routes/guest";
 import { ownerRouter } from "./routes/owner";
 import { publicHotelRouter } from "./routes/publicHotel";
+import { marketplaceRouter } from "./routes/marketplace";
 import { whatsappWebhookRouter } from "./whatsapp/webhookRouter";
 
 /**
@@ -22,7 +23,11 @@ export function createHttpApp(): express.Application {
   app.use(express.urlencoded({ extended: true }));
   app.use("/static", express.static(path.join(process.cwd(), "src", "public")));
 
-  app.get("/", (_req, res) => {
+  /// Phase D: explicit JSON health check for monitoring / uptime probes.
+  /// (`/` is now served by the marketplace router; it still returns the same
+  /// `{ status: "ok" }` JSON when the request advertises Accept: application/json
+  /// without text/html — see `wantsJsonHealth` in routes/marketplace.ts.)
+  app.get("/healthz", (_req, res) => {
     res.json({ name: "chatastay", status: "ok" });
   });
   app.get("/reset-password", (req, res) => {
@@ -36,6 +41,9 @@ export function createHttpApp(): express.Application {
   app.use("/admin", adminRouter);
   app.use("/hk", housekeepingRouter);
   app.use("/guest", guestRouter);
+  /// Marketplace mounts at `/` first so `GET /`, `GET /search`, `GET /h/:slug` resolve here.
+  /// `publicHotelRouter` (rating page at `/hotel/:slug`) keeps a non-overlapping prefix.
+  app.use("/", marketplaceRouter);
   app.use("/", publicHotelRouter);
   app.use("/owner", ownerRouter);
   app.use("/whatsapp/webhook", whatsappWebhookRouter);

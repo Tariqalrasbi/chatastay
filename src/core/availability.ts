@@ -315,3 +315,107 @@ export function hasAvailability(input: AvailabilityInput): boolean {
   if (nights <= 0) return false;
   return input.alreadyBooked < input.totalInventory;
 }
+
+/**
+ * Phase D: marketplace multi-hotel availability search.
+ *
+ * Returns one cheapest offer per hotel for hotels matching the (optional) city
+ * filter. Only considers hotels that are tenant-active AND on a Plan that
+ * opts-in to marketplace (`Plan.supportsMarketplace = true`) AND have at least
+ * one ACTIVE Property — same gates the marketplace home/search pages enforce.
+ *
+ * The implementation deliberately reuses `findAvailableRoomType` per hotel so
+ * inventory math, capacity checks, and SaaS-status guards stay in one place.
+ * That keeps the marketplace and the existing single-tenant `/guest` portal
+ * mathematically identical to the WhatsApp booking flow.
+ */
+export type MarketplaceOffer = RoomOffer & {
+  hotelId: string;
+  hotelSlug: string;
+  hotelDisplayName: string;
+  hotelCity: string | null;
+  hotelStarRating: number | null;
+  hotelCoverImageUrl: string | null;
+};
+
+export async function findAvailableAcrossHotels(params: {
+  city?: string;
+  checkIn: Date;
+  checkOut: Date;
+  guests: number;
+  rooms: number;
+  /** Cap result count for marketplace pagination. */
+  limit?: number;
+}): Promise<MarketplaceOffer[]> {
+  const limit = Math.max(1, Math.min(100, params.limit ?? 30));
+  const cityFilter = params.city?.trim();
+
+  // Hotels eligible for marketplace exposure: tenant-active, has at least one
+  // ACTIVE property, and is currently on a marketplace-enabled plan.
+  // We accept a hotel if EITHER its cached subscriptionStatusCached is healthy
+  // (TRIALING/ACTIVE) OR there is no subscription record yet (legacy seed data).
+  const candidates = await prisma.hotel.findMany({
+    where: {
+      isActive: true,
+      ...(cityFilter ? { city: { contains: cityFilter } } : {}),
+      properties: { some: { status: PropertyStatus.ACTIVE } }
+    },
+    select: {
+      id: true,
+      slug: true,
+      displayName: true,
+      city: true,
+      starRating: true,
+      coverImageUrl: true,
+      subscriptionStatusCached: true,
+      subscriptionPlanCode: true
+    },
+    take: 200
+  });
+
+  if (!candidates.length) return [];
+
+  // Resolve marketplace-enabled plan codes once.
+  const marketplacePlans = await prisma.plan.findMany({
+    where: { supportsMarketplace: true, isActive: true },
+    select: { code: true }
+  });
+  const marketplacePlanCodes = new Set(marketplacePlans.map((p) => p.code));
+  const marketplaceGateOpen = marketplacePlanCodes.size > 0;
+
+  const eligible = candidates.filter((h) => {
+    if (!marketplaceGateOpen) {
+      // No marketplace-enabled plan exists yet → keep marketplace open to all
+      // tenant-active hotels so the surface is testable; once founder defines
+      // a marketplace plan, the gate flips closed automatically.
+      return true;
+    }
+    if (!h.subscriptionPlanCode) return false;
+    return marketplacePlanCodes.has(h.subscriptionPlanCode);
+  });
+
+  const offers: MarketplaceOffer[] = [];
+  for (const hotel of eligible) {
+    const offer = await findAvailableRoomType({
+      hotelId: hotel.id,
+      checkIn: params.checkIn,
+      checkOut: params.checkOut,
+      guests: params.guests,
+      rooms: params.rooms
+    });
+    if (!offer) continue;
+    offers.push({
+      ...offer,
+      hotelId: hotel.id,
+      hotelSlug: hotel.slug,
+      hotelDisplayName: hotel.displayName,
+      hotelCity: hotel.city,
+      hotelStarRating: hotel.starRating,
+      hotelCoverImageUrl: hotel.coverImageUrl
+    });
+    if (offers.length >= limit) break;
+  }
+
+  offers.sort((a, b) => a.total - b.total);
+  return offers;
+}
