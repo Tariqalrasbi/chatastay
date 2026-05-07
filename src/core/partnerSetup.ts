@@ -163,11 +163,76 @@ export function loadPartnerSetupConfig(hotelKey = "default"): PartnerSetupConfig
   if (hotelKey === "default") {
     return defaultConfig;
   }
-  const hotelConfig = sanitizePartnerConfig(store.hotels?.[hotelKey]);
+  const rawHotel = store.hotels?.[hotelKey];
+  const hotelConfig = sanitizePartnerConfig(rawHotel);
+  // Channel-isolation guard (multi-tenant): WhatsApp Business phone-number IDs and outlet WhatsApp numbers
+  // must NEVER inherit from the `default` block — only the hotel's own entry can set them. Otherwise one
+  // hotel's WABA id can silently route messages to another hotel.
+  const hotelHasOwnWaba = Boolean(
+    rawHotel && typeof (rawHotel as Record<string, unknown>).whatsappPhoneNumberId === "string"
+  );
+  const hotelHasOwnRestaurant = Boolean(
+    rawHotel && typeof (rawHotel as Record<string, unknown>).outletRestaurantWhatsAppE164 === "string"
+  );
+  const hotelHasOwnCoffee = Boolean(
+    rawHotel && typeof (rawHotel as Record<string, unknown>).outletCoffeeShopWhatsAppE164 === "string"
+  );
+  const hotelHasOwnRoomService = Boolean(
+    rawHotel && typeof (rawHotel as Record<string, unknown>).outletRoomServiceWhatsAppE164 === "string"
+  );
+  const hotelHasOwnActivity = Boolean(
+    rawHotel && typeof (rawHotel as Record<string, unknown>).outletActivityWhatsAppE164 === "string"
+  );
   return {
     ...defaultConfig,
-    ...hotelConfig
+    ...hotelConfig,
+    whatsappPhoneNumberId: hotelHasOwnWaba ? hotelConfig.whatsappPhoneNumberId : "",
+    outletRestaurantWhatsAppE164: hotelHasOwnRestaurant ? hotelConfig.outletRestaurantWhatsAppE164 : "",
+    outletCoffeeShopWhatsAppE164: hotelHasOwnCoffee ? hotelConfig.outletCoffeeShopWhatsAppE164 : "",
+    outletRoomServiceWhatsAppE164: hotelHasOwnRoomService ? hotelConfig.outletRoomServiceWhatsAppE164 : "",
+    outletActivityWhatsAppE164: hotelHasOwnActivity ? hotelConfig.outletActivityWhatsAppE164 : ""
   };
+}
+
+/**
+ * Returns the hotel id (key) currently bound to a given WhatsApp Business phone-number-id, or null when
+ * no hotel has explicitly registered that id. Used by:
+ *  - the inbound webhook resolver (strict tenant routing), and
+ *  - the admin /setup uniqueness validator.
+ *
+ * Only inspects per-hotel entries — the `default` block intentionally does NOT bind a WABA id (see
+ * `loadPartnerSetupConfig`).
+ */
+export function findHotelKeyByWhatsappPhoneNumberId(
+  phoneNumberId: string | null | undefined
+): string | null {
+  const id = (phoneNumberId ?? "").trim();
+  if (!id) return null;
+  const store = loadRawPartnerSetupStore();
+  const hotels = store.hotels ?? {};
+  for (const [hotelKey, raw] of Object.entries(hotels)) {
+    const candidate = (raw as Record<string, unknown> | undefined)?.whatsappPhoneNumberId;
+    if (typeof candidate === "string" && candidate.trim() === id) {
+      return hotelKey;
+    }
+  }
+  return null;
+}
+
+/**
+ * Strict uniqueness check used by admin save handlers: returns the conflicting hotel key if `phoneNumberId`
+ * is already bound to a *different* hotel, else `null`. Empty inputs always pass (cleared assignments are OK).
+ */
+export function findConflictingHotelForWhatsappPhoneNumberId(
+  phoneNumberId: string | null | undefined,
+  exceptHotelKey: string
+): string | null {
+  const id = (phoneNumberId ?? "").trim();
+  if (!id) return null;
+  const owner = findHotelKeyByWhatsappPhoneNumberId(id);
+  if (!owner) return null;
+  if (owner === exceptHotelKey) return null;
+  return owner;
 }
 
 export function savePartnerSetupConfig(config: PartnerSetupConfig, hotelKey = "default"): void {

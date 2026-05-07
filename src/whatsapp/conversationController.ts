@@ -158,12 +158,18 @@ const GLOBAL_RESET_NORMALIZED = [
   "hey",
   "start",
   "menu",
+  "main",
   "main menu",
+  "reset",
   "options",
   "help",
   "home",
   "back to menu",
   "القائمة",
+  "الرئيسية",
+  "ابدأ",
+  "إبدأ",
+  "ابدا",
   "مساعدة",
   "خيارات"
 ];
@@ -2287,6 +2293,9 @@ async function resolveHotel(
   if (!hotels.length) {
     throw new Error("No hotels configured");
   }
+  // Strict per-tenant routing: only match a hotel that has explicitly registered this WABA phone-number-id.
+  // `loadPartnerSetupConfig` no longer inherits `whatsappPhoneNumberId` from the `default` block, so the
+  // match here is unique per property.
   if (inboundPhoneNumberId) {
     for (const hotel of hotels) {
       const config = loadPartnerSetupConfig(hotel.id);
@@ -2300,10 +2309,22 @@ async function resolveHotel(
         };
       }
     }
+    // No hotel claims this inbound phone-number-id. Log loudly so operators see the routing miss; we keep
+    // serving (single-tenant dev / not-yet-configured environments) by using the first hotel and replying via
+    // the inbound id (always valid for the receiving WhatsApp Business token).
+    if (hotels.length > 1) {
+      console.warn(
+        `[whatsapp-routing] No hotel matches inbound phone_number_id=${inboundPhoneNumberId}. ` +
+          `Configure Settings → WhatsApp setup for the receiving property. Falling back to first hotel "${hotels[0].displayName}" for this turn only.`
+      );
+    } else {
+      console.info(
+        `[whatsapp-routing] Single-tenant fallback for inbound phone_number_id=${inboundPhoneNumberId} → ${hotels[0].displayName}.`
+      );
+    }
   }
   const fallback = hotels[0];
   const fallbackConfig = loadPartnerSetupConfig(fallback.id);
-  // If partner JSON still has an old WABA phone ID but the webhook came from a new number, reply using Meta's inbound ID (always valid for this token).
   const outboundPhoneNumberId =
     inboundPhoneNumberId ||
     fallbackConfig.whatsappPhoneNumberId ||
@@ -3922,6 +3943,52 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       return;
     }
     const lang = effectiveLang(persisted.language);
+    // MENU/RESET context routing per hospitality best practice:
+    //  - In-house guest (CHECKED_IN, OCCUPIED room, or in-stay welcome already sent) → in-stay service menu.
+    //  - Otherwise (pre-arrival CONFIRMED, post-checkout, unknown) → standard property welcome / main menu.
+    const inHouseForReset = await findGuestInHouseForServices(hotel.id, guest.id, hotel.timezone);
+    if (inHouseForReset) {
+      const bfReset = await prisma.booking.findUnique({
+        where: { id: inHouseForReset.id },
+        select: {
+          id: true,
+          referenceCode: true,
+          checkIn: true,
+          checkOut: true,
+          roomType: { select: { name: true } }
+        }
+      });
+      if (bfReset) {
+        const inStaySend = await sendInStayServiceMenuForActiveConversation({
+          hotelId: hotel.id,
+          displayName: hotel.displayName,
+          booking: bfReset,
+          conversationId: conversation.id,
+          normalizedPhoneDigits: normalizedPhone,
+          phoneNumberId: hotel.phoneNumberId
+        });
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        await saveConversationSession({
+          hotelId: hotel.id,
+          guestId: guest.id,
+          conversationId: conversation.id,
+          phoneE164: normalizedPhone,
+          state: {
+            language: persisted.language ?? "",
+            stage: "new",
+            lastActivityAt: new Date().toISOString(),
+            conversationMode: "IDLE",
+            awaitingGuestName: false,
+            awaitingBookingLookup: false,
+            myBookingCandidateIds: [],
+            bookingStep: undefined,
+            phoneNumberId: persisted.phoneNumberId ?? hotel.phoneNumberId,
+            lastInStayMenuSentAt: inStaySend.ok ? new Date().toISOString() : persisted.lastInStayMenuSentAt
+          }
+        });
+        return;
+      }
+    }
     const menuPersonalizedReset = personalizeMainMenuBodies(hotel.displayName, lang, {
       memory: guestMemoryBundle.memory,
       confirmedStayCount: guestMemoryBundle.confirmedStayCount
@@ -7069,6 +7136,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       return;
     }
 
+    const mpCode = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
     const booking = await createConfirmedBookingAtomic({
       hotelId: hotel.id,
       guestId: guest.id,
@@ -7081,25 +7149,17 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       adults: adultsForBooking,
       children: childrenForBooking,
       preferredRoomTypeId: persisted.suggestedRoomTypeId,
+      mealPlan: mpCode,
       source: ChannelProvider.WHATSAPP
     });
 
-    const mpCode = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-    const roomStayTotal = booking.totalAmount;
-    const mealPart = computeMealPlanSurchargeForStay({
-      mealPlan: mpCode,
-      adults: adultsForBooking,
-      children: childrenForBooking,
-      nights: booking.nights
-    });
-    const combinedStayTotal = Number((roomStayTotal + mealPart).toFixed(2));
-    await prisma.booking.update({
-      where: { id: booking.bookingId },
-      data: {
-        mealPlan: mpCode === "NONE" ? null : mpCode,
-        totalAmount: combinedStayTotal
-      }
-    });
+    // `bookingService` returns `totalAmount` as the *group-wide* total (room + meal-plan), and per-row
+    // `Booking.totalAmount` already has the meal share evenly distributed across child bookings. We must NOT
+    // re-add the meal surcharge here (would double-count) and must NOT overwrite only the primary booking's
+    // total (would desync child rows). Trust the canonical numbers returned by the booking service.
+    const combinedStayTotal = booking.totalAmount;
+    const mealPart = booking.mealSubtotal;
+    const roomStayTotal = Number((combinedStayTotal - mealPart).toFixed(2));
     await mergeLightGuestMemorySpendingTouch({
       guestId: guest.id,
       totalAmount: combinedStayTotal,
@@ -7183,6 +7243,26 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
 
     const lang = effectiveLang(persisted.language);
+    // Multi-room split summary: show the group reference + every reservation reference so the guest sees
+    // the full picture (one transaction, one group, N reservation numbers). The default behaviour is single
+    // master payer / one folio under the primary reservation; reception can switch to separate bills later.
+    const isMultiRoom = booking.bookingIds.length > 1;
+    const multiRoomLinesEn = isMultiRoom
+      ? [
+          "",
+          `Reservations under this booking (group ref: ${booking.bookingGroupId ?? "—"}):`,
+          ...booking.bookingIds.map((id, idx) => `  • Room ${idx + 1}: ${id}${idx === 0 ? " (primary payer / folio)" : ""}`),
+          "Default: one master folio on the primary reservation. Reply *separate bills* if each room should pay separately, or share guest names per room (e.g. Room 1 — John, Room 2 — Anna)."
+        ]
+      : [];
+    const multiRoomLinesAr = isMultiRoom
+      ? [
+          "",
+          `الحجوزات ضمن هذه الإقامة (رقم المجموعة: ${booking.bookingGroupId ?? "—"}):`,
+          ...booking.bookingIds.map((id, idx) => `  • الغرفة ${idx + 1}: ${id}${idx === 0 ? " (الدافع الرئيسي / الفاتورة)" : ""}`),
+          "افتراضيًا: فاتورة واحدة على الحجز الرئيسي. اكتب *فواتير منفصلة* لتقسيم الفواتير، أو أرسل أسماء الضيوف لكل غرفة (مثال: الغرفة 1 — جون، الغرفة 2 — آنا)."
+        ]
+      : [];
     const confirmationBody =
       lang === "ar"
         ? [
@@ -7194,14 +7274,20 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             `المغادرة: ${checkOut.toISOString().slice(0, 10)}`,
             `الضيوف: ${guests} (${adultsForBooking} بالغ، ${childrenForBooking} طفل)`,
             `الليالي: ${booking.nights}`,
+            `الغرف: ${booking.roomCount}`,
             `إجمالي الإقامة: ${roomStayTotal.toFixed(2)} ${hotel.currency}`,
-            mealPart > 0 ? `إضافة الوجبات (${mpCode}): +${mealPart.toFixed(2)} ${hotel.currency}` : "خطة الوجبات: بدون",
+            mealPart > 0
+              ? `إضافة الوجبات (${mpCode}): ${booking.roomCount} غرفة × ${booking.nights} ليلة = +${mealPart.toFixed(2)} ${hotel.currency}`
+              : "خطة الوجبات: بدون",
             prebookSummaryLine,
             `الإجمالي النهائي: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
             `رقم الحجز: ${booking.bookingId}`,
+            ...multiRoomLinesAr,
             paymentLink
               ? `رابط الدفع الآمن: ${paymentLink}`
-              : "الدفع: لم نتمكن من إنشاء رابط الدفع تلقائيًا الآن. يمكنك الدفع حسب سياسة الفندق، وقد يتواصل معك موظف الاستقبال عند الحاجة."
+              : "الدفع: لم نتمكن من إنشاء رابط الدفع تلقائيًا الآن. يمكنك الدفع حسب سياسة الفندق، وقد يتواصل معك موظف الاستقبال عند الحاجة.",
+            "",
+            "اكتب *MENU* أو *القائمة* للعودة إلى القائمة الرئيسية."
           ]
             .filter((x): x is string => typeof x === "string" && x.length > 0)
             .join("\n")
@@ -7214,20 +7300,24 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             `Check-out: ${checkOut.toISOString().slice(0, 10)}`,
             `Guests: ${guests} (${adultsForBooking} adults, ${childrenForBooking} children)`,
             `Nights: ${booking.nights}`,
+            `Rooms: ${booking.roomCount}`,
             `Room stay total: ${roomStayTotal.toFixed(2)} ${hotel.currency}`,
             mealPart > 0
-              ? `Meal plan surcharge (${mpCode}): +${mealPart.toFixed(2)} ${hotel.currency}`
+              ? `Meal plan (${mpCode}): ${booking.roomCount} room(s) × ${booking.nights} night(s) = +${mealPart.toFixed(2)} ${hotel.currency}`
               : "Meal plan: none",
             prebookSummaryLine,
             `Booking total: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
             `Booking ID: ${booking.bookingId}`,
+            ...multiRoomLinesEn,
             paymentLink
               ? `Secure payment link: ${paymentLink}`
               : payLaterSelected
                 ? "Payment: pay at the hotel according to hotel policy."
                 : paymentLinkMissingSetup
                   ? "Payment: online payment is not enabled by the hotel yet. Your booking is received, and reception will follow up with the payment method."
-                  : "Payment: the secure payment link could not be generated right now. Your booking is received, and reception will follow up with the payment method."
+                  : "Payment: the secure payment link could not be generated right now. Your booking is received, and reception will follow up with the payment method.",
+            "",
+            "Reply *MENU* anytime to return to the main menu."
           ]
             .filter((x): x is string => typeof x === "string" && x.length > 0)
             .join("\n");

@@ -80,7 +80,13 @@ import { createBookingPaymentLink } from "../core/bookingPayments";
 import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { sendInStayWelcomeMenuIfEligible } from "../core/inStayWelcome";
 import { writeManualRoomStatusToNotes as mergeRoomBoardStatusNote } from "../core/roomBoardNotes";
-import { loadPartnerSetupConfig, savePartnerSetupConfig, applyPartnerTemplate, type PartnerSetupConfig } from "../core/partnerSetup";
+import {
+  loadPartnerSetupConfig,
+  savePartnerSetupConfig,
+  applyPartnerTemplate,
+  findConflictingHotelForWhatsappPhoneNumberId,
+  type PartnerSetupConfig
+} from "../core/partnerSetup";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
 import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
 import { createFbOrdersFromMenuLines, getFbFolioForBooking } from "../core/fbFolio";
@@ -19985,10 +19991,24 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
   });
 
   const existingConfig = loadPartnerSetupConfig(hotel.id);
+  const submittedWaba = String(req.body.whatsappPhoneNumberId ?? "").trim();
+  // Multi-tenant safety: a single WhatsApp Business phone-number-id may bind to exactly one hotel.
+  // If the operator tries to assign one that already belongs to a different hotel, refuse the WABA id (keep
+  // the rest of the save) and surface a clear admin notice via redirect query string.
+  const conflictHotelKey = findConflictingHotelForWhatsappPhoneNumberId(submittedWaba, hotel.id);
+  let conflictHotelLabel: string | null = null;
+  if (conflictHotelKey) {
+    const conflictHotel = await prisma.hotel.findUnique({
+      where: { id: conflictHotelKey },
+      select: { displayName: true }
+    });
+    conflictHotelLabel = conflictHotel?.displayName ?? conflictHotelKey;
+  }
+  const safeWaba = conflictHotelKey ? existingConfig.whatsappPhoneNumberId : submittedWaba;
   const nextConfig: PartnerSetupConfig = {
     hotelDescription: String(req.body.hotelDescription ?? "").trim(),
     amenitiesSummary: String(req.body.amenitiesSummary ?? "").trim(),
-    whatsappPhoneNumberId: String(req.body.whatsappPhoneNumberId ?? "").trim(),
+    whatsappPhoneNumberId: safeWaba,
     outletRestaurantWhatsAppE164: String(req.body.outletRestaurantWhatsAppE164 ?? "").trim(),
     outletCoffeeShopWhatsAppE164: String(req.body.outletCoffeeShopWhatsAppE164 ?? "").trim(),
     outletRoomServiceWhatsAppE164: String(req.body.outletRoomServiceWhatsAppE164 ?? "").trim(),
@@ -20032,6 +20052,13 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
     }
   });
 
+  if (conflictHotelKey) {
+    const msg = `WhatsApp+number+${encodeURIComponent(submittedWaba)}+is+already+assigned+to+${encodeURIComponent(
+      conflictHotelLabel ?? conflictHotelKey
+    )}.+It+cannot+be+used+for+two+properties.`;
+    res.redirect(`/admin/setup?sendError=${msg}`);
+    return;
+  }
   res.redirect("/admin/setup?updated=1");
 });
 

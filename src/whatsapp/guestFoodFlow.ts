@@ -601,7 +601,7 @@ export async function advanceFbCartDraft(params: {
         outbound: [
           {
             kind: "buttons",
-            body: "How should this order be served?",
+            body: `Cart:\n${cartSummaryWithSubtotal(draft.cart, currency)}\n\nHow should we serve this order?`,
             buttons: [
               { id: "fb_svc_rs", title: "Room service" },
               { id: "fb_svc_di", title: "Dining" }

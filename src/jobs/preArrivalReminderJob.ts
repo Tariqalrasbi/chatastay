@@ -105,7 +105,9 @@ function buildPreArrival24hBody(params: { guestFirstName: string; hotelName: str
     "",
     `We look forward to welcoming you tomorrow at ${params.hotelName}. Your arrival is planned for ${params.arrivalSummary}.`,
     "",
-    "If you have an estimated time of arrival, special requests, or need directions or assistance before you arrive, simply reply to this message and our team will be glad to help.",
+    "If you have an estimated time of arrival, special requests, or need directions before you arrive, simply reply to this message and our team will be glad to help.",
+    "",
+    "Reply *MENU* anytime to return to the main menu.",
     "",
     `— ${params.hotelName}`
   ].join("\n");
@@ -125,7 +127,9 @@ function buildCheckinDayBody(params: {
     "",
     `Today is your arrival day at ${params.hotelName}. We look forward to welcoming you — your check-in is scheduled for ${params.arrivalSummary}.`,
     "",
-    "When you are on your way or if you need anything (parking, luggage, late arrival), reply here and we will coordinate with you.",
+    "When you are on your way or if you need anything (luggage, late arrival, directions), reply here and we will coordinate with you.",
+    "",
+    "Reply *MENU* anytime to return to the main menu.",
     "",
     `— ${params.hotelName}`
   ].join("\n");

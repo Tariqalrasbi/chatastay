@@ -2,9 +2,15 @@ import { hotelTimezoneOrUtc, readWallClockInZone } from "./guestMessagingSchedul
 
 export type DayPeriod = "morning" | "afternoon" | "evening";
 
+/**
+ * Hospitality-standard day-period bands (matches Booking.com / Airbnb host messaging):
+ *   05:00–11:59 → morning
+ *   12:00–17:59 → afternoon
+ *   18:00–04:59 → evening (covers late-night through early-morning hours before 05:00)
+ */
 export function dayPeriodFromHour24(hour24: number): DayPeriod {
-  if (hour24 < 12) return "morning";
-  if (hour24 < 18) return "afternoon";
+  if (hour24 >= 5 && hour24 < 12) return "morning";
+  if (hour24 >= 12 && hour24 < 18) return "afternoon";
   return "evening";
 }
 

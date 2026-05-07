@@ -189,7 +189,8 @@ async function main(): Promise<void> {
   const base = startOfDay(new Date());
   /** Stagger dates by run so re-executing tests does not hit overlapping stays on the same unit. */
   const runSlot = Math.floor(Date.now() / 1000) % 200;
-  const guestCheckIn = addDays(base, 620 + runSlot);
+  // Use large day offsets (~11+ yrs) so dev DB inventory noise is unlikely to block `assertInventoryCanReserveTx`.
+  const guestCheckIn = addDays(base, 4200 + runSlot);
   const guestCheckOut = addDays(guestCheckIn, 1);
   const guestCheckInStr = toIsoDate(guestCheckIn);
   const guestCheckOutStr = toIsoDate(guestCheckOut);
@@ -215,7 +216,7 @@ async function main(): Promise<void> {
     assert(res.status === 200 && res.text.includes("Booking Confirmed"), "POST /guest/book creates booking (guest flow)");
   }
 
-  const manualCheckIn = addDays(base, 480 + runSlot);
+  const manualCheckIn = addDays(base, 4000 + runSlot);
   const manualCheckOut = addDays(manualCheckIn, 2);
   const departureEarly = addDays(manualCheckIn, 1);
   const manualInStr = ymdLocal(manualCheckIn);
@@ -247,7 +248,18 @@ async function main(): Promise<void> {
       paymentMethod: "",
       bookingChannel: "DIRECT"
     });
-    assert(res.status === 302 && String(res.headers.location ?? "").includes("manualCheckIn=1"), "POST /admin/front-desk/check-in redirects to room board with success flag");
+    const checkInLoc = String(res.headers.location ?? "");
+    if (res.status !== 302 || !checkInLoc.includes("manualCheckIn=1")) {
+      console.error("[test:critical] POST /admin/front-desk/check-in failed assertion — expected 302 → room-board?…manualCheckIn=1 got:", {
+        status: res.status,
+        location: checkInLoc || "(missing — often means 200 HTML validation page)",
+        bodyPreview: res.text.slice(0, 900)
+      });
+    }
+    assert(
+      res.status === 302 && checkInLoc.includes("manualCheckIn=1"),
+      "POST /admin/front-desk/check-in redirects to room board with success flag"
+    );
   }
 
   {
@@ -259,13 +271,13 @@ async function main(): Promise<void> {
     where: {
       hotelId: hotel.id,
       roomUnitId: unit.id,
-      status: BookingStatus.CONFIRMED,
+      status: { in: [BookingStatus.CHECKED_IN, BookingStatus.CONFIRMED] },
       guest: { fullName: "Critical Flow Walk-in" }
     },
     orderBy: { createdAt: "desc" },
     select: { id: true }
   });
-  assert(manualBooking, "Prisma: manual check-in booking exists for walk-in guest (CONFIRMED)");
+  assert(manualBooking, "Prisma: manual check-in booking exists for walk-in guest (CHECKED_IN or CONFIRMED)");
 
   {
     const res = await agent.post("/admin/front-desk/check-out").type("form").send({
