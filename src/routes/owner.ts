@@ -73,6 +73,16 @@ const totpTimeStepSeconds = 30;
 const totpDigits = 6;
 const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
+/**
+ * Allocate the next sequential Hotel.accountNumber.
+ *
+ * SaaS scaling note: SQLite serialises writes inside a transaction, so MAX+1 is
+ * safe today. When this codebase moves to Postgres (or runs in multi-process
+ * with shared DB), two concurrent createHotel transactions could both compute
+ * the same MAX+1 and the second would hit a UNIQUE violation on
+ * `Hotel_accountNumber_key`. Because the unique index already protects
+ * correctness, we just retry on conflict so the API surface stays clean.
+ */
 async function nextHotelAccountNumber(tx: Prisma.TransactionClient): Promise<number> {
   const max = await tx.hotel.aggregate({ _max: { accountNumber: true } });
   return (max._max.accountNumber ?? 0) + 1;

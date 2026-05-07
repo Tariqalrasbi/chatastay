@@ -154,6 +154,39 @@
         padding-top: 10px;
         border-top: 1px solid rgba(255, 255, 255, 0.2);
       }
+      /* Property switcher (top of sidebar). Hidden until JS detects multi-property access. */
+      .sidebar-property-switch {
+        margin: -8px 0 16px;
+      }
+      .sidebar-property-switch[hidden] {
+        display: none !important;
+      }
+      .sidebar-property-switch label {
+        display: block;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        opacity: 0.75;
+        margin-bottom: 4px;
+        color: #fff;
+      }
+      .sidebar-property-switch select {
+        width: 100%;
+        max-width: 100%;
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        background: rgba(255, 255, 255, 0.12);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .sidebar-property-switch select option {
+        color: #0f172a;
+        background: #fff;
+      }
       .top-level-link {
         font-weight: 700;
       }
@@ -772,6 +805,7 @@
           <strong>{{hotelName}}</strong>
           <span>{{hotelSign}}</span>
         </div>
+        {{propertySwitcher}}
         {{userIdentity}}
         <nav class="sidebar-nav">{{navLinks}}</nav>
         <div class="sidebar-logout">{{logoutAction}}</div>

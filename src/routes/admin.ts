@@ -1384,13 +1384,15 @@ function renderLayout(
         : useRestaurantChrome
           ? renderNavLinks([
               { group: "dashboard", href: "/admin/module/restaurant", label: "Today" },
-              canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false
+              canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
+              { group: "account", href: "/admin/setup", label: "Settings" }
             ])
           : useHousekeepingManagerChrome
             ? renderNavLinks([
                 { group: "dashboard", href: "/admin/module/housekeeping", label: "Today" },
                 { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" },
-                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Room grid" } : false
+                canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Room grid" } : false,
+                { group: "account", href: "/admin/setup", label: "Settings" }
               ])
             : useFrontDeskChrome
               ? renderNavLinks([
@@ -1416,10 +1418,11 @@ function renderLayout(
                   { group: "account", href: "/admin/setup", label: "Settings" }
                 ])
     : '<a href="/admin/login">Login</a>';
-  const moduleSwitchHtml =
-    authenticated && workspaces.length > 1
-      ? '<a href="/admin/workspaces" style="margin-right:10px;font-size:12px;font-weight:700;color:#0f172a;text-decoration:none;border:1px solid #d8dee6;padding:6px 10px;border-radius:8px;background:#fff">Workspaces</a>'
-      : "";
+  /// PMS UX cleanup: the dedicated "Workspaces" picker page duplicated sidebar groups
+  /// (Today / Restaurant / Housekeeping / Owner), creating two competing nav systems.
+  /// We removed the picker entry button entirely; the sidebar is now the only operational
+  /// navigation. The chrome variation (owner/front_desk/restaurant/housekeeping) still
+  /// works internally — it just isn't user-switchable from the UI anymore.
   const userIdentityHtml =
     authenticated && sess
       ? `<div class="user-card" title="Signed-in staff identity">
@@ -1428,8 +1431,16 @@ function renderLayout(
           <span>Hotel account: ${escapeHtml(sess.hotelAccountNumber ? `#${sess.hotelAccountNumber}` : "not assigned")}</span>
         </div>`
       : "";
+  /// Property switcher relocated from the bottom of the sidebar (where it was confused
+  /// with "Workspaces") to a top-of-sidebar slot directly under the hotel-card. The IDs
+  /// (`adminPropertySwitchHost`, `adminPropertySwitch`) are unchanged so the existing
+  /// `getAdminPropertySwitcherScript()` still toggles visibility and wires the dropdown
+  /// without modification. Hidden until JS detects >1 accessible property.
+  const propertySwitcherHtml = authenticated
+    ? `<div id="adminPropertySwitchHost" class="sidebar-property-switch" hidden><label for="adminPropertySwitch">Property</label><select id="adminPropertySwitch"></select></div>`
+    : "";
   const logoutHtml = authenticated
-    ? `${moduleSwitchHtml}<span id="adminPropertySwitchHost" style="display:none; align-items:center; gap:6px; margin-right:10px;"><label for="adminPropertySwitch" style="font-size:12px; color:#64748b">Property</label><select id="adminPropertySwitch" style="padding:6px 8px; border:1px solid #d8dee6; border-radius:8px; min-width:180px"></select></span><form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
+    ? `<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
     : "";
   // Hospitality PMS dedup: receptionists were seeing Room rack / Check-in / Check-out twice
   // (in Today and again in Front Desk). The "Today" group is now strictly the briefing surface
@@ -1558,6 +1569,12 @@ function renderLayout(
     ]
   };
   const showFrontDeskSection = canNavRooms || canCreateBookings || canNavBookings;
+  /// One unified sidebar for hotel staff & managers. Reports + Settings are universal,
+  /// gated by their respective permissions (REPORTS:VIEW, USERS:VIEW, BILLING:VIEW) so a
+  /// receptionist (FRONTDESK) does not see Reports while a MANAGER does — without forcing
+  /// either to switch "workspace" to find them. This eliminates the second nav system the
+  /// old workspace picker created (Today / Restaurant / Housekeeping / Owner cards that
+  /// duplicated sidebar groups).
   const fdTabs = renderSections([
     todayTabs,
     canNavBookings ? reservationTabs : false,
@@ -1565,7 +1582,9 @@ function renderLayout(
     canNavRooms ? inventoryTabs : false,
     canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
-    canNavFb ? foodBeverageTabs : false
+    canNavFb ? foodBeverageTabs : false,
+    canNavReports ? reportTabs : false,
+    adminTabs
   ]);
   const ownerTabs = renderSections([
     todayTabs,
@@ -1580,7 +1599,7 @@ function renderLayout(
     reportTabs,
     adminTabs
   ]);
-  const restaurantTabs = renderSections([todayTabs, foodBeverageTabs]);
+  const restaurantTabs = renderSections([todayTabs, foodBeverageTabs, adminTabs]);
   const hkManagerTabs = renderSections([
     todayTabs,
     {
@@ -1590,7 +1609,8 @@ function renderLayout(
         { href: "/admin/room-board", label: "Room board" },
         ...(perm && hasPermission(perm, "BOOKINGS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover" }] : [])
       ]
-    }
+    },
+    adminTabs
   ]);
   const fullTabs = renderSections([
     todayTabs,
@@ -1600,7 +1620,7 @@ function renderLayout(
     canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
     canNavFb ? foodBeverageTabs : false,
-    reportTabs,
+    canNavReports ? reportTabs : false,
     adminTabs
   ]);
   const sectionTabsHtml = authenticated
@@ -1625,6 +1645,7 @@ function renderLayout(
     .replace("{{langSwitcher}}", langSwitcherHtml)
     .replace("{{hotelName}}", escapeHtml(resolvedHotelName))
     .replace("{{hotelSign}}", escapeHtml(resolvedHotelSign))
+    .replace("{{propertySwitcher}}", propertySwitcherHtml)
     .replace("{{userIdentity}}", userIdentityHtml)
     .replace("{{navLinks}}", navHtml)
     .replace("{{sectionTabs}}", sectionTabsHtml)
@@ -1695,7 +1716,8 @@ function getAdminPropertySwitcherScript(): string {
         if (p.id === currentPropertyId) opt.selected = true;
         select.appendChild(opt);
       });
-      host.style.display = "inline-flex";
+      host.removeAttribute("hidden");
+      host.style.display = "";
       decorateLinksAndForms();
       select.addEventListener("change", function () {
         var nextId = String(select.value || "").trim();
@@ -3188,7 +3210,7 @@ function requirePmsModule(workspace: PmsWorkspaceId) {
         .type("html")
         .send(
           renderLayout(
-            '<h2>Module unavailable</h2><p>This workspace is not enabled for your account.</p><p><a class="inline-link" href="/admin/workspaces">Back to workspaces</a></p>',
+            '<h2>Module unavailable</h2><p>This module is not enabled for your account.</p><p><a class="inline-link" href="/admin/profile">Back to home</a></p>',
             true
           )
         );
@@ -3374,6 +3396,12 @@ adminRouter.use((req, res, next) => {
   next();
 });
 
+/// PMS UX cleanup: the workspace picker page used to render 4 cards (Today / Restaurant /
+/// Housekeeping / Owner) that duplicated sidebar groups. Best-practice PMSes (Cloudbeds,
+/// Mews, Opera) do not expose a parallel nav like that. We now redirect the GET to the
+/// user's natural landing page; the sidebar is the single source of operational nav.
+/// `POST /admin/workspaces` is preserved for back-compat (it still flips activeWorkspace
+/// programmatically) but is no longer linked from the UI.
 adminRouter.get("/workspaces", requireAuth, (req, res) => {
   const session = getSession(req)!;
   if (session.role === "HOUSEKEEPING") {
@@ -3381,32 +3409,14 @@ adminRouter.get("/workspaces", requireAuth, (req, res) => {
     return;
   }
   const acc = listAccessibleWorkspaces(session.role, session.permissions as PermissionMatrixLike);
-  if (acc.length <= 1) {
-    res.redirect(acc.length === 1 ? workspaceHomeUrl(acc[0], session.role) : "/admin/profile");
+  if (acc.length === 0) {
+    res.redirect("/admin/profile");
     return;
   }
-  const labels: Record<PmsWorkspaceId, { title: string; desc: string }> = {
-    owner: { title: "Owner / management", desc: "Portfolio, revenue, reports, billing, and account health." },
-    front_desk: { title: "Today / command center", desc: "Arrivals, departures, in-house guests, room rack, folios, and reception." },
-    restaurant: { title: "Restaurant / café", desc: "Menu, orders, KOT, direct sales, and room charges." },
-    housekeeping: { title: "Housekeeping & maintenance", desc: "Cleaning queue, room readiness, room status, and tasks." }
-  };
-  const cards = acc
-    .map((w) => {
-      const meta = labels[w];
-      return `<form method="post" action="/admin/workspaces">
-  <input type="hidden" name="workspace" value="${escapeHtml(w)}" />
-  <button type="submit"><span class="t">${escapeHtml(meta.title)}</span><span class="d">${escapeHtml(meta.desc)}</span></button>
-</form>`;
-    })
-    .join("");
-  const content = `${pmsWorkspacePageStyles}
-<div class="pms-hero">
-  <h1>Choose workspace</h1>
-  <p>Select the PMS workspace that matches the operation you are doing now. You can switch any time from the sidebar.</p>
-</div>
-<div class="pms-picker">${cards}</div>`;
-  res.type("html").send(renderLayout(content, true));
+  const target = session.activeWorkspace && acc.includes(session.activeWorkspace)
+    ? session.activeWorkspace
+    : inferDefaultWorkspace(session.role, session.permissions as PermissionMatrixLike);
+  res.redirect(workspaceHomeUrl(target, session.role));
 });
 
 adminRouter.post("/workspaces", requireAuth, (req, res) => {
