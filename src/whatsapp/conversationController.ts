@@ -61,7 +61,14 @@ import {
   type FoodFlowOutbound
 } from "./guestFoodFlow";
 import { prisma } from "../db";
-import { createRoleRoutedNotification } from "../core/notifications";
+import { createRoleRoutedNotification, type NotificationCategory } from "../core/notifications";
+import {
+  buildOperationalRequestSummary,
+  complaintCategoryLabel,
+  extraItemLabel,
+  housekeepingKindLabel,
+  maintenanceKindLabel
+} from "../core/operationalLabels";
 import { logWhatsAppMessage } from "./messageLogger";
 import {
   answerFromKnowledge,
@@ -1227,13 +1234,23 @@ async function postInStayGuestOpsTask(params: {
   hotelId: string;
   bookingId: string;
   roomUnitId: string | null;
+  /** Hospitality-readable headline shown on the bell + ops feeds (e.g. "Room 13 requested room refresh"). */
   taskTitle: string;
+  /** Concise context lines stored on the housekeeping task notes (guest, booking ref, room). */
   detailLines: string[];
+  /** Operational category — drives bell badge + future filters. Defaults to housekeeping (refresh / extras). */
+  category?: NotificationCategory;
+  /** Human-readable note added to the task body (e.g. "AC issue", "extra pillows ×2"). */
+  noteForTask?: string;
+  sourceType?: string;
 }): Promise<void> {
   if (!params.roomUnitId) {
     throw new Error("no_room_unit");
   }
-  const notes = [params.taskTitle, ...params.detailLines].join("\n").slice(0, 1900);
+  const notes = [params.taskTitle, params.noteForTask, ...params.detailLines]
+    .filter((s) => Boolean(s && String(s).trim()))
+    .join("\n")
+    .slice(0, 1900);
   await prisma.housekeepingTask.create({
     data: {
       hotelId: params.hotelId,
@@ -1244,15 +1261,20 @@ async function postInStayGuestOpsTask(params: {
       notes
     }
   });
+  const category: NotificationCategory = params.category ?? "housekeeping";
+  // Maintenance issues should reach Front Desk + Manager + Housekeeping (no MAINTENANCE role exists in
+  // the current schema; HK staff handles room-side maintenance dispatch in this PMS). Owner audience
+  // remains for visibility on departments dashboards.
+  const roles = [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.HOUSEKEEPING, UserRole.OWNER];
   await createRoleRoutedNotification({
     hotelId: params.hotelId,
-    roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.HOUSEKEEPING, UserRole.OWNER],
+    roles,
     title: params.taskTitle,
     body: params.detailLines.join(" · ").slice(0, 500),
-    category: "rooms",
-    severity: "high",
+    category,
+    severity: category === "maintenance" ? "critical" : "high",
     link: "/admin/hk",
-    sourceType: "WHATSAPP_IN_STAY_REQUEST",
+    sourceType: params.sourceType ?? "GUEST_IN_STAY_REQUEST",
     sourceId: params.bookingId,
     requiresAttention: true,
     audience: ["front_desk", "housekeeping", "owner"]
@@ -1301,16 +1323,28 @@ async function tryCompleteInStayTextCaptures(params: {
       return true;
     }
     try {
+      const roomLabel = stay.roomUnit?.name ?? null;
+      const itemLabel = extraItemLabel(extraSlug);
+      const isMaintenance = extraSlug === "maintenance";
       await postInStayGuestOpsTask({
         hotelId: params.hotel.id,
         bookingId: stay.id,
         roomUnitId: stay.roomUnitId,
-        taskTitle: `WhatsApp · ${label} ×${qty}`,
+        taskTitle: buildOperationalRequestSummary({
+          kind: isMaintenance ? "maintenance" : "housekeeping",
+          itemLabel,
+          quantity: isMaintenance ? null : qty,
+          roomLabel
+        }),
         detailLines: [
           `Guest: ${params.guest.fullName ?? params.normalizedPhone}`,
           `Booking: ${stay.referenceCode ?? stay.id.slice(0, 10)}`,
-          `Room: ${stay.roomUnit?.name ?? stay.roomUnitId}`
-        ]
+          `Room: ${roomLabel ?? stay.roomUnitId}`,
+          isMaintenance ? `Type: ${itemLabel}` : `Quantity: ${qty}`
+        ],
+        category: isMaintenance ? "maintenance" : "housekeeping",
+        sourceType: isMaintenance ? "GUEST_IN_STAY_MAINTENANCE" : "GUEST_IN_STAY_EXTRAS",
+        noteForTask: isMaintenance ? itemLabel : `${itemLabel} × ${qty}`
       });
     } catch {
       await sendWhatsAppText({
@@ -1369,15 +1403,19 @@ async function tryCompleteInStayTextCaptures(params: {
     const stay = await findGuestInHouseForServices(params.hotel.id, params.guest.id, params.hotel.timezone);
     const guestLabel = params.guest.fullName?.trim() || params.normalizedPhone;
     const ref = stay?.referenceCode?.trim() || stay?.id?.slice(0, 10) || "";
+    const roomLabel = stay?.roomUnit?.name ?? null;
+    const categoryWord = complaintCategoryLabel(params.persisted.inStayComplaintCategory);
     await createRoleRoutedNotification({
       hotelId: params.hotel.id,
       roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
-      title: `In-stay complaint (${params.persisted.inStayComplaintCategory})`,
-      body: `${guestLabel} (${ref}) — ${t.slice(0, 400)}`,
-      category: "messages",
+      title: roomLabel
+        ? `Room ${roomLabel} reported a ${categoryWord} issue`
+        : `${guestLabel} reported a ${categoryWord} issue`,
+      body: `${guestLabel}${ref ? ` · ${ref}` : ""} — ${t.slice(0, 400)}`,
+      category: "support",
       severity: "critical",
       link: `/admin/conversations/${encodeURIComponent(params.conversation.id)}`,
-      sourceType: "WHATSAPP_IN_STAY_COMPLAINT",
+      sourceType: "GUEST_IN_STAY_COMPLAINT",
       sourceId: stay?.id ?? params.conversation.id,
       requiresAttention: true,
       audience: ["front_desk", "owner"]
@@ -1440,7 +1478,11 @@ async function tryHandleInStayServiceListReply(params: {
     "isv_reception"
   ]);
   const recognized =
-    knownPlain.has(id) || id.startsWith("isv_extra_") || id.startsWith("isv_cmp_cat_") || id === "isv_view_stay";
+    knownPlain.has(id) ||
+    id.startsWith("isv_extra_") ||
+    id.startsWith("isv_cmp_cat_") ||
+    id.startsWith("isv_maint_") ||
+    id === "isv_view_stay";
   if (!recognized) return false;
 
   const stay = await findGuestInHouseForServices(params.hotel.id, params.guest.id, params.hotel.timezone);
@@ -1645,6 +1687,43 @@ async function tryHandleInStayServiceListReply(params: {
     const slug = id.slice("isv_extra_".length);
     const label = IN_STAY_EXTRA_SLUG_LABEL[slug];
     if (!label) return false;
+    // Maintenance is its own department (AC / TV / bathroom / electricity / water / other) — ask for
+    // the specific kind first, then post a single dispatch task. Other extras (pillow, towels…) just
+    // need a quantity.
+    if (slug === "maintenance") {
+      try {
+        await sendWhatsAppList({
+          to: params.normalizedPhone,
+          body: "What kind of issue is in your room?",
+          buttonText: "Issue type",
+          sections: [
+            {
+              title: "Maintenance",
+              rows: [
+                { id: "isv_maint_ac", title: "AC issue", description: "Cooling, noise, leak" },
+                { id: "isv_maint_tv", title: "TV issue", description: "Signal, remote, screen" },
+                { id: "isv_maint_bathroom", title: "Bathroom", description: "Tap, shower, toilet" },
+                { id: "isv_maint_plumbing", title: "Plumbing", description: "Leak, drain, pipe" },
+                { id: "isv_maint_electricity", title: "Electricity", description: "Lights, sockets" },
+                { id: "isv_maint_water", title: "Water", description: "Hot water, supply" },
+                { id: "isv_maint_internet", title: "Wi-Fi / Internet", description: "Connectivity" },
+                { id: "isv_maint_other", title: "Other", description: "Something else" }
+              ]
+            }
+          ],
+          phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+          conversationId: params.conversation.id
+        });
+      } catch {
+        await sendWhatsAppText({
+          to: params.normalizedPhone,
+          body: "Tell us what is wrong (e.g. *AC not cooling*, *bathroom tap leak*) and we will dispatch maintenance.",
+          phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+          conversationId: params.conversation.id
+        });
+      }
+      return true;
+    }
     await saveConversationSession({
       hotelId: params.hotel.id,
       guestId: params.guest.id,
@@ -1659,6 +1738,57 @@ async function tryHandleInStayServiceListReply(params: {
     await sendWhatsAppText({
       to: params.normalizedPhone,
       body: `${label} — how many? Reply with a single digit *1*–*9* (hotel default is your assigned room).`,
+      phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+      conversationId: params.conversation.id
+    });
+    return true;
+  }
+
+  if (id.startsWith("isv_maint_")) {
+    const kind = id.slice("isv_maint_".length);
+    const kindWord = maintenanceKindLabel(kind);
+    if (!stay.roomUnitId) {
+      await sendWhatsAppText({
+        to: params.normalizedPhone,
+        body: "We could not see your room assignment yet. Tap *Talk to reception* on the services menu.",
+        phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+        conversationId: params.conversation.id
+      });
+      return true;
+    }
+    try {
+      const roomLabel = stay.roomUnit?.name ?? null;
+      await postInStayGuestOpsTask({
+        hotelId: params.hotel.id,
+        bookingId: stay.id,
+        roomUnitId: stay.roomUnitId,
+        taskTitle: buildOperationalRequestSummary({
+          kind: "maintenance",
+          itemLabel: kindWord,
+          roomLabel
+        }),
+        detailLines: [
+          `Guest: ${params.guest.fullName ?? params.normalizedPhone}`,
+          `Booking: ${stay.referenceCode ?? stay.id.slice(0, 10)}`,
+          `Room: ${roomLabel ?? stay.roomUnitId}`,
+          `Type: ${kindWord}`
+        ],
+        category: "maintenance",
+        sourceType: "GUEST_IN_STAY_MAINTENANCE",
+        noteForTask: kindWord
+      });
+    } catch {
+      await sendWhatsAppText({
+        to: params.normalizedPhone,
+        body: "We could not log that just now. Please tap *Talk to reception*.",
+        phoneNumberId: params.hotel.phoneNumberId ?? undefined,
+        conversationId: params.conversation.id
+      });
+      return true;
+    }
+    await sendWhatsAppText({
+      to: params.normalizedPhone,
+      body: `Thank you — we logged a *${kindWord}* for your room. Maintenance will follow up as soon as possible. If urgent, tap *Talk to reception*.`,
       phoneNumberId: params.hotel.phoneNumberId ?? undefined,
       conversationId: params.conversation.id
     });
@@ -1743,16 +1873,23 @@ async function tryHandleInStayServiceListReply(params: {
       return true;
     }
     try {
+      const roomLabel = stay.roomUnit?.name ?? null;
       await postInStayGuestOpsTask({
         hotelId: params.hotel.id,
         bookingId: stay.id,
         roomUnitId: stay.roomUnitId,
-        taskTitle: "WhatsApp · Housekeeping refresh",
+        taskTitle: buildOperationalRequestSummary({
+          kind: "housekeeping",
+          itemLabel: housekeepingKindLabel("refresh"),
+          roomLabel
+        }),
         detailLines: [
           `Guest: ${params.guest.fullName ?? params.normalizedPhone}`,
           `Booking: ${stay.referenceCode ?? stay.id.slice(0, 10)}`,
-          `Room: ${stay.roomUnit?.name ?? stay.roomUnitId}`
-        ]
+          `Room: ${roomLabel ?? stay.roomUnitId}`
+        ],
+        category: "housekeeping",
+        sourceType: "GUEST_IN_STAY_HOUSEKEEPING_REFRESH"
       });
     } catch {
       await sendWhatsAppText({
@@ -2622,18 +2759,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       console.error("guest journey reply notify:", e instanceof Error ? e.message : String(e));
     }
   }
-  await createRoleRoutedNotification({
-    hotelId: hotel.id,
-    roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.STAFF],
-    title: "New guest message",
-    body: `${guest.fullName ?? guest.phoneE164} sent a new message.`,
-    category: "messages",
-    severity: "high",
-    link: `/admin/conversations/${encodeURIComponent(conversation.id)}`,
-    sourceType: "CONVERSATION_MESSAGE_INBOUND",
-    sourceId: conversation.id,
-    requiresAttention: true
-  }).catch(() => undefined);
+  // Modern PMS/OTA best practice: the in-app bell is reserved for goal/operational events that need
+  // staff action (booking confirmed, complaint, escalation, manager handoff, in-stay request, payment
+  // issue, low rating, cancellation, refund request, etc.) — NOT every guest WhatsApp turn. Per-turn
+  // notifications drown out the events that actually require follow-up, especially when several guests
+  // are messaging at the same time. Goal events are still raised by their respective handlers
+  // (guestActionDispatcher, bookingService, in-stay service request handler, feedback flow, etc.).
+  // Free-text replies remain visible in the conversations live activity feed (toast) and full chat log.
   await logWhatsAppMessage({
     conversationId: conversation.id,
     phoneNumber: normalizedPhone,

@@ -2,7 +2,24 @@ import { NotificationStatus, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 import type { PmsWorkspaceId } from "./pmsWorkspace";
 
-export type NotificationCategory = "bookings" | "messages" | "housekeeping" | "rooms" | "payments" | "system" | "support";
+/**
+ * Hospitality operational categories used for in-app notifications.
+ *
+ * Additive by design — `payloadJson.category` is stored as a free string, so adding new
+ * values here does not require a database migration. Categories drive bell badges, filter
+ * UIs, and routing audiences (front-desk vs housekeeping vs restaurant vs maintenance).
+ */
+export type NotificationCategory =
+  | "bookings"
+  | "messages"
+  | "housekeeping"
+  | "maintenance"
+  | "rooms"
+  | "payments"
+  | "system"
+  | "support"
+  | "restaurant"
+  | "activities";
 export type NotificationSeverity = "critical" | "high" | "normal" | "info";
 
 const WORKSPACE_IDS: PmsWorkspaceId[] = ["owner", "front_desk", "restaurant", "housekeeping"];

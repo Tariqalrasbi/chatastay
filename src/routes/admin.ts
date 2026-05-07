@@ -88,6 +88,7 @@ import {
   type PartnerSetupConfig
 } from "../core/partnerSetup";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
+import { aiIntentDisplayLabel } from "../core/operationalLabels";
 import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
 import { createFbOrdersFromMenuLines, getFbFolioForBooking } from "../core/fbFolio";
 import { notifyOutletForFolioCharge } from "../core/outletOrderNotify";
@@ -896,13 +897,46 @@ function getAdminLiveScript(): string {
       if (id) renderedMessageIds.add(id);
     });
   }
+  // Mirror of server-side aiIntentDisplayLabel: hospitality-readable wording for staff, internal
+  // flow plumbing hidden. Keep this list in sync with src/core/operationalLabels.ts.
+  var INTENT_HIDDEN = {
+    MANUAL_REPLY: 1, GUEST_JOURNEY_REPLY: 1, PRE_ARRIVAL_GUEST_REPLY: 1, BOOKING_CHANGE_MENU: 1,
+    AGENT_HANDOFF: 1, IN_STAY_SERVICE_MENU: 1, IN_STAY_WELCOME_MENU: 1, IN_STAY_VIEW_STAY: 1,
+    IN_STAY_EXTRA_REQUEST_LOGGED: 1, IN_STAY_COMPLAINT_RECEIVED: 1, CHECK_IN_BILL_SUMMARY: 1
+  };
+  var INTENT_FRIENDLY = {
+    PRE_ARRIVAL_24H: "Pre-arrival reminder",
+    CHECKIN_DAY: "Arrival day message",
+    POST_CHECKOUT_THANK_YOU: "Post-stay thank-you",
+    REVIEW_REQUEST: "Review request",
+    REPEAT_GUEST_PROMO: "Repeat-guest offer",
+    GUEST_COMPLAINT: "Complaint",
+    GUEST_DISSATISFACTION: "Guest dissatisfaction",
+    GUEST_ESCALATION: "Escalation",
+    GUEST_PAYMENT_ISSUE: "Payment issue",
+    GUEST_REFUND_REQUEST: "Refund request",
+    GUEST_CANCELLATION_REQUEST: "Cancellation request",
+    GUEST_BOOKING_MODIFICATION: "Booking modification",
+    GUEST_SPECIAL_REQUEST: "Special request",
+    GUEST_LATE_CHECKOUT_REQUEST: "Late check-out request",
+    GUEST_EARLY_CHECKIN_REQUEST: "Early check-in request",
+    GUEST_LATE_ARRIVAL: "Late arrival",
+    GUEST_ARRIVAL_SUPPORT_REQUEST: "Arrival support",
+    GUEST_ARRIVAL_TIME_UPDATE: "Arrival time update",
+    GUEST_ON_THE_WAY: "On the way"
+  };
+  function intentLabel(v) {
+    if (!v) return "";
+    if (INTENT_HIDDEN[v]) return "";
+    if (INTENT_FRIENDLY[v]) return INTENT_FRIENDLY[v];
+    var s = String(v).replace(/^(GUEST_|PRE_|POST_)/, "").replace(/_/g, " ").toLowerCase();
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
   function buildBubble(m) {
     var inbound = m.direction === "INBOUND";
     var sender = inbound ? "Guest" : (m.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI");
-    var intentHtml = "";
-    if (m.aiIntent && m.aiIntent !== "MANUAL_REPLY") {
-      intentHtml = '<p class="bubble-meta">Intent: ' + esc(m.aiIntent) + "</p>";
-    }
+    var label = intentLabel(m.aiIntent);
+    var intentHtml = label ? '<p class="bubble-meta">' + esc(label) + "</p>" : "";
     return (
       '<article class="bubble ' + (inbound ? "inbound" : "outbound") + '" data-chat-message-id="' + esc(m.id) + '">' +
       '<div class="bubble-head"><span><strong>' + esc(sender) + '</strong></span><span>' + formatDt(m.createdAt) + "</span></div>" +
@@ -1138,14 +1172,42 @@ function getAdminNotificationScript(): string {
       })
       .join("");
   }
+  // Some sessions (platform-superadmin pseudo-account, or staff without a HotelUser row) cannot read the
+  // hotel notification feed. The server returns 401 on every endpoint. Without this guard the bell would
+  // appear functional but every action — including "Read all" — would silently swallow a 401, which looks
+  // broken to the operator. When we detect a 401, hide the entire notification surface and stop polling.
+  var notifDisabled = false;
+  var pollHandle = null;
+  function disableNotifications() {
+    if (notifDisabled) return;
+    notifDisabled = true;
+    if (pollHandle != null) {
+      window.clearInterval(pollHandle);
+      pollHandle = null;
+    }
+    panel.hidden = true;
+    panel.setAttribute("hidden", "");
+    var wrap = notifBtn.closest(".admin-notif-wrap");
+    if (wrap) {
+      wrap.style.display = "none";
+    } else {
+      notifBtn.style.display = "none";
+      notifBadge.style.display = "none";
+    }
+    notifBtn.classList.remove("admin-notif-bell-pulse");
+  }
   async function fetchUnreadCount() {
+    if (notifDisabled) return;
     var r = await fetch("/auth/notifications/unread-count", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (r.status === 401) { disableNotifications(); return; }
     if (!r.ok) return;
     var j = await r.json();
     updateBadge(j.unreadCount || 0);
   }
   async function fetchLatest() {
+    if (notifDisabled) return;
     var r = await fetch("/auth/notifications?limit=10", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (r.status === 401) { disableNotifications(); return; }
     if (!r.ok) return;
     var j = await r.json();
     var items = Array.isArray(j.notifications) ? j.notifications : [];
@@ -1178,11 +1240,14 @@ function getAdminNotificationScript(): string {
     if (!a) return;
     var id = a.getAttribute("data-notif-id");
     if (!id) return;
-    fetch("/auth/notifications/" + encodeURIComponent(id) + "/read", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } })
-      .catch(function () {});
+    var r = await fetch("/auth/notifications/" + encodeURIComponent(id) + "/read", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } }).catch(function () { return null; });
+    if (r && r.status === 401) { disableNotifications(); return; }
+    fetchUnreadCount();
+    fetchLatest();
   });
   notifReadAll.addEventListener("click", async function () {
-    await fetch("/auth/notifications/read-all", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } }).catch(function () {});
+    var r = await fetch("/auth/notifications/read-all", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } }).catch(function () { return null; });
+    if (r && r.status === 401) { disableNotifications(); return; }
     fetchUnreadCount();
     fetchLatest();
   });
@@ -1198,11 +1263,12 @@ function getAdminNotificationScript(): string {
   });
 
   function poll() {
+    if (notifDisabled) return;
     fetchUnreadCount();
     fetchLatest();
   }
   poll();
-  window.setInterval(poll, POLL_MS);
+  pollHandle = window.setInterval(poll, POLL_MS);
 })();
 </script>`;
 }
@@ -2053,7 +2119,15 @@ async function getLatestInvoiceDispatch(bookingId: string): Promise<{
   };
 }
 
-async function sendInvoicePdfForBooking(params: {
+/**
+ * Sends a stay PDF document (invoice / receipt / quotation) to the guest via WhatsApp and writes
+ * the canonical `BOOKING_INVOICE_PDF_SENT` audit row. Idempotent — repeat calls are skipped unless
+ * `force: true` or the booking's `paymentStatus` has changed since the last dispatch.
+ *
+ * Exported so the guest-journey sweep (auto final invoice pass) can reuse the exact same code path
+ * as the front-desk staff actions and manual triggers — no duplication.
+ */
+export async function sendInvoicePdfForBooking(params: {
   hotelId: string;
   bookingId: string;
   trigger: string;
@@ -2083,7 +2157,9 @@ async function sendInvoicePdfForBooking(params: {
     if (booking.status === BookingStatus.CANCELLED) {
       return { sent: false, skipped: true };
     }
-  } else if (booking.status !== BookingStatus.CONFIRMED) {
+  } else if (booking.status !== BookingStatus.CONFIRMED && booking.status !== BookingStatus.CHECKED_IN) {
+    // Invoices/receipts also need to be deliverable for in-stay and post-stay bookings — the current
+    // schema has no CHECKED_OUT enum value so post-stay records remain CHECKED_IN with checkOut < now.
     return { sent: false, skipped: true };
   }
 
@@ -8399,6 +8475,24 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
         body: `${label} — task created after manual check-out.`,
         payloadJson: JSON.stringify({ taskId: hkFromCheckout.taskId, roomUnitId: unit.id, bookingId: auditBookingId })
       });
+    }
+
+    // Hospitality lifecycle: front-desk check-out triggers immediate final-invoice delivery, BEFORE
+    // any post-stay thank-you / review flow runs. Idempotent — `sendInvoicePdfForBooking` dedupes
+    // by latest BOOKING_INVOICE_PDF_SENT audit + paymentStatus, and `force: true` is safe to call
+    // exactly once per checkout press because the journey sweep also gates on that audit.
+    if (auditBookingId) {
+      sendInvoicePdfForBooking({
+        hotelId: hotel.id,
+        bookingId: auditBookingId,
+        trigger: "FRONT_DESK_CHECKOUT",
+        force: true
+      }).catch((err) =>
+        console.error(
+          `[front-desk-checkout] auto invoice send failed booking=${auditBookingId}:`,
+          err instanceof Error ? err.message : String(err)
+        )
+      );
     }
 
     res.redirect(`/admin/room-board?date=${encodeURIComponent(formatDateForInput(departureDate))}&manualCheckOut=1`);
@@ -18270,8 +18364,53 @@ adminRouter.get(
       });
     }
 
+    // Per modern PMS/OTA UX: the live toast feed must NOT fire on every interactive button or list tap
+    // (those are bot-handled mid-flow steps). Only surface natural-language guest replies and operational
+    // intents — goal-bearing events. Internal interactive payloads look like compact identifier tokens
+    // (e.g. "children_1", "dci_20260507", "fb_svc_rs", or 25-char CUIDs). Detect and skip them.
+    const looksLikeInteractiveReply = (body: string): boolean => {
+      const s = (body ?? "").trim();
+      if (!s) return false;
+      if (/\s/.test(s)) return false;
+      if (s.length < 3 || s.length > 80) return false;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$/.test(s)) return false;
+      const hasSeparator = /[_\-]/.test(s);
+      const hasLetter = /[A-Za-z]/.test(s);
+      const hasDigit = /\d/.test(s);
+      // Identifier-shaped: snake/kebab-case payloads ("children_1", "fb_svc_rs", "dci_20260507"),
+      // alphanumeric mixes ("cmofm07q00kwhnfqhgaqvm8l"), or very long lowercase tokens (CUID/UUID).
+      // A digit-only run is left alone (could be a phone number / age) and pure-letter words stay
+      // ("yes" / "thanks" / "Hello"). Dates typed as 2026-05-07 will be coalesced — that's an
+      // acceptable trade-off versus the per-tap toast spam this removes.
+      if (hasSeparator) return true;
+      if (hasLetter && hasDigit) return true;
+      if (s.length >= 20 && /^[a-z0-9]+$/.test(s)) return true;
+      return false;
+    };
+    // Per-conversation guest_message coalescing: rapid-fire replies in the same poll window collapse
+    // into a single event so 5 button taps don't fire 5 toasts/beeps.
+    const guestMessageByConv = new Map<string, ActivityEvent>();
+    const meaningfulIntents = new Set([
+      "GUEST_COMPLAINT",
+      "GUEST_DISSATISFACTION",
+      "GUEST_ESCALATION",
+      "GUEST_PAYMENT_ISSUE",
+      "GUEST_REFUND_REQUEST",
+      "GUEST_CANCELLATION_REQUEST",
+      "GUEST_BOOKING_MODIFICATION",
+      "GUEST_SPECIAL_REQUEST",
+      "GUEST_LATE_CHECKOUT_REQUEST",
+      "GUEST_EARLY_CHECKIN_REQUEST",
+      "GUEST_LATE_ARRIVAL",
+      "GUEST_ARRIVAL_SUPPORT_REQUEST"
+    ]);
     for (const m of inboundMessages) {
       if (firstMsgIds.has(m.id)) continue;
+      const intent = String(m.aiIntent ?? "");
+      const isInteractivePayload = looksLikeInteractiveReply(m.body);
+      const isMeaningfulIntent = meaningfulIntents.has(intent);
+      // Skip silent mid-flow taps unless the AI tagged a meaningful operational intent.
+      if (isInteractivePayload && !isMeaningfulIntent) continue;
       const conv = m.conversation;
       const hasBooking = conv.bookings.length > 0;
       const category = classifyConversationActivity(conv.state, hasBooking);
@@ -18279,21 +18418,30 @@ adminRouter.get(
       const preview = m.body.slice(0, 140);
       const bookingRef = conv.bookings[0]?.id;
       let title: string;
-      if (m.aiIntent === "PRE_ARRIVAL_GUEST_REPLY" || m.aiIntent === "GUEST_JOURNEY_REPLY") {
-        title = `Guest journey reply · ${guestLabel}${bookingRef ? ` · ${bookingRef.slice(0, 10)}` : ""}`;
+      if (isMeaningfulIntent) {
+        const intentLabel = aiIntentDisplayLabel(intent) ?? "operational request";
+        title = `${intentLabel} · ${guestLabel}${bookingRef ? ` · ${bookingRef.slice(0, 10)}` : ""}`;
+      } else if (intent === "PRE_ARRIVAL_GUEST_REPLY" || intent === "GUEST_JOURNEY_REPLY") {
+        title = `Guest reply · ${guestLabel}${bookingRef ? ` · ${bookingRef.slice(0, 10)}` : ""}`;
       } else {
         title = category === "booking" ? `Booking message (${guestLabel})` : `Guest message (${guestLabel})`;
       }
-      const journeyIntent = m.aiIntent === "PRE_ARRIVAL_GUEST_REPLY" || m.aiIntent === "GUEST_JOURNEY_REPLY";
-      events.push({
+      const journeyIntent = intent === "PRE_ARRIVAL_GUEST_REPLY" || intent === "GUEST_JOURNEY_REPLY";
+      const event: ActivityEvent = {
         type: "guest_message",
         conversationId: m.conversationId,
         sortKey: m.createdAt.toISOString(),
         title,
         preview,
-        category: category === "booking" || journeyIntent ? "booking" : category
-      });
+        category: category === "booking" || journeyIntent || isMeaningfulIntent ? "booking" : category
+      };
+      // Coalesce: keep the latest event per conversation in this poll window.
+      const prior = guestMessageByConv.get(m.conversationId);
+      if (!prior || prior.sortKey < event.sortKey) {
+        guestMessageByConv.set(m.conversationId, event);
+      }
     }
+    for (const ev of guestMessageByConv.values()) events.push(ev);
 
     events.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
 
@@ -18506,13 +18654,17 @@ adminRouter.get("/conversations/:id", requirePermission("CONVERSATIONS", "VIEW")
       (message) => {
         const isInbound = message.direction === MessageDirection.INBOUND;
         const senderLabel = isInbound ? "Guest" : (message.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI");
+        // Surface only operationally meaningful intent labels (e.g. Complaint, Late arrival, Refund
+        // request); internal flow plumbing (GUEST_JOURNEY_REPLY, IN_STAY_SERVICE_MENU, etc.) is hidden
+        // from staff via aiIntentDisplayLabel().
+        const friendlyIntent = aiIntentDisplayLabel(message.aiIntent);
         return `<article class="bubble ${isInbound ? "inbound" : "outbound"}" data-chat-message-id="${escapeHtml(message.id)}">
       <div class="bubble-head">
         <span><strong>${escapeHtml(senderLabel)}</strong></span>
         <span>${formatDateTime(message.createdAt)}</span>
       </div>
       <p class="bubble-body">${escapeHtml(message.body)}</p>
-      ${message.aiIntent && message.aiIntent !== "MANUAL_REPLY" ? `<p class="bubble-meta">Intent: ${escapeHtml(message.aiIntent)}</p>` : ""}
+      ${friendlyIntent ? `<p class="bubble-meta">${escapeHtml(friendlyIntent)}</p>` : ""}
       </article>`;
       }
     )
@@ -18628,7 +18780,32 @@ ${replyError}
       </table>
     </section>
   </aside>
-</div>`;
+</div>
+<script>
+(function () {
+  // Modern PMS chat UX: open the conversation positioned at the latest message (no manual scroll
+  // for staff). Live-update poller already auto-scrolls when new messages stream in; this handles
+  // the initial render. Mark the existing tail message so a new "Latest update" separator can
+  // optionally be drawn for messages that arrive after first paint.
+  function scrollToLatest() {
+    var pane = document.querySelector(".chat-messages");
+    if (!pane) return;
+    pane.scrollTop = pane.scrollHeight;
+    var bubbles = pane.querySelectorAll(".bubble");
+    if (bubbles.length > 0) {
+      bubbles[bubbles.length - 1].setAttribute("data-chat-tail", "1");
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", scrollToLatest);
+  } else {
+    scrollToLatest();
+  }
+  // Run again after images/fonts settle so the bottom is reliably visible.
+  window.setTimeout(scrollToLatest, 50);
+  window.setTimeout(scrollToLatest, 250);
+})();
+</script>`;
 
   res.type("html").send(renderLayout(content, true));
 });

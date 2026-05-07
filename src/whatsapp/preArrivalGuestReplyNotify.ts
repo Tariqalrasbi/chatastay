@@ -1,4 +1,4 @@
-import { BookingStatus, UserRole } from "@prisma/client";
+import { BookingStatus, Prisma, UserRole } from "@prisma/client";
 import { prisma } from "../db";
 import { isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
 import {
@@ -342,37 +342,48 @@ export async function handleGuestJourneyInboundReply(params: {
     invokedHandler: "guest_journey_operational"
   };
 
-  await prisma.$transaction([
+  // Always tag the inbound message with the detected intent (or the generic "GUEST_JOURNEY_REPLY"
+  // fallback) so analytics/AI dashboards keep a record. The per-message notification + audit row,
+  // however, are only persisted when there is a real operational intent worth following up on —
+  // anything else is mid-flow conversation noise (button taps, typed answers to bot prompts, etc.).
+  const operations: Prisma.PrismaPromise<unknown>[] = [
     prisma.message.update({
       where: { id: params.prismaMessageId },
       data: { aiIntent, aiConfidence: category ? 0.97 : 0.95 }
-    }),
-    prisma.notification.create({
-      data: {
-        hotelId: params.hotelId,
-        guestId: params.guestId,
-        channel: "IN_APP",
-        type: NOTIFY_TYPE,
-        title,
-        body,
-        status: "PENDING",
-        payloadJson: JSON.stringify(metadata)
-      }
-    }),
-    prisma.auditLog.create({
-      data: {
-        hotelId: params.hotelId,
-        action:
-          category && isArrivalFamilyCategory(category)
-            ? "GUEST_ARRIVAL_OPERATIONAL_UPDATE"
-            : "GUEST_SERVICE_OPERATIONAL_UPDATE",
-        entityType: "BOOKING",
-        entityId: booking.id,
-        bookingId: booking.id,
-        metadataJson: JSON.stringify(metadata)
-      }
     })
-  ]);
+  ];
+  if (requiresStaffFollowUp) {
+    operations.push(
+      prisma.notification.create({
+        data: {
+          hotelId: params.hotelId,
+          guestId: params.guestId,
+          channel: "IN_APP",
+          type: NOTIFY_TYPE,
+          title,
+          body,
+          status: "PENDING",
+          payloadJson: JSON.stringify(metadata)
+        }
+      })
+    );
+    operations.push(
+      prisma.auditLog.create({
+        data: {
+          hotelId: params.hotelId,
+          action:
+            category && isArrivalFamilyCategory(category)
+              ? "GUEST_ARRIVAL_OPERATIONAL_UPDATE"
+              : "GUEST_SERVICE_OPERATIONAL_UPDATE",
+          entityType: "BOOKING",
+          entityId: booking.id,
+          bookingId: booking.id,
+          metadataJson: JSON.stringify(metadata)
+        }
+      })
+    );
+  }
+  await prisma.$transaction(operations);
 
   const memHooks: Promise<unknown>[] = [];
   if (category === "complaint" || category === "dissatisfaction") {

@@ -21,8 +21,25 @@ import { parseLightGuestMemory } from "../core/lightGuestMemory";
 import { isGuestEffectivelyCheckedIn } from "../core/guestStayPresence";
 import { englishDayPeriodGreetingLine } from "../core/timeGreetings";
 import { sendWhatsAppButtons, sendWhatsAppList, trySendWhatsAppText } from "../whatsapp/send";
+// Reuse the canonical guest-document sender so the cron, the front-desk button, manual buttons,
+// and payment webhooks all share one PDF-build / dispatch / audit code path. No duplication.
+import { sendInvoicePdfForBooking } from "../routes/admin";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const FINAL_INVOICE_AUDIT_ACTION = "BOOKING_INVOICE_PDF_SENT";
+
+/**
+ * Has a final invoice/folio document already been delivered to the guest for this booking?
+ * Used both to gate the post-stay thank-you (must come AFTER the invoice) and to dedupe the
+ * automatic final-invoice pass below.
+ */
+async function hasFinalInvoiceBeenSent(bookingId: string): Promise<boolean> {
+  const row = await prisma.auditLog.findFirst({
+    where: { action: FINAL_INVOICE_AUDIT_ACTION, entityType: "Booking", entityId: bookingId },
+    select: { id: true }
+  });
+  return Boolean(row);
+}
 
 /** Re-export for callers that historically imported time helpers from this job module. */
 export {
@@ -65,6 +82,8 @@ export type GuestJourneySweepResult = {
   sentReviewRequest: number;
   sentReviewReminder: number;
   sentRepeatGuestPromo: number;
+  /** Final invoice PDFs auto-sent because checkout date has passed. */
+  sentFinalInvoice: number;
   skipped: number;
 };
 
@@ -409,6 +428,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
   let sentReviewRequest = 0;
   let sentReviewReminder = 0;
   let sentRepeatGuestPromo = 0;
+  let sentFinalInvoice = 0;
   let skipped = 0;
 
   const reviewDelayMs = envHoursToMs("GUEST_JOURNEY_REVIEW_DELAY_HOURS", 48);
@@ -539,6 +559,46 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       else skipped++;
     }
 
+    // --- AUTO_FINAL_INVOICE (runs BEFORE the post-checkout thank-you so the guest always
+    // receives the operational document first, then any marketing/relationship follow-up later) ---
+    //
+    // Hospitality lifecycle rule:
+    //   1) Stay ends (checkOut date has passed)
+    //   2) Final invoice / folio summary is delivered immediately to the guest
+    //   3) Only then does the post-stay thank-you / review request flow begin (with its own delays)
+    //
+    // The dedupe is the existing `BOOKING_INVOICE_PDF_SENT` audit row created by sendInvoicePdfForBooking.
+    // If the front-desk button already sent the invoice, this pass is a no-op for that booking.
+    const forFinalInvoice = await prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        status: { in: postStayBookingStatuses },
+        checkOut: { lte: now }
+      },
+      select: { id: true }
+    });
+    for (const b of forFinalInvoice) {
+      scanned++;
+      const alreadySent = await hasFinalInvoiceBeenSent(b.id);
+      if (alreadySent) {
+        skipped++;
+        continue;
+      }
+      const result = await sendInvoicePdfForBooking({
+        hotelId: hotel.id,
+        bookingId: b.id,
+        trigger: "AUTO_FINAL_INVOICE_AFTER_STAY"
+      }).catch((err) => {
+        console.error(
+          `[guest-journey] auto final invoice failed booking=${b.id}:`,
+          err instanceof Error ? err.message : String(err)
+        );
+        return { sent: false, skipped: false, error: "exception" } as { sent: boolean; skipped: boolean; error?: string };
+      });
+      if (result.sent) sentFinalInvoice++;
+      else skipped++;
+    }
+
     // --- POST_CHECKOUT_THANK_YOU ---
     const forPostCheckout = await prisma.booking.findMany({
       where: {
@@ -552,6 +612,21 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
 
     for (const b of forPostCheckout) {
       scanned++;
+      // GATE: never send the thank-you before the final invoice has been delivered.
+      // This enforces the operational order Booking.com / Cloudbeds / Mews use: receipt first,
+      // relationship messaging after. The auto-invoice pass above (or the front-desk button)
+      // creates the audit row this check looks for.
+      const invoiceSent = await hasFinalInvoiceBeenSent(b.id);
+      if (!invoiceSent) {
+        skipped++;
+        logLifecycleScheduleDecision({
+          event: "POST_CHECKOUT_THANK_YOU",
+          bookingId: b.id,
+          suppressed: true,
+          suppressionReason: "final_invoice_not_yet_delivered"
+        });
+        continue;
+      }
       const checkoutYmd = formatYmdInHotelZone(b.checkOut, tz);
       const hmOut = parseCheckOutHm(b.property.checkOutTime);
       const scheduledDeparture = wallClockLocalToUtc(checkoutYmd, hmOut, tz);
@@ -886,6 +961,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
     sentReviewRequest,
     sentReviewReminder,
     sentRepeatGuestPromo,
+    sentFinalInvoice,
     skipped
   };
 }
@@ -905,7 +981,8 @@ export async function runPreArrivalReminderSweep(): Promise<{
       r.sentPostCheckout +
       r.sentReviewRequest +
       r.sentReviewReminder +
-      r.sentRepeatGuestPromo,
+      r.sentRepeatGuestPromo +
+      r.sentFinalInvoice,
     skipped: r.skipped
   };
 }
