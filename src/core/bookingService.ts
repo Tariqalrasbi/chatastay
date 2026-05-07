@@ -434,6 +434,36 @@ export async function createConfirmedBookingAtomic(params: {
       where: { hotelId: params.hotelId, guestId: params.guestId, status: "OPEN" },
       data: { status: "CONFIRMED", bookingId }
     });
+
+    /// Phase E: marketplace commission ledger.
+    /// Auto-create one Commission row per CHATASTAY_MARKETPLACE booking using the
+    /// hotel's current plan as the percent source. Snapshotted at booking time so
+    /// later plan edits cannot rewrite history. Stays inside the same transaction
+    /// so the ledger and bookings are guaranteed consistent.
+    if (src === ChannelProvider.CHATASTAY_MARKETPLACE) {
+      const subscription = await tx.subscription.findFirst({
+        where: { hotelId: params.hotelId },
+        include: { plan: true },
+        orderBy: { createdAt: "desc" }
+      });
+      const plan = subscription?.plan ?? null;
+      const percentBps = plan?.commissionBps ?? 0;
+      if (percentBps > 0) {
+        const commissionAmount = Number(((totalWithMeals * percentBps) / 10000).toFixed(2));
+        await tx.commission.create({
+          data: {
+            hotelId: params.hotelId,
+            bookingId,
+            planId: plan?.id ?? null,
+            planCodeSnapshot: plan?.code ?? null,
+            percentBps,
+            amountCalc: commissionAmount,
+            currency: params.currency,
+            status: "PENDING"
+          }
+        });
+      }
+    }
   });
 
   await refreshGuestSegmentTagsForGuest(params.guestId).catch((err) =>

@@ -587,6 +587,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
         '<a href="/owner/hotels">Hotels</a>',
         '<a href="/owner/plans">Plans</a>',
         '<a href="/owner/subscriptions">Subscriptions</a>',
+        '<a href="/owner/commissions">Commissions</a>',
       '<a href="/owner/billing">Billing</a>',
       '<a href="/owner/users">Platform Users</a>',
         '<a href="/owner/health">System Health</a>',
@@ -3472,6 +3473,109 @@ ownerRouter.post("/subscriptions/:id/update", requireOwnerAuth, async (req, res)
     }
   });
   res.redirect("/owner/subscriptions");
+});
+
+// =============================================================================
+// /owner/commissions — Phase E ledger
+// -----------------------------------------------------------------------------
+// One-page read-only ledger of marketplace commissions. Reads from the
+// Commission table written inside `createConfirmedBookingAtomic`. Filters by
+// status / hotel / month so the founder can answer "how much did the
+// marketplace earn this month?" without a SQL prompt. CSV export is left to
+// Phase H so the Phase E surface stays small and reversible.
+// =============================================================================
+ownerRouter.get("/commissions", requireOwnerAuth, async (req, res) => {
+  const statusFilter = String(req.query.status ?? "").toUpperCase();
+  const hotelFilter = String(req.query.hotelId ?? "").trim();
+  const monthFilter = String(req.query.month ?? "").trim();
+
+  const where: Prisma.CommissionWhereInput = {};
+  if (statusFilter === "PENDING" || statusFilter === "EARNED" || statusFilter === "REVERSED") {
+    where.status = statusFilter;
+  }
+  if (hotelFilter) where.hotelId = hotelFilter;
+  if (/^\d{4}-\d{2}$/.test(monthFilter)) {
+    const [yearStr, monthStr] = monthFilter.split("-");
+    const year = Number(yearStr);
+    const month = Number(monthStr);
+    if (Number.isFinite(year) && Number.isFinite(month) && month >= 1 && month <= 12) {
+      const start = new Date(Date.UTC(year, month - 1, 1));
+      const end = new Date(Date.UTC(year, month, 1));
+      where.createdAt = { gte: start, lt: end };
+    }
+  }
+
+  const [commissions, totals, hotels] = await Promise.all([
+    prisma.commission.findMany({
+      where,
+      include: { hotel: { select: { id: true, displayName: true, slug: true, currency: true } }, booking: { select: { id: true, referenceCode: true, totalAmount: true, source: true, status: true, checkIn: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 200
+    }),
+    prisma.commission.groupBy({
+      by: ["status", "currency"],
+      where,
+      _sum: { amountCalc: true },
+      _count: { _all: true }
+    }),
+    prisma.hotel.findMany({
+      where: { isActive: true },
+      select: { id: true, displayName: true },
+      orderBy: { displayName: "asc" }
+    })
+  ]);
+
+  const totalCards = totals
+    .map((t) => {
+      const cls = t.status === "EARNED" ? "ok" : t.status === "REVERSED" ? "alert" : "pending";
+      return `<div class="card" style="flex:1;min-width:160px"><div class="muted" style="font-size:12px">${escapeHtml(t.status)} (${t.currency})</div><div style="font-size:22px;font-weight:800"><span class="badge ${cls}">${t._count._all}</span> · ${formatMoney(t._sum.amountCalc ?? 0, t.currency)}</div></div>`;
+    })
+    .join("");
+
+  const rows = commissions
+    .map((c) => {
+      const cls = c.status === "EARNED" ? "ok" : c.status === "REVERSED" ? "alert" : "pending";
+      return `<tr>
+      <td><span class="muted" style="font-size:12px">${formatDate(c.createdAt)}</span></td>
+      <td><a href="/owner/hotels/${encodeURIComponent(c.hotelId)}">${escapeHtml(c.hotel.displayName)}</a></td>
+      <td>${escapeHtml(c.booking.referenceCode ?? c.booking.id)}<div class="muted" style="font-size:12px">${escapeHtml(c.booking.source)}</div></td>
+      <td>${formatMoney(c.booking.totalAmount, c.currency)}</td>
+      <td>${(c.percentBps / 100).toFixed(2)}%</td>
+      <td><strong>${formatMoney(c.amountCalc, c.currency)}</strong></td>
+      <td><span class="badge ${cls}">${escapeHtml(c.status)}</span></td>
+    </tr>`;
+    })
+    .join("");
+
+  const hotelOptions = hotels
+    .map((h) => `<option value="${escapeHtml(h.id)}" ${h.id === hotelFilter ? "selected" : ""}>${escapeHtml(h.displayName)}</option>`)
+    .join("");
+  const today = new Date();
+  const currentMonth = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const content = `
+    <h2>Commissions ledger</h2>
+    <p class="muted">Marketplace commissions auto-recorded when a booking with <code>source = CHATASTAY_MARKETPLACE</code> is confirmed. <code>percentBps</code> is snapshotted from the hotel's plan at booking time.</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:14px 0">${totalCards || '<div class="card muted" style="flex:1">No commissions yet.</div>'}</div>
+    <form method="get" action="/owner/commissions" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <select name="status" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
+        <option value="" ${!statusFilter ? "selected" : ""}>All statuses</option>
+        <option value="PENDING" ${statusFilter === "PENDING" ? "selected" : ""}>PENDING</option>
+        <option value="EARNED" ${statusFilter === "EARNED" ? "selected" : ""}>EARNED</option>
+        <option value="REVERSED" ${statusFilter === "REVERSED" ? "selected" : ""}>REVERSED</option>
+      </select>
+      <select name="hotelId" style="padding:8px;border:1px solid #d8dee6;border-radius:8px">
+        <option value="">All hotels</option>${hotelOptions}
+      </select>
+      <input type="month" name="month" value="${escapeHtml(monthFilter || currentMonth)}" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+      <button type="submit" style="padding:8px 14px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700;cursor:pointer">Filter</button>
+      <a class="btn-link" href="/owner/commissions">Reset</a>
+    </form>
+    <table>
+      <thead><tr><th>Date</th><th>Hotel</th><th>Booking</th><th>Booking total</th><th>Rate</th><th>Commission</th><th>Status</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7">No commissions match these filters.</td></tr>'}</tbody>
+    </table>`;
+  res.type("html").send(ownerLayout(content, true));
 });
 
 ownerRouter.get("/users", requireOwnerAuth, (_req, res) => {

@@ -22,6 +22,7 @@
  */
 
 import { Router, type Request, type Response } from "express";
+import crypto from "node:crypto";
 import { prisma } from "../db";
 import { PropertyStatus } from "@prisma/client";
 import {
@@ -33,6 +34,22 @@ import {
   type MarketplaceOffer,
   type RoomOffer
 } from "../core/availability";
+
+/// Phase E: how long a marketplace intent token is valid (30 days). After
+/// expiry the wa.me link still opens WhatsApp, but the webhook silently
+/// ignores the token and the guest goes through the normal flow.
+const MARKETPLACE_INTENT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/// Marker embedded in the wa.me message text. The WhatsApp webhook scans
+/// inbound messages for `[#chatastay-mp:<token>]` and seeds a BookingDraft
+/// from the matching MarketplaceBookingIntent. Keep the marker stable —
+/// if it changes, also update src/whatsapp/marketplaceIntentClaim.ts.
+const MARKETPLACE_INTENT_MARKER_PREFIX = "[#chatastay-mp:";
+const MARKETPLACE_INTENT_MARKER_SUFFIX = "]";
+
+function newIntentToken(): string {
+  return crypto.randomBytes(16).toString("base64url");
+}
 
 export const marketplaceRouter = Router();
 
@@ -395,8 +412,12 @@ marketplaceRouter.get("/h/:slug", async (req: Request, res: Response) => {
   const amenities = safeParseJsonArray(hotel.amenitiesJson);
   const coverStyle = hotel.coverImageUrl ? `background-image:url(${JSON.stringify(hotel.coverImageUrl).slice(1, -1)})` : "background:linear-gradient(135deg,#0b6e6e 0%,#13a4a4 100%)";
 
+  /// Phase E: route the WhatsApp CTA through `/m/start` so we can mint a
+  /// MarketplaceBookingIntent token, embed it in the wa.me message text, and
+  /// later (when the webhook receives the inbound message) seed a BookingDraft
+  /// from this intent for the now-resolved guest.
   const whatsappCta = hotel.whatsappPhone
-    ? `<a class="btn btn-whatsapp" href="https://wa.me/${encodeURIComponent(hotel.whatsappPhone.replace(/\D/g, ""))}?text=${encodeURIComponent(`Hi! I'd like to book ${hotel.displayName} from ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)} for ${guests} guest${guests > 1 ? "s" : ""}.`)}" target="_blank" rel="noopener">Continue on WhatsApp</a>`
+    ? `<a class="btn btn-whatsapp" href="/m/start?slug=${encodeURIComponent(hotel.slug)}&checkIn=${encodeURIComponent(toIsoDate(checkIn))}&checkOut=${encodeURIComponent(toIsoDate(checkOut))}&guests=${guests}&rooms=${rooms}" target="_blank" rel="noopener">Continue on WhatsApp</a>`
     : "";
 
   const roomCardsHtml = offers
@@ -498,3 +519,84 @@ marketplaceRouter.get("/h/:slug/availability.json", async (req: Request, res: Re
     }))
   });
 });
+
+// =============================================================================
+// GET /m/start — mint MarketplaceBookingIntent + redirect to wa.me
+// =============================================================================
+// Creates a one-shot intent token and redirects the guest to WhatsApp with the
+// token embedded in the message text. The WhatsApp webhook (Phase E claim
+// handler) will pick up the token and seed a BookingDraft for the
+// now-resolved guest. If anything fails (no whatsappPhone, no ACTIVE property)
+// we fall back to the property profile page so the guest still has a path
+// forward.
+marketplaceRouter.get("/m/start", async (req: Request, res: Response) => {
+  const slug = String(req.query.slug ?? "").trim();
+  if (!slug) {
+    res.redirect("/");
+    return;
+  }
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug },
+    select: {
+      id: true,
+      slug: true,
+      displayName: true,
+      whatsappPhone: true,
+      isActive: true,
+      properties: { where: { status: PropertyStatus.ACTIVE }, select: { id: true } }
+    }
+  });
+  if (!hotel || !hotel.isActive || hotel.properties.length === 0 || !hotel.whatsappPhone) {
+    res.redirect(`/h/${encodeURIComponent(slug)}`);
+    return;
+  }
+
+  const checkIn = parseDateOrToday(req.query.checkIn, 1);
+  const checkOut = parseDateOrToday(req.query.checkOut, 2);
+  const guests = parseInt(req.query.guests, 2, 1, 12);
+  const rooms = parseInt(req.query.rooms, 1, 1, 6);
+
+  const token = newIntentToken();
+  await prisma.marketplaceBookingIntent.create({
+    data: {
+      token,
+      hotelId: hotel.id,
+      hotelSlug: hotel.slug,
+      checkIn,
+      checkOut,
+      guests,
+      rooms,
+      expiresAt: new Date(Date.now() + MARKETPLACE_INTENT_TTL_MS)
+    }
+  });
+
+  const phoneDigits = hotel.whatsappPhone.replace(/\D/g, "");
+  const messageText = `Hi! I'd like to book ${hotel.displayName} from ${toIsoDate(checkIn)} to ${toIsoDate(checkOut)} for ${guests} guest${guests > 1 ? "s" : ""}. ${MARKETPLACE_INTENT_MARKER_PREFIX}${token}${MARKETPLACE_INTENT_MARKER_SUFFIX}`;
+  const waUrl = `https://wa.me/${encodeURIComponent(phoneDigits)}?text=${encodeURIComponent(messageText)}`;
+  res.redirect(waUrl);
+});
+
+/// Exported so the WhatsApp webhook can use the same marker definition.
+export const MARKETPLACE_INTENT_MARKERS = {
+  prefix: MARKETPLACE_INTENT_MARKER_PREFIX,
+  suffix: MARKETPLACE_INTENT_MARKER_SUFFIX,
+  ttlMs: MARKETPLACE_INTENT_TTL_MS
+} as const;
+
+/**
+ * Parse a marketplace intent token out of an inbound WhatsApp message body.
+ * Returns null if no marker is present. The token must be a base64url-style
+ * string (letters, digits, `-`, `_`); anything else is rejected so guests
+ * can't accidentally claim arbitrary tokens by typing weird text.
+ */
+export function extractMarketplaceIntentToken(messageText: string | null | undefined): string | null {
+  if (!messageText) return null;
+  const idx = messageText.indexOf(MARKETPLACE_INTENT_MARKER_PREFIX);
+  if (idx === -1) return null;
+  const rest = messageText.slice(idx + MARKETPLACE_INTENT_MARKER_PREFIX.length);
+  const closeIdx = rest.indexOf(MARKETPLACE_INTENT_MARKER_SUFFIX);
+  if (closeIdx === -1) return null;
+  const token = rest.slice(0, closeIdx);
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(token)) return null;
+  return token;
+}

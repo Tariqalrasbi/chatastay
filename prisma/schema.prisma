@@ -100,6 +100,19 @@ enum ChannelProvider {
   PHONE
   CORPORATE
   REFERRAL
+  /// Phase E: bookings originating from the public ChatAstay marketplace.
+  /// These bookings auto-create a Commission row (see Commission model).
+  CHATASTAY_MARKETPLACE
+}
+
+/// Phase E: lifecycle of a marketplace commission for a confirmed booking.
+/// PENDING  = booking confirmed, awaiting payment / fulfillment.
+/// EARNED   = booking checked-in or fully paid; commission is realized.
+/// REVERSED = booking cancelled / refunded; commission is voided.
+enum CommissionStatus {
+  PENDING
+  EARNED
+  REVERSED
 }
 
 /// Hospitality CRM-style guest labels; combined with SegmentTagSource for manual vs rules engine.
@@ -363,6 +376,8 @@ model Hotel {
   leads                  Lead[]
   leadOutreachLogs       LeadOutreachLog[]
   guestFeedbacks         GuestFeedback[]
+  commissions            Commission[]
+  marketplaceIntents     MarketplaceBookingIntent[]
 }
 
 /// Per-hotel daily email digest audit (hotel admin); separate from platform OwnerDailyDigestLog.
@@ -816,6 +831,7 @@ model Booking {
   housekeepingTasks                      HousekeepingTask[]
   guestFollowUps                         GuestFollowUp[]
   feedbacks                              GuestFeedback[]
+  commissions                            Commission[]
 
   @@unique([hotelId, referenceCode])
   @@index([hotelId, referenceCode])
@@ -1243,10 +1259,78 @@ model Plan {
   /// Phase D: gates appearance on the public marketplace surface (`/` and `/search`).
   /// Plans can opt-in to marketplace exposure independently of feature flags.
   supportsMarketplace     Boolean        @default(false)
+  /// Phase E: commission rate in basis points (1% = 100 bps). 0 = no commission.
+  /// Snapshotted onto each Commission row at booking time so plan changes don't
+  /// retroactively rewrite the ledger.
+  commissionBps           Int            @default(0)
   isActive                Boolean        @default(true)
   createdAt               DateTime       @default(now())
   updatedAt               DateTime       @updatedAt
   subscriptions           Subscription[]
+  commissions             Commission[]
+}
+
+/// Phase E: ledger of marketplace commissions earned by ChatAstay per booking.
+/// One row per Booking with `source = CHATASTAY_MARKETPLACE`. Created inside the
+/// same transaction as the booking confirmation (createConfirmedBookingAtomic),
+/// so the ledger can never disagree with confirmed bookings.
+///
+/// `percentBps` is snapshotted from Plan.commissionBps at booking time; subsequent
+/// plan changes do not rewrite history. `amountCalc` is also snapshotted so the
+/// row stays correct even if the booking total later changes (cancellations
+/// flip status to REVERSED, never edit the original row).
+model Commission {
+  id          String           @id @default(cuid())
+  hotelId     String
+  hotel       Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookingId   String
+  booking     Booking          @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  planId      String?
+  plan        Plan?            @relation(fields: [planId], references: [id], onDelete: SetNull)
+  /// Plan code at booking time (snapshot; survives plan rename/recode).
+  planCodeSnapshot String?
+  percentBps  Int
+  amountCalc  Float
+  currency    String           @default("OMR")
+  status      CommissionStatus @default(PENDING)
+  /// Free-text reason captured when transitioning to REVERSED (e.g. "guest cancelled").
+  statusReason String?
+  statusChangedAt DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([hotelId, status, createdAt])
+  @@index([bookingId])
+}
+
+/// Phase E: short-lived booking intent created when a guest taps "Continue on
+/// WhatsApp" from the public marketplace. The token is embedded in the wa.me
+/// deep-link message text; when WhatsApp webhook receives the first inbound
+/// message containing the token, it seeds a BookingDraft for the now-known
+/// Guest from the intent values. Intents auto-expire (`expiresAt`) so stale
+/// links don't leak context.
+model MarketplaceBookingIntent {
+  id              String    @id @default(cuid())
+  /// URL-safe random token (~24 chars). Embedded in the wa.me deep link.
+  token           String    @unique
+  hotelId         String
+  hotel           Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  hotelSlug       String
+  /// Snapshotted dates / occupancy from the marketplace search at link time.
+  checkIn         DateTime?
+  checkOut        DateTime?
+  guests          Int       @default(2)
+  rooms           Int       @default(1)
+  preferredRoomTypeId String?
+  /// Set when the WhatsApp side has consumed this intent (one-shot semantics).
+  claimedByGuestId String?
+  claimedAt       DateTime?
+  /// Hard expiry (default 30 days from creation; webhook ignores stale tokens).
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+
+  @@index([hotelId, createdAt])
+  @@index([expiresAt])
 }
 
 model Subscription {

@@ -15,6 +15,8 @@ import { parseGuestMessage, validateParsedBookingInput } from "../core/parse";
 import { findAvailableRoomType, findAvailableRoomTypes } from "../core/availability";
 import { roomTypeAllowsOccupancy } from "../core/roomOccupancy";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
+import { extractMarketplaceIntentToken } from "../routes/marketplace";
+import { claimMarketplaceIntent } from "./marketplaceIntentClaim";
 import { BookingPaymentLinkUnavailableError, createBookingPaymentLink } from "../core/bookingPayments";
 import {
   computeMealPlanSurchargeForStay,
@@ -2791,6 +2793,29 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     direction: "incoming",
     messageText: input.text
   });
+
+  /// Phase E: claim a marketplace booking intent if the inbound text carries the
+  /// `[#chatastay-mp:<token>]` marker (minted by `/m/start` on the public
+  /// marketplace). On success we seed (or refresh) a BookingDraft for this
+  /// guest from the saved dates / occupancy so `loadConversationSession` below
+  /// can pick them up and the menu skips date-prompt steps. Errors are
+  /// swallowed: the guest still gets the normal flow.
+  try {
+    const marketplaceToken = extractMarketplaceIntentToken(input.text);
+    if (marketplaceToken) {
+      await claimMarketplaceIntent({
+        token: marketplaceToken,
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id
+      });
+    }
+  } catch (err) {
+    console.error(
+      "marketplace intent claim failed:",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
 
   const persisted = await loadConversationSession({
     hotelId: hotel.id,
