@@ -11,6 +11,7 @@ import { BookingStatus } from "@prisma/client";
 import { createHttpApp } from "../src/httpApp";
 import { prisma } from "../src/db";
 import { addDays, startOfDay, toIsoDate } from "../src/core/availability";
+import { formatYmdInHotelZone, readWallClockInZone, wallClockLocalToUtc } from "../src/core/guestMessagingSchedule";
 
 const HOTEL_SLUG = (process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort").trim();
 const DEMO_OWNER_EMAIL = "demo.owner@pms.local";
@@ -39,10 +40,27 @@ function ymdLocal(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+function assertDigestTimezoneWindow(): void {
+  const tz = "Asia/Muscat";
+  const sampleUtc = new Date("2026-05-07T08:00:00.000Z");
+  const digestKey = formatYmdInHotelZone(sampleUtc, tz);
+  const rangeStart = wallClockLocalToUtc(digestKey, "00:00", tz);
+  const nextDay = new Date(Date.UTC(2026, 4, 8));
+  const rangeEndExclusive = wallClockLocalToUtc(formatYmdInHotelZone(nextDay, tz), "00:00", tz);
+  const startWallClock = readWallClockInZone(rangeStart, tz);
+
+  assert(digestKey === "2026-05-07", "digest helper formats Asia/Muscat date as YYYY-MM-DD");
+  assert(!Number.isNaN(rangeStart.getTime()), "digest helper converts Asia/Muscat local midnight to UTC");
+  assert(!Number.isNaN(rangeEndExclusive.getTime()), "digest helper converts next Asia/Muscat midnight to UTC");
+  assert(startWallClock.ymd === digestKey && startWallClock.minOfDay === 0, "digest helper round-trips local midnight");
+}
+
 async function main(): Promise<void> {
   if (!process.env.WHATSAPP_VERIFY_TOKEN?.trim()) {
     process.env.WHATSAPP_VERIFY_TOKEN = "crit-flows-verify-token";
   }
+
+  assertDigestTimezoneWindow();
 
   await prisma.$connect();
 
@@ -231,7 +249,7 @@ async function main(): Promise<void> {
   {
     const res = await agent.post("/admin/front-desk/check-in").type("form").send({
       guestFullName: "Critical Flow Walk-in",
-      guestPhone: "91118877",
+      guestPhone: `91${guestPhoneSuffix}`,
       guestPhoneCountryCode: "+968",
       guestEmail: "",
       nationality: "",

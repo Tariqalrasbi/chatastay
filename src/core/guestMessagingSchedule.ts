@@ -34,16 +34,37 @@ export function readWallClockInZone(d: Date, timeZone: string): { ymd: string; m
   const p = f.formatToParts(d);
   const get = (type: Intl.DateTimeFormatPartTypes) => p.find((x) => x.type === type)?.value ?? "";
   const ymd = `${get("year")}-${get("month")}-${get("day")}`;
-  const h = parseInt(get("hour"), 10);
+  const parsedHour = parseInt(get("hour"), 10);
+  const h = parsedHour === 24 ? 0 : parsedHour;
   const m = parseInt(get("minute"), 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || !Number.isFinite(h) || !Number.isFinite(m)) {
+    return { ymd: "", minOfDay: Number.NaN };
+  }
   return { ymd, minOfDay: h * 60 + m };
 }
 
 /** Interpret YYYY-MM-DD + HH:MM as civil time in `timeZone` and return the corresponding UTC instant. */
 export function wallClockLocalToUtc(ymd: string, hm: string, timeZone: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || !/^\d{2}:\d{2}$/.test(hm)) {
+    return new Date(NaN);
+  }
   const [y, mo, d] = ymd.split("-").map((x) => parseInt(x, 10));
   const [hh, mm] = hm.split(":").map((x) => parseInt(x, 10));
-  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d) || !Number.isFinite(hh) || !Number.isFinite(mm)) {
+  if (
+    !Number.isFinite(y) ||
+    !Number.isFinite(mo) ||
+    !Number.isFinite(d) ||
+    !Number.isFinite(hh) ||
+    !Number.isFinite(mm) ||
+    mo < 1 ||
+    mo > 12 ||
+    d < 1 ||
+    d > 31 ||
+    hh < 0 ||
+    hh > 23 ||
+    mm < 0 ||
+    mm > 59
+  ) {
     return new Date(NaN);
   }
   const wantMin = hh * 60 + mm;
@@ -101,12 +122,15 @@ export function getSafeSendTime(desiredSendUtc: Date, timeZone: string): {
 }
 
 export function formatYmdInHotelZone(iso: Date, hotelTimezone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
+  const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: hotelTimezone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
-  }).format(iso);
+  }).formatToParts(iso);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((x) => x.type === type)?.value ?? "";
+  const ymd = `${get("year")}-${get("month")}-${get("day")}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? ymd : "";
 }
 
 export function isDuringHotelQuietHours(utc: Date, timeZone: string): boolean {
