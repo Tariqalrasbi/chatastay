@@ -1559,10 +1559,7 @@ function renderLayout(
       ...(canNavBookings
         ? [
             { href: "/admin/bookings", label: "All reservations" },
-            { href: "/admin/calendar", label: "Calendar" },
-            ...(canCreateBookings
-              ? [{ href: "/admin/front-desk/check-in", label: "New reservation / walk-in" }]
-              : [])
+            { href: "/admin/calendar", label: "Calendar" }
           ]
         : [])
     ]
@@ -1576,6 +1573,7 @@ function renderLayout(
       ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room rack" }] : []),
       ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Arrivals / check-in" }] : []),
       ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Departures / check-out" }] : []),
+      ...(canNavBookings ? [{ href: "/admin/guests", label: "Guests" }] : []),
       ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "Guest bills &amp; folios" }] : []),
       ...(perm && hasPermission(perm, "ROOMS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover sheet" }] : []),
       ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
@@ -1600,7 +1598,7 @@ function renderLayout(
       { href: "/admin/hk/room-board", label: "Room status" },
       { href: "/admin/housekeeping", label: "Cleaning tasks" },
       { href: "/admin/hk", label: "My tasks" },
-      '<span class="nav-tab-placeholder" title="Coming soon" aria-disabled="true">Maintenance</span>'
+      { href: "/admin/maintenance", label: "Maintenance" }
     ]
   };
   const guestMessageTabs: AdminSection = {
@@ -1611,8 +1609,9 @@ function renderLayout(
         label: 'Conversations <span id="adminConvLiveBadge" class="nav-live-badge" hidden aria-live="polite">0</span>',
         attrs: "data-admin-conv-link"
       },
-      { href: "/admin/setup", label: "Chatbot &amp; auto-replies" },
-      { href: "/admin/conversations/group-messages", label: "Guest messages (broadcast)" }
+      { href: "/admin/whatsapp/templates", label: "Templates" },
+      { href: "/admin/conversations/group-messages", label: "Guest messages (broadcast)" },
+      { href: "/admin/whatsapp/failed-messages", label: "Failed messages" }
     ]
   };
   const foodBeverageTabs: AdminSection = {
@@ -1623,7 +1622,6 @@ function renderLayout(
       ...(canNavOutlet
         ? [
             { href: "/admin/outlet-dashboard", label: "Orders / KOT" },
-            { href: "/admin/fb/menu#fb-inhouse", label: "Room service (folio)" },
             { href: "/admin/outlet-orders", label: "Order history" },
             { href: "/admin/restaurant-ops", label: "Operations guide" }
           ]
@@ -12325,6 +12323,124 @@ async function renderGroupMessagesPage(
   res.type("html").send(renderLayout(content, true));
 }
 
+adminRouter.get("/whatsapp/templates", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>WhatsApp Templates</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const config = loadPartnerSetupConfig(hotel.id);
+  const templateRows = [
+    { name: "Welcome", use: "First reply / guest greeting", body: config.instantWelcomeTemplate },
+    { name: "Quote", use: "Availability and price reply", body: config.instantQuoteTemplate },
+    { name: "Unavailable", use: "No availability / alternative suggestion", body: config.instantUnavailableTemplate },
+    { name: "Confirmation", use: "Confirmed booking reply", body: config.instantConfirmationTemplate }
+  ]
+    .map(
+      (t) => `<tr>
+  <td><strong>${escapeHtml(t.name)}</strong><div class="muted" style="font-size:12px">${escapeHtml(t.use)}</div></td>
+  <td><pre style="white-space:pre-wrap;margin:0;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12px">${escapeHtml(t.body || "—")}</pre></td>
+</tr>`
+    )
+    .join("");
+  const content = `
+<h2>WhatsApp Templates</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Guest-facing WhatsApp reply templates. Edit the source values from Property setup, but review them here without leaving the WhatsApp Center.</p>
+<div class="actions">
+  <a class="btn-link primary" href="/admin/setup">Edit templates in Property setup</a>
+  <a class="btn-link" href="/admin/conversations">Open conversations</a>
+</div>
+<table>
+  <thead><tr><th>Template</th><th>Message body</th></tr></thead>
+  <tbody>${templateRows}</tbody>
+</table>
+<p class="muted" style="margin-top:12px">Supported placeholders include <code>{{hotel_name}}</code>, <code>{{guest_name}}</code>, <code>{{room_type}}</code>, <code>{{nightly_rate}}</code>, <code>{{nights}}</code>, <code>{{check_in}}</code>, <code>{{check_out}}</code>, and <code>{{booking_id}}</code>.</p>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/whatsapp/failed-messages", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Failed messages</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const since = addDays(new Date(), -7);
+  const [failedNotifications, failedRecipients] = await Promise.all([
+    prisma.notification.findMany({
+      where: {
+        hotelId: hotel.id,
+        status: NotificationStatus.FAILED,
+        createdAt: { gte: since }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 80,
+      include: { guest: { select: { fullName: true, phoneE164: true } } }
+    }),
+    prisma.marketingCampaignRecipient.findMany({
+      where: {
+        outcome: { in: ["FAILED", "ERROR"] },
+        createdAt: { gte: since },
+        campaign: { hotelId: hotel.id }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 80,
+      include: {
+        guest: { select: { fullName: true, phoneE164: true } },
+        campaign: { select: { id: true, name: true } }
+      }
+    })
+  ]);
+
+  const notifRows = failedNotifications
+    .map(
+      (n) => `<tr>
+  <td>${formatDateTime(n.createdAt)}</td>
+  <td>${escapeHtml(n.guest?.fullName ?? "—")}<div class="muted" style="font-size:12px">${escapeHtml(n.guest?.phoneE164 ?? "—")}</div></td>
+  <td>${escapeHtml(n.type)}</td>
+  <td><strong>${escapeHtml(n.title ?? "Failed notification")}</strong><div>${escapeHtml(n.body.slice(0, 180))}</div></td>
+</tr>`
+    )
+    .join("");
+  const recipientRows = failedRecipients
+    .map(
+      (r) => `<tr>
+  <td>${formatDateTime(r.createdAt)}</td>
+  <td><a class="inline-link" href="/admin/campaigns/${encodeURIComponent(r.campaign.id)}">${escapeHtml(r.campaign.name)}</a></td>
+  <td>${escapeHtml(r.guest.fullName ?? "—")}<div class="muted" style="font-size:12px">${escapeHtml(r.guest.phoneE164)}</div></td>
+  <td><span class="badge alert">${escapeHtml(r.outcome)}</span></td>
+  <td>${escapeHtml(r.errorDetail ?? "No error detail recorded.")}</td>
+</tr>`
+    )
+    .join("");
+  const content = `
+<h2>Failed Messages</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — WhatsApp / notification failures from the last 7 days, kept inside the WhatsApp Center workflow.</p>
+<div class="grid-2" style="align-items:start">
+  <section>
+    <h3>Failed notifications</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Guest</th><th>Type</th><th>Message</th></tr></thead>
+      <tbody>${notifRows || '<tr><td colspan="4">No failed notifications in the last 7 days.</td></tr>'}</tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Failed campaign recipients</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Campaign</th><th>Guest</th><th>Outcome</th><th>Detail</th></tr></thead>
+      <tbody>${recipientRows || '<tr><td colspan="5">No failed campaign recipient rows in the last 7 days.</td></tr>'}</tbody>
+    </table>
+  </section>
+</div>
+<p class="muted" style="margin-top:12px">For transport-level diagnostics, open <a class="inline-link" href="/admin/routing-health">Routing health</a>.</p>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
 adminRouter.get("/campaigns", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
   await renderGroupMessagesPage(res, {
     composeHref: "/admin/campaigns/new",
@@ -13318,6 +13434,77 @@ ${
       ? ""
       : '<p class="muted">Tip: paste the ChatStay booking ID, type part of the guest name, or enter mobile digits (with or without country code).</p>'
 }`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/guests", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Guests</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+
+  const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const where: Prisma.GuestWhereInput = { hotelId: hotel.id };
+  if (qRaw) {
+    where.OR = [
+      { fullName: { contains: qRaw } },
+      { phoneE164: { contains: qRaw } },
+      { email: { contains: qRaw } }
+    ];
+  }
+
+  const guests = await prisma.guest.findMany({
+    where,
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    take: 80,
+    include: {
+      _count: { select: { bookings: true } },
+      bookings: {
+        orderBy: { checkIn: "desc" },
+        take: 1,
+        select: { id: true, referenceCode: true, checkIn: true, checkOut: true, status: true }
+      }
+    }
+  });
+
+  const rows = guests
+    .map((g) => {
+      const latest = g.bookings[0] ?? null;
+      const latestStay = latest
+        ? `${formatDate(latest.checkIn)} → ${formatDate(latest.checkOut)}`
+        : "—";
+      const latestRef = latest?.referenceCode ?? latest?.id ?? "";
+      return `<tr>
+  <td><a class="inline-link" href="/admin/guests/${encodeURIComponent(g.id)}">${escapeHtml(g.fullName ?? "Unnamed guest")}</a></td>
+  <td>${escapeHtml(g.phoneE164)}</td>
+  <td>${escapeHtml(g.email ?? "—")}</td>
+  <td>${g._count.bookings}</td>
+  <td>${escapeHtml(latestStay)}</td>
+  <td>${latest ? `<span class="badge ${getBadgeClass(latest.status)}">${escapeHtml(latest.status)}</span>` : "—"}</td>
+  <td>${latest ? `<a class="btn-link" href="/admin/bookings/${encodeURIComponent(latest.id)}">${escapeHtml(latestRef)}</a>` : "—"}</td>
+</tr>`;
+    })
+    .join("");
+
+  const content = `
+<h2>Guests</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Guest directory for front desk lookup, VIP recognition, and recent-stay context.</p>
+<form method="get" action="/admin/guests" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:0 0 14px;max-width:720px">
+  <label style="flex:1;min-width:240px">Search guests
+    <input type="search" name="q" value="${escapeHtml(qRaw)}" placeholder="Name, phone, or email" style="width:100%;margin-top:4px;padding:10px 12px;border:1px solid #d8dee6;border-radius:10px" />
+  </label>
+  <button type="submit" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Search</button>
+  <a class="btn-link" href="/admin/guests">Clear</a>
+  <a class="btn-link" href="/admin/bookings/search">Find booking / folio</a>
+</form>
+<table>
+  <thead><tr><th>Guest</th><th>Phone</th><th>Email</th><th>Bookings</th><th>Latest stay</th><th>Status</th><th>Latest booking</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="7">No guests found.</td></tr>'}</tbody>
+</table>`;
   res.type("html").send(renderLayout(content, true));
 });
 
@@ -16303,6 +16490,87 @@ adminRouter.get("/restaurant-ops", requirePermission("OUTLET", "VIEW"), async (_
 </section>`;
   res.type("html").send(renderLayout(content, true));
 });
+
+adminRouter.get(
+  "/maintenance",
+  requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]),
+  async (_req, res) => {
+    const hotel = await prisma.hotel.findFirst({
+      where: { slug: activeHotelSlug() },
+      select: { id: true, displayName: true }
+    });
+    if (!hotel) {
+      res.type("html").send(renderLayout("<h2>Maintenance</h2><p>No hotel data.</p>", true));
+      return;
+    }
+
+    const [units, tasks] = await Promise.all([
+      prisma.roomUnit.findMany({
+        where: { hotelId: hotel.id, isActive: true },
+        orderBy: [{ roomType: { name: "asc" } }, { sortOrder: "asc" }, { name: "asc" }],
+        include: { roomType: { select: { name: true } } }
+      }),
+      prisma.housekeepingTask.findMany({
+        where: {
+          hotelId: hotel.id,
+          status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+        },
+        orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+        take: 100,
+        include: {
+          roomUnit: { select: { name: true, roomType: { select: { name: true } } } },
+          assignedTo: { select: { fullName: true, email: true } }
+        }
+      })
+    ]);
+
+    const maintenanceUnits = units.filter((u) => parseManualRoomStatusFromNotes(u.notes) === "MAINTENANCE");
+    const maintenanceTasks = tasks.filter((t) => /maintenance|repair|fix|broken|issue|fault/i.test(t.notes ?? ""));
+    const roomRows = maintenanceUnits
+      .map(
+        (u) => `<tr>
+  <td><strong>${escapeHtml(u.name)}</strong><div class="muted" style="font-size:12px">${escapeHtml(u.roomType.name)}</div></td>
+  <td><span class="badge alert">Maintenance</span></td>
+  <td>${escapeHtml((u.notes ?? "").replace(/\[status:MAINTENANCE\]/g, "").trim() || "Room marked out of service.")}</td>
+  <td><a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(u.id)}/details">Open room</a></td>
+</tr>`
+      )
+      .join("");
+    const taskRows = maintenanceTasks
+      .map(
+        (t) => `<tr>
+  <td><strong>${escapeHtml(t.roomUnit.name)}</strong><div class="muted" style="font-size:12px">${escapeHtml(t.roomUnit.roomType.name)}</div></td>
+  <td><span class="badge ${t.status === HousekeepingTaskStatus.IN_PROGRESS ? "pending" : "alert"}">${escapeHtml(t.status)}</span></td>
+  <td>${escapeHtml(t.assignedTo?.fullName ?? t.assignedTo?.email ?? "Unassigned")}</td>
+  <td>${escapeHtml(t.notes ?? "—")}</td>
+  <td>${formatDateTime(t.createdAt)}</td>
+</tr>`
+      )
+      .join("");
+
+    const content = `
+<h2>Maintenance</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Rooms out of service and housekeeping notes that need engineering attention.</p>
+<div class="grid-2" style="align-items:start">
+  <section>
+    <h3>Rooms marked maintenance</h3>
+    <table>
+      <thead><tr><th>Room</th><th>Status</th><th>Note</th><th></th></tr></thead>
+      <tbody>${roomRows || '<tr><td colspan="4">No rooms are currently marked maintenance.</td></tr>'}</tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Maintenance-like housekeeping notes</h3>
+    <table>
+      <thead><tr><th>Room</th><th>Task</th><th>Assignee</th><th>Note</th><th>Created</th></tr></thead>
+      <tbody>${taskRows || '<tr><td colspan="5">No open maintenance notes in the housekeeping queue.</td></tr>'}</tbody>
+    </table>
+  </section>
+</div>
+<p class="muted" style="margin-top:12px">To move a room into or out of maintenance, use <a class="inline-link" href="/admin/room-board">Room rack</a> and update the room status.</p>`;
+    res.type("html").send(renderLayout(content, true));
+  }
+);
 
 adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({

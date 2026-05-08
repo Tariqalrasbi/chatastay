@@ -1732,15 +1732,20 @@
           if (path === "/admin/profile") return "account";
           if (path.startsWith("/admin/leads") || path.startsWith("/admin/onboard")) return "dashboard";
           if (
+            path.startsWith("/admin/bookings/search") ||
+            path.startsWith("/admin/guests") ||
+            path.startsWith("/admin/handover-sheet") ||
+            path.startsWith("/admin/shifts") ||
+            path.startsWith("/admin/shift-close") ||
+            path.startsWith("/admin/shift-report")
+          )
+            return "frontdesk";
+          if (
             path.startsWith("/admin/users") ||
             path.startsWith("/admin/audit-trail") ||
             path.startsWith("/admin/subscription") ||
             path.startsWith("/admin/billing") ||
             path.startsWith("/admin/integrations") ||
-            path.startsWith("/admin/handover-sheet") ||
-            path.startsWith("/admin/shifts") ||
-            path.startsWith("/admin/shift-close") ||
-            path.startsWith("/admin/shift-report") ||
             path.startsWith("/admin/setup")
           )
             return "account";
@@ -1761,7 +1766,12 @@
             path.startsWith("/admin/outlet-orders")
           )
             return "fb";
-          if (path.startsWith("/admin/conversations") || path.startsWith("/admin/campaigns")) return "comms";
+          if (
+            path.startsWith("/admin/conversations") ||
+            path.startsWith("/admin/campaigns") ||
+            path.startsWith("/admin/whatsapp")
+          )
+            return "comms";
           if (
             path.startsWith("/admin/bookings") ||
             path.startsWith("/admin/calendar") ||
@@ -1775,7 +1785,7 @@
           )
             return "inventory";
           if (path.startsWith("/admin/room-board") || path.startsWith("/admin/front-desk")) return "frontdesk";
-          if (path.startsWith("/admin/housekeeping") || path.startsWith("/admin/hk")) return "housekeeping";
+          if (path.startsWith("/admin/housekeeping") || path.startsWith("/admin/hk") || path.startsWith("/admin/maintenance")) return "housekeeping";
           return "dashboard";
         };
         var activeGroup = groupByPath(currentPath);
@@ -1882,6 +1892,7 @@
         var inFlightPages = new Map();
         var shouldInstantNavigate = function (link) {
           if (!link || link.target || link.hasAttribute("download")) return false;
+          if (link.hasAttribute("data-no-swap") || link.closest("[data-no-swap]")) return false;
           var href = link.getAttribute("href") || "";
           if (!href || href[0] === "#" || href.startsWith("javascript:") || href.startsWith("mailto:") || href.startsWith("tel:")) return false;
           try {
@@ -1910,6 +1921,8 @@
             })
             .then(function (res) {
               if (!res.ok) throw new Error("Navigation fetch failed: " + res.status);
+              var contentType = res.headers.get("content-type") || "";
+              if (contentType && contentType.indexOf("text/html") === -1) throw new Error("Navigation response was not HTML");
               return res.text().then(function (html) {
                 return { html: html, status: res.status };
               });

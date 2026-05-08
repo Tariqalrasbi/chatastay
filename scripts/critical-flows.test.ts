@@ -39,6 +39,29 @@ function assert(cond: unknown, message: string): void {
   else ok(message);
 }
 
+function extractSectionTabBlocks(html: string): string[] {
+  return Array.from(html.matchAll(/<div class="section-tabs"[^>]*>[\s\S]*?<\/div>/g)).map((m) => m[0] ?? "");
+}
+
+function extractAdminHrefs(html: string): string[] {
+  return Array.from(html.matchAll(/href="(\/admin\/[^"#?]*)/g)).map((m) => m[1] ?? "").filter(Boolean);
+}
+
+function assertSectionTabsAreStable(html: string, expectedHref: string): void {
+  const blocks = extractSectionTabBlocks(html);
+  assert(blocks.length > 0, `navigation: ${expectedHref} renders section-tab chrome`);
+  const allHrefs = blocks.flatMap(extractAdminHrefs);
+  assert(allHrefs.includes(expectedHref), `navigation: ${expectedHref} remains visible in its section tabs`);
+  for (const block of blocks) {
+    const hrefs = extractAdminHrefs(block);
+    const duplicates = hrefs.filter((href, index) => hrefs.indexOf(href) !== index);
+    assert(
+      duplicates.length === 0,
+      `navigation: no duplicate hrefs inside section-tabs for ${expectedHref}${duplicates.length ? ` (${[...new Set(duplicates)].join(", ")})` : ""}`
+    );
+  }
+}
+
 function ymdLocal(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -184,6 +207,54 @@ async function main(): Promise<void> {
   {
     const res = await agent.get("/admin/module/front-desk");
     assert(res.status === 200 && res.text.includes("Command Center"), "GET /admin/module/front-desk (dashboard) when authenticated");
+  }
+
+  {
+    const navHrefs = [
+      "/admin/module/front-desk",
+      "/admin/alert-center",
+      "/admin/bookings",
+      "/admin/calendar",
+      "/admin/room-board",
+      "/admin/front-desk/check-in",
+      "/admin/front-desk/check-out",
+      "/admin/guests",
+      "/admin/bookings/search",
+      "/admin/handover-sheet",
+      "/admin/shift-close",
+      "/admin/shifts",
+      "/admin/rooms",
+      "/admin/offers",
+      "/admin/inventory",
+      "/admin/housekeeping",
+      "/admin/maintenance",
+      "/admin/conversations",
+      "/admin/whatsapp/templates",
+      "/admin/conversations/group-messages",
+      "/admin/whatsapp/failed-messages",
+      "/admin/fb/menu",
+      "/admin/outlet-dashboard",
+      "/admin/outlet-orders",
+      "/admin/restaurant-ops",
+      "/admin/reports-center",
+      "/admin/management-kpi",
+      "/admin/daily-digest",
+      "/admin/ai-analytics",
+      "/admin/booking-funnel",
+      "/admin/routing-health",
+      "/admin/profile",
+      "/admin/setup",
+      "/admin/users",
+      "/admin/audit-trail",
+      "/admin/billing",
+      "/admin/subscription",
+      "/admin/integrations"
+    ];
+    for (const href of navHrefs) {
+      const res = await agent.get(href);
+      assert(res.status === 200 && /text\/html/i.test(String(res.headers["content-type"] ?? "")), `navigation: ${href} returns HTML`);
+      assertSectionTabsAreStable(res.text, href);
+    }
   }
 
   {
