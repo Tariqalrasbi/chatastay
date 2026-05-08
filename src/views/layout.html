@@ -1106,11 +1106,19 @@
         from { opacity: 0; transform: translateY(8px); }
         to   { opacity: 1; transform: translateY(0); }
       }
-      .panel { animation: wa-fade-up 0.32s ease-out both; }
-      .stat { animation: wa-fade-up 0.36s ease-out both; }
-      .stat:nth-child(2) { animation-delay: 0.04s; }
-      .stat:nth-child(3) { animation-delay: 0.08s; }
-      .stat:nth-child(4) { animation-delay: 0.12s; }
+      /* Operational PMS navigation should feel instant: no page-entry delay on app pages. */
+      .panel,
+      .stat {
+        animation: none;
+      }
+      .sidebar-nav a.is-nav-clicked,
+      .section-tabs a.is-nav-clicked {
+        filter: brightness(1.08);
+        box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.2), 0 10px 24px rgba(37, 211, 102, 0.2);
+      }
+      body.admin-navigating .content {
+        cursor: progress;
+      }
       html { scrollbar-width: thin; scrollbar-color: rgba(7, 94, 84, 0.32) transparent; }
       body::-webkit-scrollbar, .panel::-webkit-scrollbar, .top-subnav::-webkit-scrollbar { width: 10px; height: 10px; }
       body::-webkit-scrollbar-thumb, .panel::-webkit-scrollbar-thumb, .top-subnav::-webkit-scrollbar-thumb {
@@ -1357,6 +1365,48 @@
               var label = headerCells[index] || fallback;
               cell.setAttribute("data-label", label);
             });
+          });
+        });
+
+        // Keep server-rendered navigation feeling fast: warm same-origin admin GET
+        // pages before the click, and show clicked state immediately on pointer down.
+        var prefetched = new Set();
+        var shouldPrefetch = function (link) {
+          if (!link || link.target || link.hasAttribute("download")) return false;
+          var href = link.getAttribute("href") || "";
+          if (!href || href[0] === "#" || href.startsWith("javascript:") || href.startsWith("mailto:") || href.startsWith("tel:")) return false;
+          try {
+            var u = new URL(href, window.location.origin);
+            if (u.origin !== window.location.origin) return false;
+            if (u.pathname === window.location.pathname && u.search === window.location.search) return false;
+            return u.pathname.startsWith("/admin/");
+          } catch (e) {
+            return false;
+          }
+        };
+        var prefetchLink = function (link) {
+          if (!shouldPrefetch(link)) return;
+          var href = new URL(link.getAttribute("href") || "", window.location.origin).toString();
+          if (prefetched.has(href)) return;
+          prefetched.add(href);
+          window.fetch(href, {
+            method: "GET",
+            credentials: "same-origin",
+            headers: { Accept: "text/html" },
+            priority: "low"
+          }).catch(function () {});
+        };
+        document.querySelectorAll(".sidebar-nav a, .section-tabs a").forEach(function (link) {
+          link.addEventListener("pointerenter", function () {
+            prefetchLink(link);
+          });
+          link.addEventListener("focus", function () {
+            prefetchLink(link);
+          });
+          link.addEventListener("pointerdown", function () {
+            if (!shouldPrefetch(link)) return;
+            link.classList.add("is-nav-clicked");
+            document.body.classList.add("admin-navigating");
           });
         });
 

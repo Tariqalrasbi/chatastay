@@ -1830,7 +1830,7 @@ const commandCenterExtraStyles = `<style>
 .cc-table th { background:#f5fbf8; color:#52635e; }
 .cc-table td { border-bottom-color:#e6efeb; }
 .cc-alert-strip { border-color:#fecdd3; border-radius:16px; background:#fff5f6; box-shadow:0 8px 22px rgba(159,18,57,.06); }
-.cc-shell { animation: wa-fade-up 0.34s ease-out both; }
+.cc-shell { animation: none; }
 .cc-grid-main { gap:18px; }
 .cc-card { padding:18px 20px 20px; }
 .cc-card-head h2 { font-size:16px; letter-spacing:-0.025em; }

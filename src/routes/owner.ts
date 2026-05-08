@@ -1035,11 +1035,10 @@ function ownerLayout(content: string, authenticated: boolean): string {
         from { opacity: 0; transform: translateY(8px); }
         to   { opacity: 1; transform: translateY(0); }
       }
-      .panel { animation: wa-fade-up 0.32s ease-out both; }
-      .stat { animation: wa-fade-up 0.36s ease-out both; }
-      .stat:nth-child(2) { animation-delay: 0.04s; }
-      .stat:nth-child(3) { animation-delay: 0.08s; }
-      .stat:nth-child(4) { animation-delay: 0.12s; }
+      .panel,
+      .stat {
+        animation: none;
+      }
       html { scrollbar-width: thin; scrollbar-color: rgba(7, 94, 84, 0.32) transparent; }
       body::-webkit-scrollbar, .panel::-webkit-scrollbar { width: 10px; height: 10px; }
       body::-webkit-scrollbar-thumb, .panel::-webkit-scrollbar-thumb {
