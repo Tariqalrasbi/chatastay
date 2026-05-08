@@ -11,7 +11,8 @@ import {
   FolioStatus,
   FolioTransactionType,
   FolioTxnPaymentStatus,
-  FolioTxnSourceType
+  FolioTxnSourceType,
+  PaymentStatus
 } from "@prisma/client";
 import { prisma } from "../db";
 import { getFbFolioForBooking } from "./fbFolio";
@@ -250,7 +251,7 @@ export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
   const revenueCategory = mapOutletCategoryToRevenueCategory(input.outletCategory);
   const chargeCreatedBy = optionalHotelUserId(input.staffId);
 
-  return db.folioTransaction.create({
+  const charge = await db.folioTransaction.create({
     data: {
       hotelId: input.hotelId,
       folioId,
@@ -290,6 +291,10 @@ export async function postChargeToFolio(db: DbClient, input: PostChargeInput) {
       isVoided: false
     }
   });
+
+  await syncBookingPaymentStatusFromFolio(db, input.hotelId, input.bookingId);
+
+  return charge;
 }
 
 export type PostPaymentInput = {
@@ -313,6 +318,92 @@ export type PostPaymentInput = {
   /** When true, creates PaymentAllocation rows against oldest unpaid charge lines (FIFO). */
   allocateFifo?: boolean;
 };
+
+/**
+ * Mirrors `Booking.paymentStatus` to the live folio reality so dashboard
+ * counters (e.g. "Outstanding balances — N bookings not marked paid") stay in
+ * sync with what staff just did at the desk.
+ *
+ * Behaviour:
+ * - When outstanding ≤ 0.005 and the booking is currently PENDING /
+ *   REQUIRES_ACTION / FAILED → flip to SUCCEEDED.
+ * - When outstanding > 0.005 and the booking is currently SUCCEEDED (e.g. a
+ *   payment line was just voided) → revert to PENDING so it reappears in the
+ *   "still owes money" list.
+ * - LPO / FRIENDS_TRANSFER / REFUNDED are treated as manual classifications
+ *   and never auto-overwritten.
+ *
+ * Uses the same `DbClient` as the caller so it sees in-flight writes inside
+ * `prisma.$transaction(...)` blocks and stays atomic.
+ */
+export async function syncBookingPaymentStatusFromFolio(
+  db: DbClient,
+  hotelId: string,
+  bookingId: string
+): Promise<{ paymentStatus: PaymentStatus; outstandingBalance: number } | null> {
+  const booking = await db.booking.findFirst({
+    where: { id: bookingId, hotelId },
+    select: { id: true, totalAmount: true, paymentStatus: true }
+  });
+  if (!booking) return null;
+
+  const [txns, fb, intentsAgg] = await Promise.all([
+    db.folioTransaction.findMany({
+      where: { hotelId, bookingId },
+      select: {
+        transactionType: true,
+        netAmount: true,
+        grossAmount: true,
+        voidedAt: true,
+        isVoided: true
+      }
+    }),
+    getFbFolioForBooking(bookingId),
+    db.paymentIntent.aggregate({
+      where: { hotelId, bookingId, status: PaymentStatus.SUCCEEDED },
+      _sum: { amount: true }
+    })
+  ]);
+
+  let folioChargesNet = 0;
+  let totalPayments = 0;
+  let refundsTotal = 0;
+  for (const t of txns) {
+    if (t.voidedAt || t.isVoided) continue;
+    if (t.transactionType === FolioTransactionType.PAYMENT) {
+      totalPayments = round2(totalPayments + t.grossAmount);
+      continue;
+    }
+    if (t.transactionType === FolioTransactionType.REFUND) {
+      refundsTotal = round2(refundsTotal + t.grossAmount);
+      continue;
+    }
+    folioChargesNet = round2(folioChargesNet + t.netAmount);
+  }
+
+  const totalCharges = round2(booking.totalAmount + fb.subtotal + folioChargesNet);
+  const paid = round2(round2(intentsAgg._sum.amount ?? 0) + (totalPayments - refundsTotal));
+  const outstandingBalance = Math.max(0, round2(totalCharges - paid));
+  const isPaid = outstandingBalance <= 0.005;
+
+  let next: PaymentStatus | null = null;
+  if (
+    isPaid &&
+    (booking.paymentStatus === PaymentStatus.PENDING ||
+      booking.paymentStatus === PaymentStatus.REQUIRES_ACTION ||
+      booking.paymentStatus === PaymentStatus.FAILED)
+  ) {
+    next = PaymentStatus.SUCCEEDED;
+  } else if (!isPaid && booking.paymentStatus === PaymentStatus.SUCCEEDED) {
+    next = PaymentStatus.PENDING;
+  }
+
+  if (next !== null) {
+    await db.booking.update({ where: { id: booking.id }, data: { paymentStatus: next } });
+    return { paymentStatus: next, outstandingBalance };
+  }
+  return { paymentStatus: booking.paymentStatus, outstandingBalance };
+}
 
 export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) {
   await assertBookingGuestMatchesFolio(db, input.hotelId, input.bookingId, input.guestId);
@@ -401,6 +492,8 @@ export async function postPaymentToFolio(db: DbClient, input: PostPaymentInput) 
     }
   }
 
+  await syncBookingPaymentStatusFromFolio(db, input.hotelId, input.bookingId);
+
   return payment;
 }
 
@@ -462,7 +555,7 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
   const refundCreatedBy = optionalHotelUserId(input.staffId);
   const ref = truncateOptional(input.referenceNumber, 120);
   const noteLine = truncateOptional(input.notes, 2000);
-  return db.folioTransaction.create({
+  const refundTxn = await db.folioTransaction.create({
     data: {
       hotelId: input.hotelId,
       folioId,
@@ -495,6 +588,10 @@ export async function postRefundToFolio(db: DbClient, input: PostRefundInput) {
       isVoided: false
     }
   });
+
+  await syncBookingPaymentStatusFromFolio(db, input.hotelId, input.bookingId);
+
+  return refundTxn;
 }
 
 export async function voidFolioTransaction(
@@ -527,6 +624,8 @@ export async function voidFolioTransaction(
       updatedByUserId: voidActor
     }
   });
+
+  await syncBookingPaymentStatusFromFolio(db, params.hotelId, params.bookingId);
 }
 
 export async function listFolioTransactions(params: {
