@@ -420,7 +420,9 @@ function defaultPermissionsForRole(role: string): PermissionMatrix {
   if (role === "HOUSEKEEPING") {
     const p = buildNoPermissions();
     p.HOUSEKEEPING = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
-    p.ROOMS = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
+    // Housekeepers update room status through HOUSEKEEPING-gated routes only.
+    // ROOMS is read-only so they can see the rack but never edit rates / unit metadata.
+    p.ROOMS = { VIEW: true, EDIT: false, CREATE: false, DELETE: false, MANAGE: false };
     return p;
   }
   if (role === "FINANCE") {
@@ -440,9 +442,16 @@ function defaultPermissionsForRole(role: string): PermissionMatrix {
   }
   if (role === "FRONTDESK") {
     const p = buildNoPermissions();
+    // Best-practice receptionist scope (Opera / Cloudbeds / Mews / eZee parity):
+    // operate the room rack, take walk-ins, edit bookings, post folio charges,
+    // collect payments, post folio invoices, view housekeeping status, and run
+    // guest WhatsApp conversations. No revenue-management (rates), no platform
+    // configuration, no staff/permissions, no F&B menu admin, no analytics.
     p.ROOMS = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
     p.BOOKINGS = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
     p.CONVERSATIONS = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    p.HOUSEKEEPING = { VIEW: true, EDIT: false, CREATE: false, DELETE: false, MANAGE: false };
+    p.BILLING = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
     return p;
   }
   return buildNoPermissions();
@@ -1377,6 +1386,15 @@ function renderLayout(
   const useOwnerChrome = activeWs === "owner";
   const useRestaurantChrome = activeWs === "restaurant";
   const useHousekeepingManagerChrome = activeWs === "housekeeping" && role !== "HOUSEKEEPING";
+  // Settings / property setup / staff & permissions / billing / integrations are
+  // managerial scope. A FRONTDESK / RESTAURANT / HOUSEKEEPING staff session must
+  // never expose those entry points in the sidebar — they get a personal "Profile"
+  // link instead. Owners and managers (including users with explicit USERS:VIEW)
+  // continue to see the full Settings group.
+  const isManagerialRole = role === "OWNER" || role === "MANAGER";
+  const canSeeAdminSettings = Boolean(
+    isManagerialRole || (perm && hasPermission(perm, "USERS", "VIEW"))
+  );
   const canNavHousekeeping =
     !perm ||
     hasPermission(perm, "HOUSEKEEPING", "VIEW") ||
@@ -1426,11 +1444,17 @@ function renderLayout(
     sess && permLike && typeof activeWs !== "undefined"
       ? workspaceHomeUrl(activeWs, String(role ?? ""))
       : "/admin/profile";
+  // Non-managers (FRONTDESK / HOUSEKEEPING / RESTAURANT) only ever see a personal
+  // "Profile" entry; the full Settings group is reserved for managers/owners.
+  const settingsNavItem: AdminNavItem = canSeeAdminSettings
+    ? { group: "account", href: "/admin/setup", label: "Settings" }
+    : { group: "account", href: "/admin/profile", label: "Profile" };
   const navHtml = authenticated
     ? role === "HOUSEKEEPING"
       ? renderNavLinks([
           { group: "dashboard", href: primaryTodayHref, label: "Today" },
-          { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" }
+          { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" },
+          settingsNavItem
         ])
       : useOwnerChrome
         ? renderNavLinks([
@@ -1442,43 +1466,50 @@ function renderLayout(
             canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
             canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
             canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
-            { group: "account", href: "/admin/setup", label: "Settings" }
+            settingsNavItem
           ])
         : useRestaurantChrome
           ? renderNavLinks([
               { group: "dashboard", href: "/admin/module/restaurant", label: "Today" },
               canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
-              { group: "account", href: "/admin/setup", label: "Settings" }
+              settingsNavItem
             ])
           : useHousekeepingManagerChrome
             ? renderNavLinks([
                 { group: "dashboard", href: "/admin/module/housekeeping", label: "Today" },
                 { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" },
                 canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Room grid" } : false,
-                { group: "account", href: "/admin/setup", label: "Settings" }
+                settingsNavItem
               ])
             : useFrontDeskChrome
               ? renderNavLinks([
                   { group: "dashboard", href: primaryTodayHref, label: "Today" },
                   canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
                   canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
-                  canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+                  // FRONTDESK does not manage rates / inventory; that surface is reserved for
+                  // OWNER / MANAGER chromes (revenue management). Best-practice parity with
+                  // Opera / Cloudbeds / Mews / eZee receptionist sidebars.
+                  canSeeAdminSettings && canNavRooms
+                    ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" }
+                    : false,
                   canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
                   canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
                   canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
                   canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
-                  { group: "account", href: "/admin/setup", label: "Settings" }
+                  settingsNavItem
                 ])
               : renderNavLinks([
                   { group: "dashboard", href: primaryTodayHref, label: "Today" },
                   canNavBookings ? { group: "reservations", href: "/admin/bookings", label: "Reservations" } : false,
                   canNavRooms ? { group: "frontdesk", href: "/admin/room-board", label: "Front Desk" } : false,
-                  canNavRooms ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" } : false,
+                  canSeeAdminSettings && canNavRooms
+                    ? { group: "inventory", href: "/admin/rooms", label: "Rooms &amp; Rates" }
+                    : false,
                   canNavHousekeeping ? { group: "housekeeping", href: "/admin/housekeeping", label: "Housekeeping" } : false,
                   canNavComms ? { group: "comms", href: "/admin/conversations", label: "WhatsApp Center" } : false,
                   canNavFb ? { group: "fb", href: "/admin/fb/menu", label: "Restaurant &amp; Café" } : false,
                   canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
-                  { group: "account", href: "/admin/setup", label: "Settings" }
+                  settingsNavItem
                 ])
     : '<a href="/admin/login">Login</a>';
   /// PMS UX cleanup: the dedicated "Workspaces" picker page duplicated sidebar groups
@@ -1631,6 +1662,14 @@ function renderLayout(
       { href: "/admin/integrations", label: "Integrations" }
     ]
   };
+  // Slim "Profile" group for FRONTDESK / RESTAURANT / HOUSEKEEPING staff sessions.
+  // No property setup, no staff/permissions, no billing — those are managerial. Mirrors
+  // Cloudbeds / Mews / eZee staff "Profile" surface (sign-out is handled in the sidebar).
+  const personalAccountTabs: AdminSection = {
+    group: "account",
+    links: [{ href: "/admin/profile", label: "My profile" }]
+  };
+  const accountTabsForChrome = canSeeAdminSettings ? adminTabs : personalAccountTabs;
   const showFrontDeskSection = canNavRooms || canCreateBookings || canNavBookings;
   /// One unified sidebar for hotel staff & managers. Reports + Settings are universal,
   /// gated by their respective permissions (REPORTS:VIEW, USERS:VIEW, BILLING:VIEW) so a
@@ -1638,16 +1677,18 @@ function renderLayout(
   /// either to switch "workspace" to find them. This eliminates the second nav system the
   /// old workspace picker created (Today / Restaurant / Housekeeping / Owner cards that
   /// duplicated sidebar groups).
+  // FRONTDESK chrome: receptionist surface — reservations, front desk operations,
+  // housekeeping awareness, guest comms. NO inventory/rate management (managerial).
   const fdTabs = renderSections([
     todayTabs,
     canNavBookings ? reservationTabs : false,
     showFrontDeskSection ? frontDeskTabs : false,
-    canNavRooms ? inventoryTabs : false,
+    canSeeAdminSettings && canNavRooms ? inventoryTabs : false,
     canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
     canNavFb ? foodBeverageTabs : false,
     canNavReports ? reportTabs : false,
-    adminTabs
+    accountTabsForChrome
   ]);
   const ownerTabs = renderSections([
     todayTabs,
@@ -1662,7 +1703,7 @@ function renderLayout(
     reportTabs,
     adminTabs
   ]);
-  const restaurantTabs = renderSections([todayTabs, foodBeverageTabs, adminTabs]);
+  const restaurantTabs = renderSections([todayTabs, foodBeverageTabs, accountTabsForChrome]);
   const hkManagerTabs = renderSections([
     todayTabs,
     {
@@ -1673,18 +1714,18 @@ function renderLayout(
         ...(perm && hasPermission(perm, "BOOKINGS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover" }] : [])
       ]
     },
-    adminTabs
+    accountTabsForChrome
   ]);
   const fullTabs = renderSections([
     todayTabs,
     canNavBookings ? reservationTabs : false,
     showFrontDeskSection ? frontDeskTabs : false,
-    canNavRooms ? inventoryTabs : false,
+    canSeeAdminSettings && canNavRooms ? inventoryTabs : false,
     canNavHousekeeping ? housekeepingTabs : false,
     canNavComms ? guestMessageTabs : false,
     canNavFb ? foodBeverageTabs : false,
     canNavReports ? reportTabs : false,
-    adminTabs
+    accountTabsForChrome
   ]);
   const sectionTabsHtml = authenticated
     ? useOwnerChrome
