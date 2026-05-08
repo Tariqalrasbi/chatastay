@@ -1670,10 +1670,7 @@
             <div class="sidebar-logout">{{logoutAction}}</div>
           </div>
         </div>
-        <div class="hotel-card">
-          <strong>{{hotelName}}</strong>
-          <span>{{hotelSign}}</span>
-        </div>
+        {{hotelCard}}
         {{propertySwitcher}}
         {{userIdentity}}
         <nav class="sidebar-nav">{{navLinks}}</nav>
@@ -1753,6 +1750,7 @@
             path.startsWith("/admin/reports") ||
             path.startsWith("/admin/management-kpi") ||
             path.startsWith("/admin/daily-digest") ||
+            path.startsWith("/admin/feedback-dashboard") ||
             path.startsWith("/admin/ai-analytics") ||
             path.startsWith("/admin/analytics") ||
             path.startsWith("/admin/booking-funnel") ||

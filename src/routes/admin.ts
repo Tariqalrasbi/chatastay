@@ -157,12 +157,22 @@ import {
 } from "../core/shiftCloseReport";
 import {
   getBreakfastBuffetCountForToday,
+  getChefDailyPrepForToday,
   getFbOperationsSummary,
   listInHouseBookingsForHotelDay,
   recordWalkInDirectSale,
   type BreakfastBuffetCount,
-  type BuffetCategory
+  type BuffetCategory,
+  type ChefDailyPrep
 } from "../core/fbOperations";
+import {
+  describeAuditAction,
+  AUDIT_CATEGORY_LIST,
+  type AuditCategory,
+  type FriendlyAuditLine
+} from "../core/auditLabels";
+import { loadSmartHandoverSnapshot, type SmartHandoverSnapshot } from "../core/handoverSnapshot";
+import { loadFeedbackDashboard, type FeedbackDashboardData } from "../core/feedbackDashboard";
 import { buildManualCheckInPageHtml, manualCheckInFormFromBody, resolveRoomTypeIdForUnit } from "./manualCheckInForm";
 import { computeManualCheckInRoomSelection } from "./manualCheckInRoomSelection";
 import { sendWhatsAppDocument, sendWhatsAppText, trySendWhatsAppText } from "../whatsapp/send";
@@ -1366,7 +1376,7 @@ function getAdminNotificationScript(): string {
 function renderLayout(
   content: string,
   authenticated: boolean,
-  opts: { hotelName?: string; hotelSign?: string; hotelSlug?: string } = {}
+  opts: { hotelName?: string; hotelSign?: string; hotelSlug?: string; hotelKnown?: boolean } = {}
 ): string {
   const layout = readView("layout.html");
   const sess = authenticated ? auditActorContext.getStore()?.session : undefined;
@@ -1374,6 +1384,14 @@ function renderLayout(
   const resolvedHotelName = opts.hotelName ?? sess?.hotelName ?? hotelName;
   const resolvedHotelSlug = opts.hotelSlug ?? sess?.hotelSlug ?? defaultHotelSlug;
   const resolvedHotelSign = opts.hotelSign ?? hotelSign;
+  // When the visitor is unauthenticated AND we don't have a real hotel resolved
+  // (e.g. /admin/login?hotel=2 with a non-existent account number), suppress the
+  // hotel-card. Otherwise the sidebar renders a misleading "ChatStay Hotel Portal /
+  // Hotel account not found" badge that competes with the in-page error message.
+  const showHotelCard = authenticated || opts.hotelKnown === true;
+  const hotelCardHtml = showHotelCard
+    ? `<div class="hotel-card"><strong>${escapeHtml(resolvedHotelName)}</strong><span>${escapeHtml(resolvedHotelSign)}</span></div>`
+    : "";
   const uiErrorContextAttrs = sess
     ? ` data-ui-user-id="${escapeHtml(sess.staffId)}" data-ui-role="${escapeHtml(String(sess.role))}" data-ui-hotel-slug="${escapeHtml(resolvedHotelSlug)}"${
         sess.activePropertyId ? ` data-ui-property-id="${escapeHtml(String(sess.activePropertyId))}"` : ""
@@ -1640,6 +1658,7 @@ function renderLayout(
       { href: "/admin/reports-center", label: "Reports center" },
       { href: "/admin/management-kpi", label: "Revenue &amp; occupancy (KPI)" },
       { href: "/admin/daily-digest", label: "Daily digest" },
+      { href: "/admin/feedback-dashboard", label: "Guest feedback" },
       { href: "/admin/ai-analytics", label: "AI analytics" },
       { href: "/admin/booking-funnel", label: "Booking funnel" },
       { href: "/admin/routing-health", label: "Routing health" }
@@ -1752,8 +1771,7 @@ function renderLayout(
     .replaceAll("{{adminTitle}}", "ChatStay Admin")
     .replace("{{brandTagline}}", "WhatsApp-first booking ops")
     .replace("{{langSwitcher}}", langSwitcherHtml)
-    .replace("{{hotelName}}", escapeHtml(resolvedHotelName))
-    .replace("{{hotelSign}}", escapeHtml(resolvedHotelSign))
+    .replace("{{hotelCard}}", hotelCardHtml)
     .replace("{{propertySwitcher}}", propertySwitcherHtml)
     .replace("{{userIdentity}}", userIdentityHtml)
     .replace("{{navLinks}}", navHtml)
@@ -1975,6 +1993,502 @@ function renderBuffetCountCard(buffet: BreakfastBuffetCount): string {
   </div>
   ${empty}
 </section>`;
+}
+
+const chefPrepStyles = `<style>
+.chef-prep { display:grid; gap:18px; margin:0 0 22px; }
+.chef-meals { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+.chef-meal { background:#fff; border:1px solid #d6ebe1; border-radius:18px; padding:18px 20px; box-shadow:0 12px 30px rgba(15,44,38,.08); position:relative; overflow:hidden; }
+.chef-meal::before { content:""; position:absolute; left:0; top:0; bottom:0; width:6px; }
+.chef-meal.bf::before { background:linear-gradient(180deg,#22c55e,#15803d); }
+.chef-meal.lu::before { background:linear-gradient(180deg,#0ea5e9,#0369a1); }
+.chef-meal.di::before { background:linear-gradient(180deg,#a855f7,#6d28d9); }
+.chef-meal h3 { margin:0; font-size:14px; color:#475569; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; }
+.chef-meal .meal-emoji { font-size:22px; }
+.chef-meal .meal-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.chef-meal .meal-total { font-size:42px; font-weight:900; color:#0b1f1c; letter-spacing:-0.02em; line-height:1; margin:6px 0 4px; font-variant-numeric:tabular-nums; }
+.chef-meal .meal-breakdown { color:#475569; font-size:13px; }
+.chef-meal .meal-zero { color:#94a3b8; font-size:13px; }
+.chef-flag-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:14px; }
+.chef-flag-card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:16px 18px; box-shadow:0 10px 26px rgba(15,23,42,.05); }
+.chef-flag-card h4 { margin:0 0 4px; font-size:14px; color:#0f172a; letter-spacing:-0.01em; display:flex; align-items:center; gap:8px; }
+.chef-flag-card h4 .badge-pill { background:#eef2ff; color:#3730a3; font-size:11px; padding:3px 9px; border-radius:999px; font-weight:800; }
+.chef-flag-card.alert h4 .badge-pill { background:#fee2e2; color:#991b1b; }
+.chef-flag-card.warn h4 .badge-pill { background:#fef3c7; color:#92400e; }
+.chef-flag-card.ok h4 .badge-pill { background:#dcfce7; color:#166534; }
+.chef-flag-card p.muted { margin:0; color:#64748b; font-size:13px; }
+.chef-flag-card ul { margin:8px 0 0; padding-left:0; list-style:none; }
+.chef-flag-card li { padding:8px 10px; border-radius:10px; font-size:13px; line-height:1.45; }
+.chef-flag-card li + li { margin-top:4px; }
+.chef-flag-card li strong { color:#0f172a; }
+.chef-flag-card li .muted { color:#64748b; font-size:12px; }
+.chef-flag-card.alert li { background:#fff5f5; border:1px solid #fecaca; }
+.chef-flag-card.warn li { background:#fffbeb; border:1px solid #fed7aa; }
+.chef-flag-card.ok li { background:#f0fdf4; border:1px solid #bbf7d0; }
+.chef-flag-card.neutral li { background:#f8fafc; border:1px solid #e2e8f0; }
+.chef-room-pill { display:inline-block; background:#0f766e; color:#fff; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:800; letter-spacing:0.03em; margin-left:6px; }
+@media (max-width:560px) {
+  .chef-meal .meal-total { font-size:34px; }
+}
+</style>`;
+
+function renderChefMealCard(label: string, emoji: string, tone: "bf" | "lu" | "di", row: { adults: number; children: number; total: number; bookings: number }): string {
+  if (!row.total) {
+    return `<div class="chef-meal ${tone}">
+      <div class="meal-head"><h3>${escapeHtml(label)}</h3><span class="meal-emoji" aria-hidden="true">${emoji}</span></div>
+      <div class="meal-total">0</div>
+      <p class="meal-zero">Nobody on this meal plan today.</p>
+    </div>`;
+  }
+  return `<div class="chef-meal ${tone}">
+    <div class="meal-head"><h3>${escapeHtml(label)}</h3><span class="meal-emoji" aria-hidden="true">${emoji}</span></div>
+    <div class="meal-total">${row.total}</div>
+    <p class="meal-breakdown">${row.adults} adults · ${row.children} children · ${row.bookings} ${row.bookings === 1 ? "booking" : "bookings"}</p>
+  </div>`;
+}
+
+function renderChefDailyPrepDashboard(prep: ChefDailyPrep): string {
+  const lunchCard = renderChefMealCard("Lunch (Full-board)", "🥗", "lu", prep.lunch);
+  const dinnerCard = renderChefMealCard("Dinner (HB + FB)", "🍽️", "di", prep.dinner);
+  const breakfastTotals = prep.buffet.totals;
+  const breakfastCard = renderChefMealCard("Breakfast", "🍳", "bf", {
+    adults: breakfastTotals.adults,
+    children: breakfastTotals.children,
+    total: breakfastTotals.total,
+    bookings: breakfastTotals.bookings
+  });
+
+  const vipTone = prep.vipCount > 0 ? "ok" : "neutral";
+  const vipList = prep.vipsInHouse.length
+    ? `<ul>${prep.vipsInHouse
+        .slice(0, 8)
+        .map(
+          (v) =>
+            `<li><strong>${escapeHtml(v.guestName)}</strong>${v.unitName ? `<span class="chef-room-pill">${escapeHtml(v.unitName)}</span>` : ""}${
+              v.vipNote ? `<div class="muted">${escapeHtml(v.vipNote)}</div>` : ""
+            }</li>`
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No VIP guests in-house right now.</p>`;
+
+  const ticketTone = prep.pendingRoomServiceCount > 0 ? "warn" : "ok";
+  const ticketList = prep.pendingRoomService.length
+    ? `<ul>${prep.pendingRoomService
+        .map(
+          (t) =>
+            `<li><strong>${escapeHtml(t.guestName)}</strong>${t.unitName ? `<span class="chef-room-pill">${escapeHtml(t.unitName)}</span>` : ""} <span class="muted">${escapeHtml(t.status)} · ${t.ageMinutes} min ago</span>${
+              t.notes ? `<div class="muted">${escapeHtml(t.notes)}</div>` : ""
+            }</li>`
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No room-service tickets waiting.</p>`;
+
+  const dietaryTone = prep.dietaryMentions.length > 0 ? "alert" : "neutral";
+  const dietaryList = prep.dietaryMentions.length
+    ? `<ul>${prep.dietaryMentions
+        .map(
+          (d) =>
+            `<li><strong>${escapeHtml(d.guestName)}</strong>${d.unitName ? `<span class="chef-room-pill">${escapeHtml(d.unitName)}</span>` : ""}<div class="muted">${escapeHtml(d.note)}</div></li>`
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No allergy / dietary notes captured for in-house guests. Add details to a guest's VIP note to see them here.</p>`;
+
+  return `<section class="chef-prep" aria-label="Chef daily prep">
+    <div class="chef-meals">
+      ${breakfastCard}
+      ${lunchCard}
+      ${dinnerCard}
+    </div>
+    <div class="chef-flag-grid">
+      <div class="chef-flag-card ${vipTone}">
+        <h4>VIP guests in-house <span class="badge-pill">${prep.vipCount}</span></h4>
+        ${vipList}
+      </div>
+      <div class="chef-flag-card ${ticketTone}">
+        <h4>Pending room-service orders <span class="badge-pill">${prep.pendingRoomServiceCount}</span></h4>
+        ${ticketList}
+      </div>
+      <div class="chef-flag-card ${dietaryTone}">
+        <h4>Allergies &amp; dietary notes <span class="badge-pill">${prep.dietaryMentions.length}</span></h4>
+        ${dietaryList}
+      </div>
+    </div>
+  </section>`;
+}
+
+const smartHandoverStyles = `<style>
+.smart-handover { display:grid; gap:14px; margin:14px 0 28px; }
+.smart-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }
+.smart-kpi { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:12px 14px; box-shadow:0 8px 22px rgba(15,23,42,.05); position:relative; }
+.smart-kpi h4 { margin:0; font-size:11px; color:#64748b; letter-spacing:0.05em; text-transform:uppercase; font-weight:800; }
+.smart-kpi .num { font-size:30px; font-weight:900; color:#0b1f1c; letter-spacing:-0.02em; line-height:1.1; margin-top:4px; font-variant-numeric:tabular-nums; }
+.smart-kpi .num.alert { color:#b91c1c; }
+.smart-kpi .num.warn { color:#b45309; }
+.smart-kpi .num.ok { color:#15803d; }
+.smart-kpi .sub { font-size:11.5px; color:#94a3b8; margin-top:2px; }
+.smart-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr)); gap:14px; }
+.smart-card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:16px 18px; box-shadow:0 10px 26px rgba(15,23,42,.05); }
+.smart-card h3 { margin:0 0 4px; font-size:15px; color:#0f172a; letter-spacing:-0.01em; display:flex; align-items:center; gap:8px; }
+.smart-card h3 .pill { font-size:11px; font-weight:800; padding:2px 9px; border-radius:999px; }
+.smart-card.attn h3 .pill { background:#fee2e2; color:#991b1b; }
+.smart-card.warn h3 .pill { background:#fef3c7; color:#92400e; }
+.smart-card.info h3 .pill { background:#e0f2fe; color:#075985; }
+.smart-card.ok h3 .pill { background:#dcfce7; color:#166534; }
+.smart-card .muted { color:#64748b; font-size:13px; margin:4px 0 0; }
+.smart-card ul { margin:10px 0 0; padding:0; list-style:none; max-height:280px; overflow-y:auto; }
+.smart-card li { padding:9px 11px; border-radius:10px; font-size:13px; line-height:1.45; border:1px solid transparent; margin-bottom:5px; }
+.smart-card li strong { color:#0f172a; }
+.smart-card li .muted { color:#64748b; font-size:12px; display:block; margin-top:2px; }
+.smart-card li .room-pill { display:inline-block; background:#0f766e; color:#fff; padding:1px 8px; border-radius:999px; font-size:10.5px; font-weight:800; letter-spacing:0.04em; margin-left:6px; vertical-align:1px; }
+.smart-card li .vip-pill { display:inline-block; background:#fef3c7; color:#854d0e; padding:1px 8px; border-radius:999px; font-size:10.5px; font-weight:800; letter-spacing:0.04em; margin-left:6px; }
+.smart-card.attn li { background:#fff5f5; border-color:#fecaca; }
+.smart-card.warn li { background:#fffbeb; border-color:#fed7aa; }
+.smart-card.info li { background:#f0f9ff; border-color:#bae6fd; }
+.smart-card.ok li { background:#f0fdf4; border-color:#bbf7d0; }
+.smart-empty { padding:14px 0 4px; color:#94a3b8; font-size:13px; }
+.handover-shift-title { margin-top:8px; font-size:14px; letter-spacing:0.04em; color:#475569; text-transform:uppercase; font-weight:800; }
+@media print {
+  .smart-card { break-inside:avoid; }
+  .smart-card ul { max-height:none; overflow:visible; }
+}
+</style>`;
+
+function smartTone(count: number): "attn" | "ok" {
+  return count > 0 ? "attn" : "ok";
+}
+
+function smartCardEmpty(message: string): string {
+  return `<p class="smart-empty">${escapeHtml(message)}</p>`;
+}
+
+function renderSmartHandoverSheet(snap: SmartHandoverSnapshot, hotelCurrency: string): string {
+  const t = snap.totals;
+  const fmtMoney = (amount: number, currency: string): string => `${currency} ${amount.toFixed(2).replace(/\.00$/, "")}`;
+  const fmtTime = (date: Date): string =>
+    date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const ymd = (d: Date): string =>
+    d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+
+  const arrivalsList = snap.pendingArrivals.length
+    ? `<ul>${snap.pendingArrivals
+        .slice(0, 12)
+        .map(
+          (a) =>
+            `<li><strong>${escapeHtml(a.guestName)}</strong>${a.isVip ? `<span class="vip-pill">VIP</span>` : ""}${
+              a.unitName ? `<span class="room-pill">Room ${escapeHtml(a.unitName)}</span>` : `<span class="room-pill" style="background:#94a3b8">No room yet</span>`
+            }<span class="muted">Expected ${escapeHtml(fmtTime(a.checkInExpected))} · ${a.adults} adult${a.adults === 1 ? "" : "s"}${a.children ? ` + ${a.children} children` : ""} · ${escapeHtml(a.roomTypeName)}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("Everyone expected today is already checked in. Nice work.");
+
+  const departuresList = snap.unpaidDepartures.length
+    ? `<ul>${snap.unpaidDepartures
+        .slice(0, 12)
+        .map(
+          (d) =>
+            `<li><strong>${escapeHtml(d.guestName)}</strong>${d.isVip ? `<span class="vip-pill">VIP</span>` : ""}${
+              d.unitName ? `<span class="room-pill">Room ${escapeHtml(d.unitName)}</span>` : ""
+            }<span class="muted">Outstanding <strong>${escapeHtml(fmtMoney(d.outstandingAmount, d.currency || hotelCurrency))}</strong> · checks out ${escapeHtml(ymd(d.checkOutExpected))}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("All current departures have settled their bills.");
+
+  const vipList = snap.vipInHouse.length
+    ? `<ul>${snap.vipInHouse
+        .slice(0, 12)
+        .map(
+          (v) =>
+            `<li><strong>${escapeHtml(v.guestName)}</strong>${v.unitName ? `<span class="room-pill">Room ${escapeHtml(v.unitName)}</span>` : ""}<span class="muted">Departs ${escapeHtml(ymd(v.checkOut))}${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("No VIP guests in-house right now.");
+
+  const complaintList = snap.openComplaints.length
+    ? `<ul>${snap.openComplaints
+        .slice(0, 12)
+        .map(
+          (c) =>
+            `<li><strong>${escapeHtml(c.guestName)}</strong> · <span style="color:#b91c1c;font-weight:800">${"★".repeat(c.rating)}${"☆".repeat(Math.max(0, 5 - c.rating))}</span><span class="muted">${escapeHtml(c.category ?? "")}${c.followUpRequested ? " · guest asked for manager" : ""}${
+              c.comment ? ` · ${escapeHtml(c.comment.length > 140 ? c.comment.slice(0, 140) + "…" : c.comment)}` : ""
+            }</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("No open guest complaints — keep it up.");
+
+  const dirtyAndMaint = snap.roomsNeedingAttention;
+  const roomsList = dirtyAndMaint.length
+    ? `<ul>${dirtyAndMaint
+        .slice(0, 16)
+        .map(
+          (r) =>
+            `<li><strong>Room ${escapeHtml(r.unitName)}</strong>${r.roomTypeName ? ` <span class="muted" style="display:inline">· ${escapeHtml(r.roomTypeName)}</span>` : ""} <span class="${r.status === "MAINTENANCE" ? "vip-pill" : "room-pill"}" style="${r.status === "MAINTENANCE" ? "background:#fee2e2;color:#991b1b" : ""}">${r.status === "MAINTENANCE" ? "Maintenance" : "Dirty"}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("All rooms clean and operational.");
+
+  const tasksList = snap.pendingHousekeeping.length
+    ? `<ul>${snap.pendingHousekeeping
+        .slice(0, 12)
+        .map(
+          (h) =>
+            `<li><strong>Room ${escapeHtml(h.unitName ?? "?")}</strong> <span class="muted">${escapeHtml(String(h.status).toLowerCase())} · ${escapeHtml(h.source.toLowerCase())}${h.assignedTo ? ` · with ${escapeHtml(h.assignedTo)}` : " · unassigned"}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("Housekeeping queue is clear.");
+
+  const failedList = snap.failedMessages.length
+    ? `<ul>${snap.failedMessages
+        .slice(0, 12)
+        .map(
+          (m) =>
+            `<li><strong>${escapeHtml(m.recipient)}</strong> <span class="muted">${escapeHtml(m.type)}${m.detail ? ` · ${escapeHtml(m.detail.length > 100 ? m.detail.slice(0, 100) + "…" : m.detail)}` : ""}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("All recent guest messages went out cleanly.");
+
+  const ticketsList = snap.openRestaurantTickets.length
+    ? `<ul>${snap.openRestaurantTickets
+        .slice(0, 12)
+        .map(
+          (tkt) =>
+            `<li><strong>${escapeHtml(tkt.guestName)}</strong>${tkt.unitName ? `<span class="room-pill">Room ${escapeHtml(tkt.unitName)}</span>` : ""} <span class="muted">${escapeHtml(tkt.outletKey)} · ${escapeHtml(String(tkt.status).toLowerCase())}${tkt.notes ? ` · ${escapeHtml(tkt.notes)}` : ""}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("No open restaurant tickets.");
+
+  const stripCard = (label: string, count: number, sub: string, tone: "alert" | "warn" | "ok"): string =>
+    `<div class="smart-kpi"><h4>${escapeHtml(label)}</h4><div class="num ${count > 0 ? tone : "ok"}">${count}</div><div class="sub">${escapeHtml(sub)}</div></div>`;
+
+  return `<section class="smart-handover" aria-label="Smart handover sheet">
+    <div class="smart-strip">
+      ${stripCard("Pending arrivals", t.pendingArrivals, "Expected today, not yet checked in", "warn")}
+      ${stripCard("Unpaid departures", t.unpaidDepartures, "Outstanding folio balance", "alert")}
+      ${stripCard("VIPs in-house", t.vipInHouse, "Guests flagged VIP", "ok")}
+      ${stripCard("Open complaints", t.openComplaints, "Low ratings without follow-up", "alert")}
+      ${stripCard("Dirty rooms", t.dirtyRooms, "Need cleaning before sale", "warn")}
+      ${stripCard("Maintenance", t.maintenanceRooms, "Out of order", "alert")}
+      ${stripCard("Cleaning queue", t.pendingHousekeeping, "Pending or in-progress tasks", "warn")}
+      ${stripCard("Failed messages", t.failedMessages, "WhatsApp / campaign failures (24h)", "alert")}
+      ${stripCard("Open kitchen tickets", t.openRestaurantTickets, "Restaurant orders in motion", "warn")}
+    </div>
+    <div class="smart-grid">
+      <div class="smart-card ${smartTone(t.pendingArrivals)}">
+        <h3>🛬 Pending arrivals <span class="pill">${t.pendingArrivals}</span></h3>
+        <p class="muted">Booked guests expected today who still need a check-in.</p>
+        ${arrivalsList}
+      </div>
+      <div class="smart-card ${smartTone(t.unpaidDepartures)}">
+        <h3>💳 Departures with money owing <span class="pill">${t.unpaidDepartures}</span></h3>
+        <p class="muted">Settle these folios before the guest leaves.</p>
+        ${departuresList}
+      </div>
+      <div class="smart-card ${t.vipInHouse > 0 ? "ok" : "info"}">
+        <h3>⭐ VIPs in-house <span class="pill">${t.vipInHouse}</span></h3>
+        <p class="muted">Give these stays extra care — flag the next shift.</p>
+        ${vipList}
+      </div>
+      <div class="smart-card ${smartTone(t.openComplaints)}">
+        <h3>😟 Open guest complaints <span class="pill">${t.openComplaints}</span></h3>
+        <p class="muted">Low ratings or guests asking for the manager — reach out today.</p>
+        ${complaintList}
+      </div>
+      <div class="smart-card ${t.dirtyRooms + t.maintenanceRooms > 0 ? "warn" : "ok"}">
+        <h3>🧹 Rooms needing attention <span class="pill">${t.dirtyRooms + t.maintenanceRooms}</span></h3>
+        <p class="muted">Dirty rooms must be cleaned before sale; maintenance rooms are out of order.</p>
+        ${roomsList}
+      </div>
+      <div class="smart-card ${smartTone(t.pendingHousekeeping)}">
+        <h3>🧽 Cleaning queue <span class="pill">${t.pendingHousekeeping}</span></h3>
+        <p class="muted">Tasks the housekeeping team has not yet completed.</p>
+        ${tasksList}
+      </div>
+      <div class="smart-card ${smartTone(t.failedMessages)}">
+        <h3>📵 Failed guest messages <span class="pill">${t.failedMessages}</span></h3>
+        <p class="muted">WhatsApp or campaign sends that didn't go through in the last 24h.</p>
+        ${failedList}
+      </div>
+      <div class="smart-card ${smartTone(t.openRestaurantTickets)}">
+        <h3>🍽️ Open restaurant tickets <span class="pill">${t.openRestaurantTickets}</span></h3>
+        <p class="muted">Restaurant or room-service orders still in motion.</p>
+        ${ticketsList}
+      </div>
+    </div>
+  </section>`;
+}
+
+const feedbackDashStyles = `<style>
+.fb-hero { background:linear-gradient(135deg,#fefce8 0%,#fff7ed 100%); border:1px solid #fde68a; border-radius:18px; padding:18px 22px; margin-bottom:18px; }
+.fb-hero h2 { margin:0; font-size:22px; letter-spacing:-0.02em; color:#1f1f1f; }
+.fb-hero p { margin:6px 0 0; color:#475569; font-size:13.5px; }
+.fb-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:18px; }
+.fb-kpi { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:14px 16px; box-shadow:0 8px 22px rgba(15,23,42,.05); }
+.fb-kpi h4 { margin:0; font-size:11px; color:#64748b; letter-spacing:0.05em; text-transform:uppercase; font-weight:800; }
+.fb-kpi .v { font-size:30px; font-weight:900; color:#0f172a; letter-spacing:-0.02em; line-height:1.1; margin-top:4px; font-variant-numeric:tabular-nums; display:flex; align-items:baseline; gap:6px; }
+.fb-kpi .v small { font-size:14px; font-weight:700; color:#94a3b8; }
+.fb-kpi .sub { font-size:11.5px; color:#94a3b8; margin-top:2px; }
+.fb-kpi.alert .v { color:#b91c1c; }
+.fb-kpi.warn .v { color:#b45309; }
+.fb-kpi.ok .v { color:#15803d; }
+.fb-twocol { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr)); gap:14px; margin-bottom:18px; }
+.fb-card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:16px 18px; box-shadow:0 10px 26px rgba(15,23,42,.05); }
+.fb-card h3 { margin:0 0 10px; font-size:15px; color:#0f172a; letter-spacing:-0.01em; display:flex; align-items:center; gap:8px; }
+.fb-card .muted { color:#64748b; font-size:13px; margin:0 0 10px; }
+.fb-bar-row { display:grid; grid-template-columns:60px 1fr 60px; gap:10px; align-items:center; padding:6px 0; }
+.fb-bar-row .stars { color:#f59e0b; font-weight:800; letter-spacing:1px; font-size:14px; }
+.fb-bar-track { background:#f1f5f9; border-radius:999px; height:10px; overflow:hidden; }
+.fb-bar-fill { height:100%; background:linear-gradient(90deg,#22c55e,#15803d); border-radius:999px; }
+.fb-bar-fill.r1, .fb-bar-fill.r2 { background:linear-gradient(90deg,#ef4444,#b91c1c); }
+.fb-bar-fill.r3 { background:linear-gradient(90deg,#f59e0b,#b45309); }
+.fb-bar-row .num { text-align:right; color:#64748b; font-variant-numeric:tabular-nums; font-size:13px; font-weight:700; }
+.fb-cat { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-radius:10px; background:#f8fafc; border:1px solid #e2e8f0; margin-bottom:6px; }
+.fb-cat strong { color:#0f172a; }
+.fb-cat .v { font-weight:800; color:#0f766e; font-variant-numeric:tabular-nums; }
+.fb-trend { display:flex; gap:14px; align-items:center; padding:10px 12px; border-radius:10px; background:#f8fafc; border:1px solid #e2e8f0; }
+.fb-trend .arrow { font-size:18px; }
+.fb-trend.up .arrow { color:#15803d; }
+.fb-trend.down .arrow { color:#b91c1c; }
+.fb-trend strong { font-size:18px; color:#0f172a; font-variant-numeric:tabular-nums; }
+.fb-list { list-style:none; padding:0; margin:0; max-height:380px; overflow-y:auto; }
+.fb-item { padding:12px 14px; border:1px solid #e2e8f0; border-radius:12px; margin-bottom:8px; background:#fff; }
+.fb-item.issue { border-color:#fecaca; background:#fff5f5; }
+.fb-item.happy { border-color:#bbf7d0; background:#f0fdf4; }
+.fb-item .head { display:flex; justify-content:space-between; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
+.fb-item .stars { color:#f59e0b; font-weight:800; letter-spacing:1px; font-size:14px; }
+.fb-item.issue .stars { color:#b91c1c; }
+.fb-item .name { font-weight:800; color:#0f172a; }
+.fb-item .when { color:#94a3b8; font-size:11.5px; margin-left:auto; }
+.fb-item .cat { font-size:11px; color:#475569; background:#e2e8f0; padding:2px 9px; border-radius:999px; font-weight:800; }
+.fb-item .body { color:#1f2937; font-size:13.5px; line-height:1.5; white-space:pre-wrap; }
+.fb-item .actions { margin-top:8px; font-size:12px; }
+.fb-item .actions a { color:#0f766e; font-weight:700; text-decoration:none; }
+.fb-item .actions a:hover { text-decoration:underline; }
+.fb-empty { padding:14px 4px; color:#94a3b8; font-size:13px; text-align:center; }
+@media print {
+  .fb-list { max-height:none; overflow:visible; }
+  .fb-item { break-inside:avoid; }
+}
+</style>`;
+
+function renderStarsLine(rating: number): string {
+  return `${"★".repeat(rating)}${"☆".repeat(Math.max(0, 5 - rating))}`;
+}
+
+function renderFeedbackDashboardPage(hotelDisplayName: string, data: FeedbackDashboardData): string {
+  const { kpis, histogram, categories, thisWeek, lastWeek, openComplaints, recentComments, windowDays } = data;
+  const avg = kpis.averageRating ? kpis.averageRating.toFixed(2) : "—";
+
+  const histogramHtml = histogram.length
+    ? histogram
+        .map(
+          (h) => `
+        <div class="fb-bar-row">
+          <span class="stars">${renderStarsLine(h.rating)}</span>
+          <span class="fb-bar-track"><span class="fb-bar-fill r${h.rating}" style="width:${h.percent}%"></span></span>
+          <span class="num">${h.count}</span>
+        </div>`
+        )
+        .join("")
+    : `<p class="fb-empty">No feedback in this window.</p>`;
+
+  const categoryHtml = categories.length
+    ? categories
+        .map(
+          (c) => `<div class="fb-cat"><div><strong>${escapeHtml(c.label)}</strong> <span class="muted" style="margin-left:8px;color:#64748b;font-size:12px">${c.count} response${c.count === 1 ? "" : "s"}</span></div><span class="v">${c.averageRating.toFixed(1)} ★</span></div>`
+        )
+        .join("")
+    : `<p class="fb-empty">No category data yet.</p>`;
+
+  const trendDelta = thisWeek.averageRating - lastWeek.averageRating;
+  const trendDir = trendDelta > 0.01 ? "up" : trendDelta < -0.01 ? "down" : "flat";
+  const trendArrow = trendDir === "up" ? "↗" : trendDir === "down" ? "↘" : "→";
+  const trendHtml = `
+    <div class="fb-trend ${trendDir}">
+      <span class="arrow" aria-hidden="true">${trendArrow}</span>
+      <div>
+        <div class="muted" style="margin:0">This week vs last week</div>
+        <strong>${thisWeek.averageRating ? thisWeek.averageRating.toFixed(2) : "—"}</strong>
+        <span class="muted" style="font-size:12px">vs ${lastWeek.averageRating ? lastWeek.averageRating.toFixed(2) : "—"} last week</span>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div class="muted" style="margin:0">Responses</div>
+        <strong>${thisWeek.responseCount}</strong>
+        <span class="muted" style="font-size:12px">vs ${lastWeek.responseCount} last week</span>
+      </div>
+    </div>`;
+
+  const complaintsHtml = openComplaints.length
+    ? `<ul class="fb-list">${openComplaints
+        .map(
+          (c) => `<li class="fb-item issue">
+        <div class="head">
+          <span class="name">${escapeHtml(c.guestName)}</span>
+          <span class="stars">${renderStarsLine(c.rating)}</span>
+          ${c.category ? `<span class="cat">${escapeHtml(c.category)}</span>` : ""}
+          <span class="when">${c.ageHours <= 1 ? "just now" : c.ageHours < 24 ? `${c.ageHours}h ago` : `${Math.round(c.ageHours / 24)}d ago`}</span>
+        </div>
+        <div class="body">${escapeHtml(c.comment ?? "(no comment)")}${c.followUpRequested ? "<br><em>Guest asked for the manager to call back.</em>" : ""}</div>
+        <div class="actions"><a href="/admin/bookings/${escapeHtml(c.bookingId)}">Open booking →</a></div>
+      </li>`
+        )
+        .join("")}</ul>`
+    : `<p class="fb-empty">No open complaints — all low-score reviews have been followed up.</p>`;
+
+  const commentsHtml = recentComments.length
+    ? `<ul class="fb-list">${recentComments
+        .map(
+          (c) => `<li class="fb-item ${c.badge}">
+        <div class="head">
+          <span class="name">${escapeHtml(c.guestName)}</span>
+          <span class="stars">${renderStarsLine(c.rating)}</span>
+          ${c.category ? `<span class="cat">${escapeHtml(c.category)}</span>` : ""}
+          <span class="when">${escapeHtml(c.createdAt.toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</span>
+        </div>
+        <div class="body">${escapeHtml(c.comment)}</div>
+        <div class="actions"><a href="/admin/bookings/${escapeHtml(c.bookingId)}">Open booking →</a></div>
+      </li>`
+        )
+        .join("")}</ul>`
+    : `<p class="fb-empty">No comments yet in the last ${windowDays} days.</p>`;
+
+  return `${feedbackDashStyles}
+<div class="fb-hero">
+  <h2>Guest Feedback</h2>
+  <p>How guests rated their stay at ${escapeHtml(hotelDisplayName)} — last ${windowDays} days. Use this to spot complaints to follow up on, see what guests love, and track quality trends week-over-week.</p>
+</div>
+<div class="fb-kpis">
+  <div class="fb-kpi ${kpis.averageRating >= 4 ? "ok" : kpis.averageRating <= 3 && kpis.totalResponses ? "warn" : ""}"><h4>Average rating</h4><div class="v">${avg}<small>/ 5</small></div><div class="sub">${kpis.totalResponses} ${kpis.totalResponses === 1 ? "response" : "responses"}</div></div>
+  <div class="fb-kpi ${kpis.lowRatings > 0 ? "alert" : "ok"}"><h4>Low scores</h4><div class="v">${kpis.lowRatings}</div><div class="sub">1–2 stars</div></div>
+  <div class="fb-kpi ${kpis.unresolvedComplaints > 0 ? "alert" : "ok"}"><h4>Open complaints</h4><div class="v">${kpis.unresolvedComplaints}</div><div class="sub">No manager follow-up yet</div></div>
+  <div class="fb-kpi ok"><h4>Promoters</h4><div class="v">${kpis.promoters}</div><div class="sub">5-star happy guests</div></div>
+  <div class="fb-kpi"><h4>Public review clicks</h4><div class="v">${kpis.publicReviewClicks}</div><div class="sub">Likely Booking.com / Google</div></div>
+</div>
+<div class="fb-twocol">
+  <section class="fb-card">
+    <h3>★ How guests rate us</h3>
+    <p class="muted">Distribution of stars over the last ${windowDays} days.</p>
+    ${histogramHtml}
+  </section>
+  <section class="fb-card">
+    <h3>📈 Trend (week-over-week)</h3>
+    <p class="muted">A simple comparison so you can see if quality is rising or falling.</p>
+    ${trendHtml}
+    <h3 style="margin-top:18px">📂 By category</h3>
+    <p class="muted">What guests are talking about most.</p>
+    ${categoryHtml}
+  </section>
+</div>
+<div class="fb-twocol">
+  <section class="fb-card">
+    <h3>⚠️ Needs follow-up <span style="font-size:11px;font-weight:800;padding:2px 9px;border-radius:999px;background:${openComplaints.length ? "#fee2e2" : "#dcfce7"};color:${openComplaints.length ? "#991b1b" : "#166534"}">${openComplaints.length}</span></h3>
+    <p class="muted">Low-score reviews and guests who asked the manager to call back.</p>
+    ${complaintsHtml}
+  </section>
+  <section class="fb-card">
+    <h3>💬 Latest comments</h3>
+    <p class="muted">Most recent guest feedback with full text.</p>
+    ${commentsHtml}
+  </section>
+</div>`;
 }
 
 const commandCenterExtraStyles = `<style>
@@ -3710,6 +4224,7 @@ adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"
 });
 
 adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"), async (_req, res) => {
+  let chefPrepHtml = "";
   let buffetCardHtml = "";
   try {
     const hotel = await prisma.hotel.findUnique({
@@ -3717,23 +4232,26 @@ adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"
       select: { id: true, timezone: true }
     });
     if (hotel) {
-      const buffet = await getBreakfastBuffetCountForToday(hotel.id, hotel.timezone);
-      buffetCardHtml = renderBuffetCountCard(buffet);
+      const prep = await getChefDailyPrepForToday(hotel.id, hotel.timezone);
+      chefPrepHtml = renderChefDailyPrepDashboard(prep);
+      buffetCardHtml = renderBuffetCountCard(prep.buffet);
     }
   } catch (err) {
-    // Card is non-essential; never block the workspace landing if the
+    // Cards are non-essential; never block the workspace landing if the
     // aggregator hits a transient DB issue.
     console.error(
-      "[admin] /module/restaurant buffet count failed:",
+      "[admin] /module/restaurant chef prep failed:",
       err instanceof Error ? err.stack ?? err.message : String(err)
     );
   }
   const content = `${pmsWorkspacePageStyles}
 ${buffetCountCardStyles}
+${chefPrepStyles}
 <div class="pms-hero">
   <h1>Restaurant workspace</h1>
-  <p>Food &amp; beverage execution: menus, outlet flow, and guest folio context — without management or reception noise.</p>
+  <p>Today's chef brief — meals to prepare, VIP guests in-house, and any room-service orders still pending. Numbers update live as guests check in or breakfast is added to a folio.</p>
 </div>
+${chefPrepHtml}
 ${buffetCardHtml}
 <div class="pms-grid">
   <div class="pms-card"><h3>F&amp;B master</h3><p>Menus, pricing, and catalogue control.</p><a href="/admin/fb/menu">Open F&amp;B master →</a></div>
@@ -3783,13 +4301,20 @@ adminRouter.get("/login", async (req, res) => {
     return;
   }
   const loginHotel = await resolveLoginHotel(req);
+  // If the visitor passed an unknown hotel key, the more specific "No hotel
+  // account found" message inside the login form already explains the problem.
+  // Suppress the generic auth-failed banner in that case so we don't show two
+  // overlapping red alerts above the form.
+  const hotelUnknown = Boolean(loginHotel.requestedKey) && !loginHotel.id;
   const resetNotice = req.query.reset ? '<p class="badge ok">Password updated. Sign in with your new password.</p>' : "";
   const authErrorNotice =
     req.query.auth === "error" ? '<p class="badge alert">Sign in is temporarily unavailable. Please try again.</p>' : "";
   const loginFailedNotice =
-    req.query.auth === "failed" ? '<p class="badge alert">Sign in failed. Check the hotel account number, email/username, and password/PIN.</p>' : "";
+    req.query.auth === "failed" && !hotelUnknown
+      ? '<p class="badge alert">Sign in failed. Check the hotel account number, email/username, and password/PIN.</p>'
+      : "";
   const staffNotice =
-    req.query.staff === "failed"
+    req.query.staff === "failed" && !hotelUnknown
       ? '<p class="badge alert">Staff sign in failed. Check your staff email/username and PIN/password.</p>'
       : "";
   const staffErrorNotice =
@@ -3817,7 +4342,8 @@ adminRouter.get("/login", async (req, res) => {
     renderLayout(content, false, {
       hotelName: loginHotel.displayName,
       hotelSign: hotelSignForLogin(loginHotel),
-      hotelSlug: loginHotel.slug
+      hotelSlug: loginHotel.slug,
+      hotelKnown: Boolean(loginHotel.id)
     })
   );
 });
@@ -4498,7 +5024,8 @@ ${notice}
     renderLayout(content, false, {
       hotelName: loginHotel.displayName,
       hotelSign: hotelSignForLogin(loginHotel),
-      hotelSlug: loginHotel.slug
+      hotelSlug: loginHotel.slug,
+      hotelKnown: Boolean(loginHotel.id)
     })
   );
 });
@@ -5130,6 +5657,38 @@ ${created}${updated}${resetSent}${deleted}${deactivated}${userErrorNotice}
   res.type("html").send(renderLayout(content, true));
 });
 
+adminRouter.get("/feedback-dashboard", requirePermission("REPORTS", "VIEW"), async (_req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.redirect("/admin/login");
+    return;
+  }
+  let data: FeedbackDashboardData | null = null;
+  try {
+    data = await loadFeedbackDashboard(prisma, hotel.id);
+  } catch (err) {
+    console.error(
+      "[admin] /feedback-dashboard load failed:",
+      err instanceof Error ? err.stack ?? err.message : String(err)
+    );
+  }
+  if (!data) {
+    res
+      .type("html")
+      .send(
+        renderLayout(
+          `<h2>Guest Feedback</h2><p class="muted">Could not load feedback right now. Try again in a moment.</p>`,
+          true
+        )
+      );
+    return;
+  }
+  res.type("html").send(renderLayout(renderFeedbackDashboardPage(hotel.displayName, data), true));
+});
+
 adminRouter.get("/audit-trail", requirePermission("USERS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
   if (!hotel) {
@@ -5137,15 +5696,23 @@ adminRouter.get("/audit-trail", requirePermission("USERS", "VIEW"), async (req, 
     return;
   }
   const actor = String(req.query.actor ?? "").trim();
-  const action = String(req.query.action ?? "").trim();
-  const entity = String(req.query.entity ?? "").trim();
-  const takeRaw = Number.parseInt(String(req.query.take ?? "100"), 10);
-  const take = Number.isFinite(takeRaw) ? Math.max(25, Math.min(300, takeRaw)) : 100;
+  const categoryFilter = String(req.query.category ?? "").trim();
+  const search = String(req.query.q ?? "").trim();
+  const takeRaw = Number.parseInt(String(req.query.take ?? "150"), 10);
+  const take = Number.isFinite(takeRaw) ? Math.max(25, Math.min(500, takeRaw)) : 150;
   const andFilters: Prisma.AuditLogWhereInput[] = [];
   if (actor) andFilters.push({ OR: [{ actorEmail: { contains: actor } }, { actorUserId: { contains: actor } }] });
-  if (action) andFilters.push({ action: { contains: action.toUpperCase() } });
-  if (entity) andFilters.push({ OR: [{ entityType: { contains: entity } }, { entityId: { contains: entity } }] });
-  const where = {
+  if (search) {
+    andFilters.push({
+      OR: [
+        { action: { contains: search.toUpperCase() } },
+        { entityType: { contains: search } },
+        { entityId: { contains: search } },
+        { metadataJson: { contains: search } }
+      ]
+    });
+  }
+  const where: Prisma.AuditLogWhereInput = {
     hotelId: hotel.id,
     ...(andFilters.length ? { AND: andFilters } : {})
   };
@@ -5154,34 +5721,210 @@ adminRouter.get("/audit-trail", requirePermission("USERS", "VIEW"), async (req, 
     orderBy: { createdAt: "desc" },
     take
   });
-  const rows = logs
-    .map((log) => {
-      const metadata = parseAuditMetadata(log.metadataJson);
-      const metadataPreview = Object.keys(metadata).length ? JSON.stringify(metadata).slice(0, 280) : "";
-      return `<tr>
-        <td>${formatDateTime(log.createdAt)}</td>
-        <td>${escapeHtml(log.actorEmail || log.actorUserId || "SYSTEM")}</td>
-        <td><code>${escapeHtml(log.action)}</code></td>
-        <td>${escapeHtml(log.entityType)}${log.entityId ? `<div class="muted" style="font-size:11px">${escapeHtml(log.entityId)}</div>` : ""}</td>
-        <td>${escapeHtml(metadataPreview || "-")}</td>
-      </tr>`;
-    })
+
+  // Map to friendly lines, then optionally filter by category client-side
+  // (the friendly category isn't a column in AuditLog — it's derived).
+  type Enriched = {
+    id: string;
+    createdAt: Date;
+    actorEmail: string;
+    actorUserId: string | null;
+    action: string;
+    entityType: string;
+    entityId: string | null;
+    line: FriendlyAuditLine;
+  };
+  const enriched: Enriched[] = logs.map((log) => {
+    const metadata = parseAuditMetadata(log.metadataJson);
+    return {
+      id: log.id,
+      createdAt: log.createdAt,
+      actorEmail: log.actorEmail ?? "",
+      actorUserId: log.actorUserId,
+      action: log.action,
+      entityType: log.entityType,
+      entityId: log.entityId,
+      line: describeAuditAction(log.action, metadata, log.entityType)
+    };
+  });
+  const filtered =
+    categoryFilter && AUDIT_CATEGORY_LIST.includes(categoryFilter as AuditCategory)
+      ? enriched.filter((e) => e.line.category === categoryFilter)
+      : enriched;
+
+  // Group by day so the timeline reads top-down like a journal.
+  const groupKey = (d: Date) => {
+    const local = new Date(d);
+    return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")}`;
+  };
+  const grouped = new Map<string, Enriched[]>();
+  for (const row of filtered) {
+    const key = groupKey(row.createdAt);
+    const existing = grouped.get(key) ?? [];
+    existing.push(row);
+    grouped.set(key, existing);
+  }
+  const dayHeading = (key: string): string => {
+    const [y, m, d] = key.split("-").map((p) => Number.parseInt(p, 10));
+    if (Number.isNaN(y)) return key;
+    const date = new Date(y, m - 1, d);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    if (date.getTime() === today.getTime()) return "Today";
+    if (date.getTime() === yesterday.getTime()) return "Yesterday";
+    return date.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short", year: "numeric" });
+  };
+
+  const initials = (email: string, fallbackUserId: string | null): string => {
+    const handle = email.split("@")[0] || fallbackUserId || "S";
+    const parts = handle.split(/[._-]/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return (handle.slice(0, 2) || "S").toUpperCase();
+  };
+  const friendlyName = (email: string, fallbackUserId: string | null): string => {
+    if (email && email !== "system@chatastay.local") return email.split("@")[0];
+    if (fallbackUserId === "SYSTEM" || !fallbackUserId) return "System";
+    return fallbackUserId;
+  };
+  const relativeTime = (date: Date, now: Date): string => {
+    const diffMs = now.getTime() - date.getTime();
+    const diffMin = Math.round(diffMs / 60000);
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return `${diffMin} min ago`;
+    const diffHr = Math.round(diffMin / 60);
+    if (diffHr < 24) return `${diffHr} h ago`;
+    const diffDay = Math.round(diffHr / 24);
+    if (diffDay < 7) return `${diffDay} d ago`;
+    return formatDateTime(date);
+  };
+
+  const now = new Date();
+  const renderEntry = (e: Enriched): string => {
+    const accentVar = `var(--accent-${e.line.accent})`;
+    const detail = e.line.detail ? `<div class="audit-detail">${escapeHtml(e.line.detail)}</div>` : "";
+    return `<li class="audit-item">
+      <span class="audit-dot" style="background:${accentVar}"></span>
+      <span class="audit-icon" aria-hidden="true">${e.line.icon}</span>
+      <div class="audit-body">
+        <div class="audit-meta">
+          <span class="audit-avatar" title="${escapeHtml(e.actorEmail || friendlyName(e.actorEmail, e.actorUserId))}">${escapeHtml(initials(e.actorEmail, e.actorUserId))}</span>
+          <span class="audit-actor">${escapeHtml(friendlyName(e.actorEmail, e.actorUserId))}</span>
+          <span class="audit-tag" style="background:${accentVar}1a;color:${accentVar}">${escapeHtml(e.line.category)}</span>
+          <time class="audit-time" datetime="${e.createdAt.toISOString()}" title="${formatDateTime(e.createdAt)}">${escapeHtml(relativeTime(e.createdAt, now))}</time>
+        </div>
+        <div class="audit-headline">${escapeHtml(e.line.headline)}</div>
+        ${detail}
+        <div class="audit-source">${e.entityType ? `<span>${escapeHtml(e.entityType)}</span>` : ""}${
+          e.entityId ? ` <code>${escapeHtml(e.entityId.length > 14 ? e.entityId.slice(0, 14) + "…" : e.entityId)}</code>` : ""
+        } <span class="muted">· ${escapeHtml(e.action.replace(/_/g, " ").toLowerCase())}</span></div>
+      </div>
+    </li>`;
+  };
+
+  const sortedKeys = Array.from(grouped.keys()).sort((a, b) => (a < b ? 1 : -1));
+  const timelineHtml = sortedKeys.length
+    ? sortedKeys
+        .map(
+          (key) =>
+            `<section class="audit-day"><h3>${escapeHtml(dayHeading(key))}<span class="muted">${grouped.get(key)?.length ?? 0} ${
+              (grouped.get(key)?.length ?? 0) === 1 ? "action" : "actions"
+            }</span></h3><ul class="audit-list">${(grouped.get(key) ?? []).map(renderEntry).join("")}</ul></section>`
+        )
+        .join("")
+    : `<div class="audit-empty"><p>No staff actions found for these filters yet.</p></div>`;
+
+  // Top-of-page summary: who did what today
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayActions = enriched.filter((e) => e.createdAt >= today);
+  const summaryByActor = new Map<string, { name: string; count: number; categories: Set<string> }>();
+  for (const e of todayActions) {
+    const key = e.actorEmail || e.actorUserId || "SYSTEM";
+    const existing = summaryByActor.get(key) ?? { name: friendlyName(e.actorEmail, e.actorUserId), count: 0, categories: new Set<string>() };
+    existing.count += 1;
+    existing.categories.add(e.line.category);
+    summaryByActor.set(key, existing);
+  }
+  const summaryRows = Array.from(summaryByActor.entries())
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 6)
+    .map(
+      ([_key, v]) =>
+        `<div class="audit-actor-pill"><span class="audit-avatar">${escapeHtml(v.name.slice(0, 2).toUpperCase())}</span><div><strong>${escapeHtml(v.name)}</strong><span class="muted">${v.count} ${v.count === 1 ? "action" : "actions"} · ${Array.from(v.categories).join(", ")}</span></div></div>`
+    )
     .join("");
-  const content = `
-<h2>Audit Trail</h2>
-<p class="muted">Latest recorded operations for ${escapeHtml(hotel.displayName)}. Use actor email/ID to review what a manager, front desk user, housekeeper, or staff member did.</p>
-<form method="get" action="/admin/audit-trail" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:14px 0">
-  <label>Actor email or ID<br /><input name="actor" value="${escapeHtml(actor)}" placeholder="denish@hotel.com" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
-  <label>Action<br /><input name="action" value="${escapeHtml(action)}" placeholder="LOGIN, FOLIO, BOOKING" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
-  <label>Entity<br /><input name="entity" value="${escapeHtml(entity)}" placeholder="Booking, RoomUnit, ID" style="padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
-  <label>Rows<br /><input type="number" name="take" min="25" max="300" value="${take}" style="width:90px;padding:8px;border:1px solid #d8dee6;border-radius:8px" /></label>
-  <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Filter</button>
-  <a class="btn-link" href="/admin/audit-trail">Clear</a>
+
+  const categoryOptions = AUDIT_CATEGORY_LIST.map(
+    (c) => `<option value="${escapeHtml(c)}" ${categoryFilter === c ? "selected" : ""}>${escapeHtml(c)}</option>`
+  ).join("");
+
+  const styles = `<style>
+    :root {
+      --accent-green:#22c55e; --accent-blue:#3b82f6; --accent-amber:#f59e0b;
+      --accent-purple:#a855f7; --accent-rose:#f43f5e; --accent-slate:#64748b;
+      --accent-teal:#0d9488; --accent-sky:#0ea5e9;
+    }
+    .audit-hero { background:linear-gradient(135deg,#f8fafc 0%,#ecfdf5 100%); border:1px solid #d6ebe1; border-radius:18px; padding:18px 22px; margin-bottom:18px; }
+    .audit-hero h2 { margin:0; font-size:22px; letter-spacing:-0.02em; color:#0b1f1c; }
+    .audit-hero p { margin:6px 0 0; color:#475569; font-size:13.5px; }
+    .audit-summary { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .audit-actor-pill { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:8px 14px; min-width:200px; box-shadow:0 6px 18px rgba(15,44,38,.04); }
+    .audit-actor-pill .audit-avatar { background:#0f766e; color:#fff; width:32px; height:32px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-weight:800; font-size:12px; letter-spacing:0.04em; }
+    .audit-actor-pill strong { display:block; color:#0f172a; font-size:13px; }
+    .audit-actor-pill .muted { font-size:11.5px; color:#64748b; display:block; }
+    .audit-filter-form { display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px; margin:0 0 16px; padding:14px; background:#fff; border:1px solid #e2e8f0; border-radius:14px; }
+    .audit-filter-form label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:#475569; font-weight:600; }
+    .audit-filter-form input, .audit-filter-form select { padding:9px 12px; border:1px solid #d8dee6; border-radius:10px; font-size:13.5px; }
+    .audit-filter-form button { padding:9px 18px; border:0; border-radius:10px; background:#0f766e; color:#fff; font-weight:700; font-size:13.5px; cursor:pointer; }
+    .audit-filter-form .btn-link { font-size:13px; color:#475569; text-decoration:none; padding:9px 12px; border-radius:10px; }
+    .audit-filter-form .btn-link:hover { background:#f1f5f9; color:#0f766e; }
+    .audit-day { margin-bottom:22px; }
+    .audit-day > h3 { margin:0 0 12px; font-size:13px; color:#475569; text-transform:uppercase; letter-spacing:0.08em; font-weight:800; display:flex; align-items:center; gap:10px; }
+    .audit-day > h3 .muted { font-weight:600; color:#94a3b8; text-transform:none; letter-spacing:0; }
+    .audit-list { list-style:none; padding:0; margin:0; position:relative; }
+    .audit-list::before { content:""; position:absolute; left:14px; top:18px; bottom:0; width:2px; background:linear-gradient(180deg,#e2e8f0,#f1f5f9); }
+    .audit-item { position:relative; display:grid; grid-template-columns:30px auto 1fr; gap:12px; padding:14px 16px; background:#fff; border:1px solid #e2e8f0; border-radius:14px; margin-bottom:10px; box-shadow:0 6px 16px rgba(15,44,38,.04); }
+    .audit-item .audit-dot { position:absolute; left:6px; top:24px; width:14px; height:14px; border-radius:50%; box-shadow:0 0 0 4px #fff; }
+    .audit-icon { font-size:22px; align-self:center; }
+    .audit-meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:6px; font-size:12.5px; color:#64748b; }
+    .audit-avatar { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; background:#e2e8f0; color:#0f172a; font-size:11px; font-weight:800; }
+    .audit-actor { font-weight:700; color:#0f172a; }
+    .audit-tag { font-size:10.5px; font-weight:800; padding:2px 9px; border-radius:999px; letter-spacing:0.04em; text-transform:uppercase; }
+    .audit-time { margin-left:auto; color:#94a3b8; font-size:12px; font-variant-numeric:tabular-nums; }
+    .audit-headline { font-size:14.5px; color:#0f172a; font-weight:700; line-height:1.4; }
+    .audit-detail { color:#475569; font-size:13px; line-height:1.45; margin-top:2px; }
+    .audit-source { margin-top:8px; font-size:11.5px; color:#94a3b8; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .audit-source code { background:#f1f5f9; padding:1px 8px; border-radius:6px; color:#475569; font-size:11px; }
+    .audit-source .muted { color:#cbd5e1; }
+    .audit-empty { padding:48px 16px; text-align:center; color:#94a3b8; background:#fff; border:1px dashed #e2e8f0; border-radius:14px; }
+    @media print {
+      .audit-filter-form, .sidebar, .top-subnav { display:none !important; }
+      .audit-item { break-inside:avoid; }
+    }
+  </style>`;
+
+  const summaryBlock = summaryRows
+    ? `<div class="audit-summary">${summaryRows}</div>`
+    : `<div class="audit-summary"><p class="muted" style="margin:0">No staff activity recorded yet today.</p></div>`;
+
+  const content = `${styles}
+<div class="audit-hero">
+  <h2>Staff Activity</h2>
+  <p>A friendly diary of what your team did at ${escapeHtml(hotel.displayName)} — every check-in, payment, room status change, message, and login. Use the filters below to focus on a person or a workflow.</p>
+  ${summaryBlock}
+</div>
+<form method="get" action="/admin/audit-trail" class="audit-filter-form">
+  <label>Staff member<input name="actor" value="${escapeHtml(actor)}" placeholder="email or staff ID" /></label>
+  <label>Workflow<select name="category"><option value="">All workflows</option>${categoryOptions}</select></label>
+  <label>Search<input name="q" value="${escapeHtml(search)}" placeholder="booking ID, room, action…" /></label>
+  <label>Show<input type="number" name="take" min="25" max="500" step="25" value="${take}" /></label>
+  <button type="submit">Apply filters</button>
+  <a class="btn-link" href="/admin/audit-trail">Reset</a>
+  <button type="button" class="btn-link" onclick="window.print()">Print</button>
 </form>
-<table>
-  <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Metadata</th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="5">No audit entries found.</td></tr>'}</tbody>
-</table>`;
+${timelineHtml}`;
   res.type("html").send(renderLayout(content, true));
 });
 
@@ -9626,6 +10369,17 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
     return;
   }
 
+  let smartSnapshot: SmartHandoverSnapshot | null = null;
+  try {
+    smartSnapshot = await loadSmartHandoverSnapshot(prisma, hotel.id, hotel.currency, startOfDay(new Date()));
+  } catch (err) {
+    console.error(
+      "[admin] /handover-sheet smart snapshot failed:",
+      err instanceof Error ? err.stack ?? err.message : String(err)
+    );
+  }
+  const smartSheetHtml = smartSnapshot ? renderSmartHandoverSheet(smartSnapshot, hotel.currency) : "";
+
   const selectedDate = parseDateInput(req.query.date, startOfDay(new Date()));
   const dayStart = selectedDate;
   const dayEnd = addDays(dayStart, 1);
@@ -9807,12 +10561,14 @@ adminRouter.get("/handover-sheet", requirePermission("ROOMS", "VIEW"), async (re
     })
     .join("");
 
-  const content = `
-<h2>Handover Sheet</h2>
-<p class="muted">Shift summary of reservation operations up to selected time for one day.</p>
+  const content = `${smartHandoverStyles}
+<h2>Shift Handover Sheet</h2>
+<p class="muted">A simple end-of-shift brief for the next receptionist — what to follow up on first, then a log of what happened during this shift.</p>
 <div class="actions" style="margin-bottom:14px">
   <button type="button" class="btn-link" onclick="window.print()">Print handover sheet</button>
 </div>
+${smartSheetHtml}
+<h3 class="handover-shift-title">Activity during this shift</h3>
 <form method="get" action="/admin/handover-sheet" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px">
   <label>Date <input type="date" name="date" value="${formatDateForInput(dayStart)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
   <label>Shift

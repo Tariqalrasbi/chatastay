@@ -570,3 +570,222 @@ export async function getBreakfastBuffetCountForToday(
 
   return { asOfYmd: ymd, rows, totals };
 }
+
+// ---------------------------------------------------------------------------
+// Chef daily prep dashboard
+// ---------------------------------------------------------------------------
+//
+// Expands the breakfast/buffet card into a full chef brief that lets the
+// kitchen know who they are cooking for at lunch, dinner, and breakfast, who
+// the VIPs are, and which room-service tickets are still in motion. Reuses
+// the same booking-overlap logic as the buffet count so the numbers always
+// agree across the page.
+
+export interface ChefMealPrepCounts {
+  /** Adults expected for the meal in question. */
+  adults: number;
+  /** Children expected for the meal in question. */
+  children: number;
+  /** Total people (adults + children). */
+  total: number;
+  /** Number of bookings contributing to this meal. */
+  bookings: number;
+}
+
+export interface ChefVipGuestRow {
+  guestName: string;
+  unitName: string | null;
+  vipNote: string | null;
+  checkOut: Date;
+}
+
+export interface ChefRoomServiceTicketRow {
+  ticketId: string;
+  status: string;
+  unitName: string | null;
+  guestName: string;
+  notes: string | null;
+  ageMinutes: number;
+}
+
+export interface ChefDailyPrep {
+  asOfYmd: string;
+  buffet: BreakfastBuffetCount;
+  lunch: ChefMealPrepCounts;
+  dinner: ChefMealPrepCounts;
+  vipsInHouse: ChefVipGuestRow[];
+  vipCount: number;
+  pendingRoomService: ChefRoomServiceTicketRow[];
+  pendingRoomServiceCount: number;
+  /** Free-text dietary / allergy mentions found in active booking notes. Best-effort. */
+  dietaryMentions: Array<{ guestName: string; unitName: string | null; note: string }>;
+}
+
+const DIETARY_KEYWORDS = [
+  "allerg",
+  "gluten",
+  "vegan",
+  "vegetarian",
+  "halal",
+  "kosher",
+  "lactose",
+  "diabet",
+  "nut",
+  "shellfish",
+  "dairy"
+];
+
+function emptyMealRow(): ChefMealPrepCounts {
+  return { adults: 0, children: 0, total: 0, bookings: 0 };
+}
+
+/**
+ * Build the chef's daily prep dashboard for the hotel-local "today".
+ *
+ * - Breakfast row reuses {@link getBreakfastBuffetCountForToday} so a chef
+ *   sees one consistent number on both the buffet card and the chef brief.
+ * - Lunch is served only to FULL_BOARD guests.
+ * - Dinner is served to HALF_BOARD + FULL_BOARD guests.
+ * - VIPs in-house come from `Guest.isVip` on currently CHECKED_IN bookings.
+ * - Pending room-service tickets are tickets in NEW / ACKNOWLEDGED / PREPARING
+ *   for `outletKey === "ROOM_SERVICE"`.
+ */
+export async function getChefDailyPrepForToday(
+  hotelId: string,
+  hotelTimezone: string | null | undefined,
+  asOf: Date = new Date()
+): Promise<ChefDailyPrep> {
+  const tz = hotelTimezoneOrUtc(hotelTimezone);
+  const ymd = formatYmdInHotelZone(asOf, tz);
+  const dayStartUtc = wallClockLocalToUtc(ymd, "00:00", tz);
+  const dayEndUtc = new Date(dayStartUtc.getTime() + 24 * 3600 * 1000);
+
+  const [buffet, mealCandidates, vipBookings, pendingTickets] = await Promise.all([
+    getBreakfastBuffetCountForToday(hotelId, hotelTimezone, asOf),
+    prisma.booking.findMany({
+      where: {
+        hotelId,
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        checkIn: { lt: new Date(dayEndUtc.getTime() + 36 * 3600 * 1000) },
+        checkOut: { gt: new Date(dayStartUtc.getTime() - 36 * 3600 * 1000) }
+      },
+      select: {
+        id: true,
+        mealPlan: true,
+        adults: true,
+        children: true,
+        checkIn: true,
+        checkOut: true,
+        guest: { select: { fullName: true, vipNote: true } },
+        roomUnit: { select: { name: true } }
+      }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId,
+        status: BookingStatus.CHECKED_IN,
+        guest: { isVip: true }
+      },
+      select: {
+        id: true,
+        checkOut: true,
+        guest: { select: { fullName: true, vipNote: true } },
+        roomUnit: { select: { name: true } }
+      },
+      orderBy: { checkOut: "asc" },
+      take: 30
+    }),
+    prisma.outletOrderTicket.findMany({
+      where: {
+        hotelId,
+        outletKey: "ROOM_SERVICE",
+        ticketStatus: { in: ["NEW", "ACKNOWLEDGED", "PREPARING"] }
+      },
+      select: {
+        id: true,
+        ticketStatus: true,
+        notes: true,
+        createdAt: true,
+        booking: {
+          select: {
+            roomUnit: { select: { name: true } },
+            guest: { select: { fullName: true, phoneE164: true } }
+          }
+        }
+      },
+      orderBy: { createdAt: "asc" },
+      take: 30
+    })
+  ]);
+
+  // Filter to bookings whose hotel-local stay window includes today.
+  const eligible = mealCandidates.filter((b) => {
+    const cin = formatYmdInHotelZone(b.checkIn, tz);
+    const cout = formatYmdInHotelZone(b.checkOut, tz);
+    return ymd >= cin && ymd <= cout;
+  });
+
+  const lunch = emptyMealRow();
+  const dinner = emptyMealRow();
+  const dietaryMentions: ChefDailyPrep["dietaryMentions"] = [];
+
+  for (const b of eligible) {
+    const plan = String(b.mealPlan ?? "NONE").toUpperCase();
+    const adults = Math.max(0, Math.floor(b.adults ?? 0));
+    const children = Math.max(0, Math.floor(b.children ?? 0));
+    const isFull = plan === "FULL_BOARD";
+    const isHalf = plan === "HALF_BOARD";
+    if (isFull) {
+      lunch.bookings += 1;
+      lunch.adults += adults;
+      lunch.children += children;
+      lunch.total += adults + children;
+    }
+    if (isFull || isHalf) {
+      dinner.bookings += 1;
+      dinner.adults += adults;
+      dinner.children += children;
+      dinner.total += adults + children;
+    }
+    const note = b.guest?.vipNote ?? "";
+    if (note) {
+      const lc = note.toLowerCase();
+      if (DIETARY_KEYWORDS.some((k) => lc.includes(k))) {
+        dietaryMentions.push({
+          guestName: b.guest?.fullName ?? "Guest",
+          unitName: b.roomUnit?.name ?? null,
+          note
+        });
+      }
+    }
+  }
+
+  const vipsInHouse: ChefVipGuestRow[] = vipBookings.map((b) => ({
+    guestName: b.guest?.fullName ?? "VIP guest",
+    unitName: b.roomUnit?.name ?? null,
+    vipNote: b.guest?.vipNote ?? null,
+    checkOut: b.checkOut
+  }));
+
+  const now = asOf.getTime();
+  const pendingRoomService: ChefRoomServiceTicketRow[] = pendingTickets.map((t) => ({
+    ticketId: t.id,
+    status: String(t.ticketStatus),
+    unitName: t.booking?.roomUnit?.name ?? null,
+    guestName: t.booking?.guest?.fullName ?? t.booking?.guest?.phoneE164 ?? "Guest",
+    notes: t.notes ?? null,
+    ageMinutes: Math.max(0, Math.round((now - t.createdAt.getTime()) / 60000))
+  }));
+
+  return {
+    asOfYmd: ymd,
+    buffet,
+    lunch,
+    dinner,
+    vipsInHouse,
+    vipCount: vipsInHouse.length,
+    pendingRoomService,
+    pendingRoomServiceCount: pendingRoomService.length,
+    dietaryMentions
+  };
+}
