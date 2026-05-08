@@ -1591,7 +1591,7 @@ function renderLayout(
                   canNavReports ? { group: "insights", href: "/admin/reports-center", label: "Reports" } : false,
                   settingsNavItem
                 ])
-    : '<a href="/admin/login">Login</a>';
+    : "";
   /// PMS UX cleanup: the dedicated "Workspaces" picker page duplicated sidebar groups
   /// (Today / Restaurant / Housekeeping / Owner), creating two competing nav systems.
   /// We removed the picker entry button entirely; the sidebar is now the only operational
@@ -1615,6 +1615,33 @@ function renderLayout(
     : "";
   const logoutHtml = authenticated
     ? `<form method="post" action="/admin/logout"><button type="submit">Logout</button></form>`
+    : "";
+  // Unauthenticated visitors (login / forgot-password / onboard) should see a
+  // calm "auth landing" sidebar — no notification bell, no empty user/property
+  // cards, no orphan logout button. Otherwise the chrome flickers between an
+  // operator shell and a marketing splash, which previous users described as
+  // the menu "messing up" after a failed login.
+  const sidebarActionsHtml = authenticated
+    ? `<div class="sidebar-actions">
+        <div class="admin-notif-wrap">
+          <button id="adminNotifBell" class="admin-notif-bell" type="button" title="Notifications">🔔</button>
+          <span id="adminNotifBadge" class="admin-notif-badge" hidden>0</span>
+          <div id="adminNotifPanel" class="admin-notif-panel" hidden>
+            <div class="admin-notif-panel-head">
+              <strong style="font-size:13px">Notifications</strong>
+              <div class="admin-notif-actions">
+                <button id="adminNotifMute" type="button" title="Mute alert sound">🔔</button>
+                <button id="adminNotifReadAll" type="button">Read all</button>
+              </div>
+            </div>
+            <div class="admin-notif-scroll">
+              <ul id="adminNotifList" class="admin-notif-list"></ul>
+              <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
+            </div>
+          </div>
+        </div>
+        <div class="sidebar-logout">${logoutHtml}</div>
+      </div>`
     : "";
   // Hospitality PMS dedup: receptionists were seeing Room rack / Check-in / Check-out twice
   // (in Today and again in Front Desk). The "Today" group is now strictly the briefing surface
@@ -1826,6 +1853,7 @@ function renderLayout(
     .replaceAll("{{adminTitle}}", "ChatStay Admin")
     .replace("{{brandTagline}}", "WhatsApp-first booking ops")
     .replace("{{langSwitcher}}", langSwitcherHtml)
+    .replace("{{sidebarActions}}", sidebarActionsHtml)
     .replace("{{hotelCard}}", hotelCardHtml)
     .replace("{{propertySwitcher}}", propertySwitcherHtml)
     .replace("{{userIdentity}}", userIdentityHtml)
@@ -17423,7 +17451,7 @@ adminRouter.get(
           ${noteHtml}
           <div class="actions">
             <form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/mark-fixed">
-              <button type="submit" class="maint-btn maint-btn-fix" onclick="return confirm('Mark Room ${escapeHtml(u.name)} as fixed and back to AVAILABLE?');">✅ Mark fixed</button>
+              <button type="submit" class="maint-btn maint-btn-fix">✅ Mark fixed</button>
             </form>
             ${urgentBtn}
             <a class="maint-btn maint-btn-link" href="/admin/room-board/unit/${encodeURIComponent(u.id)}/details">Open room →</a>

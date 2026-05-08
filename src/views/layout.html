@@ -1657,26 +1657,7 @@
         </div>
         <div class="sidebar-top-controls">
           <div class="lang-switcher">{{langSwitcher}}</div>
-          <div class="sidebar-actions">
-            <div class="admin-notif-wrap">
-              <button id="adminNotifBell" class="admin-notif-bell" type="button" title="Notifications">🔔</button>
-              <span id="adminNotifBadge" class="admin-notif-badge" hidden>0</span>
-              <div id="adminNotifPanel" class="admin-notif-panel" hidden>
-                <div class="admin-notif-panel-head">
-                  <strong style="font-size:13px">Notifications</strong>
-                  <div class="admin-notif-actions">
-                    <button id="adminNotifMute" type="button" title="Mute alert sound">🔔</button>
-                    <button id="adminNotifReadAll" type="button">Read all</button>
-                  </div>
-                </div>
-                <div class="admin-notif-scroll">
-                  <ul id="adminNotifList" class="admin-notif-list"></ul>
-                  <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
-                </div>
-              </div>
-            </div>
-            <div class="sidebar-logout">{{logoutAction}}</div>
-          </div>
+          {{sidebarActions}}
         </div>
         {{hotelCard}}
         {{propertySwitcher}}
