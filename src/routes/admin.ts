@@ -1312,24 +1312,58 @@ function getAdminNotificationScript(): string {
     renderList(items);
     renderAttention(items);
   }
+  // Original DOM home of the panel (so we can return it on close).
+  var panelHome = panel.parentNode;
+  var panelHomeNext = panel.nextSibling;
+  function portalPanelOpen() {
+    // Move the panel onto <body> so no ancestor (sticky sidebar with overflow,
+    // backdrop-filter cards, transforms on hover, etc.) can create a stacking
+    // context that lets page content render on top of it.
+    if (panel.parentNode !== document.body) {
+      document.body.appendChild(panel);
+    }
+    panel.classList.add("admin-notif-panel-floating");
+  }
+  function portalPanelClose() {
+    panel.classList.remove("admin-notif-panel-floating");
+    if (panel.parentNode !== panelHome && panelHome) {
+      if (panelHomeNext && panelHomeNext.parentNode === panelHome) {
+        panelHome.insertBefore(panel, panelHomeNext);
+      } else {
+        panelHome.appendChild(panel);
+      }
+    }
+    panel.style.top = "";
+    panel.style.left = "";
+    panel.style.right = "";
+    panel.style.width = "";
+  }
   function positionNotifPanel() {
     // When the bell lives inside the sticky sidebar (which has overflow:auto), an
-    // absolutely-positioned dropdown gets clipped. We anchor the panel with
-    // position:fixed + computed coordinates so it always escapes the sidebar bounds
-    // while still pointing at the bell.
+    // absolutely-positioned dropdown gets clipped or rendered behind the main
+    // content. We anchor the panel with position:fixed + computed coordinates so
+    // it always escapes the sidebar bounds while still pointing at the bell.
     if (!notifBtn.closest(".sidebar-top-controls")) return;
     var rect = notifBtn.getBoundingClientRect();
     var panelWidth = Math.min(360, window.innerWidth - 24);
+    var maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
+    var preferredLeft = Math.round(rect.left);
     panel.style.position = "fixed";
     panel.style.top = Math.round(rect.bottom + 8) + "px";
-    panel.style.left = Math.round(Math.max(12, rect.left)) + "px";
+    panel.style.left = Math.round(Math.max(12, Math.min(preferredLeft, maxLeft))) + "px";
     panel.style.width = panelWidth + "px";
     panel.style.right = "auto";
   }
   notifBtn.addEventListener("click", function () {
     var willOpen = panel.hidden;
-    panel.hidden = !panel.hidden;
-    if (willOpen) positionNotifPanel();
+    if (willOpen) {
+      portalPanelOpen();
+      panel.hidden = false;
+      positionNotifPanel();
+    } else {
+      panel.hidden = true;
+      portalPanelClose();
+    }
     notifBtn.classList.remove("admin-notif-bell-pulse");
   });
   window.addEventListener("resize", function () { if (!panel.hidden) positionNotifPanel(); });
@@ -1337,7 +1371,10 @@ function getAdminNotificationScript(): string {
   document.addEventListener("click", function (e) {
     if (panel.hidden) return;
     var t = e.target;
-    if (!panel.contains(t) && !notifBtn.contains(t)) panel.hidden = true;
+    if (!panel.contains(t) && !notifBtn.contains(t)) {
+      panel.hidden = true;
+      portalPanelClose();
+    }
   });
   notifList.addEventListener("click", async function (e) {
     var t = e.target;
@@ -1345,10 +1382,23 @@ function getAdminNotificationScript(): string {
     if (!a) return;
     var id = a.getAttribute("data-notif-id");
     if (!id) return;
+    // If the user is following a link inside the panel (SPA navigation), tidy
+    // up so the panel doesn't stay floating on <body> after navigation.
+    if (a.tagName === "A" && a.getAttribute("href")) {
+      panel.hidden = true;
+      portalPanelClose();
+    }
     var r = await fetch("/auth/notifications/" + encodeURIComponent(id) + "/read", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } }).catch(function () { return null; });
     if (r && r.status === 401) { disableNotifications(); return; }
     fetchUnreadCount();
     fetchLatest();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (panel.hidden) return;
+    if (e.key === "Escape" || e.key === "Esc") {
+      panel.hidden = true;
+      portalPanelClose();
+    }
   });
   notifReadAll.addEventListener("click", async function () {
     var r = await fetch("/auth/notifications/read-all", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } }).catch(function () { return null; });
