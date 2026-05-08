@@ -5126,6 +5126,10 @@ adminRouter.post("/users", requireAuth, async (req, res) => {
       RESTAURANT: "RESTAURANT" as UserRole
     };
 
+    if (!Object.prototype.hasOwnProperty.call(roleMap, role)) {
+      jsonErr(400, `Unknown role "${role}". Choose Manager, Staff, Front Desk, Finance, Housekeeping, or Restaurant.`);
+      return;
+    }
     const roleSafe = roleMap[role] ?? UserRole.MANAGER;
     const parsedPermissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
     const permissions = permissionMatrixHasAny(parsedPermissions) ? parsedPermissions : defaultPermissionsForRole(roleSafe);
@@ -5144,31 +5148,66 @@ adminRouter.post("/users", requireAuth, async (req, res) => {
       isActive: true
     };
 
-    if (email) {
-      await prisma.hotelUser.upsert({
-        where: { hotelId_email: { hotelId: hotel.id, email } },
-        create: createPayload,
-        update: {
-          fullName,
-          username,
-          passwordHash,
-          pinHash,
-          role: roleSafe,
-          isActive: true
-        }
-      });
-    } else {
-      await prisma.hotelUser.upsert({
-        where: { hotelId_username: { hotelId: hotel.id, username: username! } },
-        create: createPayload,
-        update: {
-          fullName,
-          passwordHash,
-          pinHash,
-          role: roleSafe,
-          isActive: true
-        }
-      });
+    try {
+      if (email) {
+        await prisma.hotelUser.upsert({
+          where: { hotelId_email: { hotelId: hotel.id, email } },
+          create: createPayload,
+          update: {
+            fullName,
+            username,
+            passwordHash,
+            pinHash,
+            role: roleSafe,
+            isActive: true
+          }
+        });
+      } else {
+        await prisma.hotelUser.upsert({
+          where: { hotelId_username: { hotelId: hotel.id, username: username! } },
+          create: createPayload,
+          update: {
+            fullName,
+            passwordHash,
+            pinHash,
+            role: roleSafe,
+            isActive: true
+          }
+        });
+      }
+    } catch (upsertErr) {
+      console.error(
+        "[admin] POST /users hotelUser.upsert failed:",
+        { role: roleSafe, hasEmail: Boolean(email), hasUsername: Boolean(username) },
+        upsertErr instanceof Error ? upsertErr.stack ?? upsertErr.message : String(upsertErr)
+      );
+      if (isHotelUserSchemaMismatchError(upsertErr)) {
+        jsonErr(
+          503,
+          "Database schema is out of date. Run prisma migrate deploy on the server and restart the app."
+        );
+        return;
+      }
+      if (upsertErr instanceof Prisma.PrismaClientKnownRequestError && upsertErr.code === "P2002") {
+        jsonErr(409, "A user with this email or username already exists for this hotel.");
+        return;
+      }
+      if (upsertErr instanceof Prisma.PrismaClientValidationError) {
+        // Most common: server still running an old Prisma client that does not know
+        // about a freshly added enum value (e.g. RESTAURANT). Surface the root cause
+        // directly to the signed-in admin so they can fix the deploy without log diving.
+        jsonErr(
+          500,
+          `Could not create user: Prisma rejected the payload (likely role "${roleSafe}" is not in the deployed Prisma client). Run prisma generate on the server and restart.`
+        );
+        return;
+      }
+      const detail =
+        upsertErr instanceof Error && upsertErr.message
+          ? upsertErr.message.slice(0, 240)
+          : "Unknown database error";
+      jsonErr(500, `Could not create user. ${detail}`);
+      return;
     }
 
     try {
