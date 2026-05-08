@@ -163,6 +163,74 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
       main { padding: 18px; }
       .hero-card { padding: 22px; border-radius: 22px; }
     }
+
+    /* ===== Polish layer 3: premium SaaS depth, hierarchy, micro-interactions ===== */
+    body {
+      font-family: "Inter", "SF Pro Display", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+      background:
+        radial-gradient(ellipse at 8% -8%, rgba(37, 211, 102, 0.16), transparent 35%),
+        radial-gradient(ellipse at 95% 5%, rgba(18, 140, 126, 0.12), transparent 32%),
+        linear-gradient(180deg, #f7fcf9 0%, #eef7f2 45%, #e6f1ec 100%);
+      background-attachment: fixed;
+    }
+    main {
+      background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(252,255,253,0.92) 100%);
+      border: 1px solid rgba(220, 232, 227, 0.85);
+      box-shadow:
+        0 32px 80px -20px rgba(7, 68, 58, 0.22),
+        0 12px 30px -10px rgba(15, 44, 38, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.85);
+    }
+    h1 {
+      background: linear-gradient(135deg, #0b1f1c 0%, #0e3d34 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      letter-spacing: -0.04em;
+    }
+    .hero-card {
+      background: linear-gradient(135deg, #064e46 0%, #0c7a6e 50%, #128c7e 100%),
+                  radial-gradient(circle at 20% 0%, rgba(37, 211, 102, 0.32), transparent 45%);
+      box-shadow: 0 28px 70px -16px rgba(7, 68, 58, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      color: #ffffff;
+    }
+    .hero-card h1 {
+      background: linear-gradient(135deg, #ffffff 0%, #d9fbe8 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    button[type="submit"], .btn-primary {
+      background: linear-gradient(135deg, #25d366 0%, #1bb673 50%, #128c7e 100%);
+      color: #053b18;
+      border: 0;
+      box-shadow:
+        0 14px 30px -8px rgba(37, 211, 102, 0.4),
+        inset 0 1px 0 rgba(255, 255, 255, 0.45);
+      transition: transform 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                  box-shadow 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                  filter 0.18s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+    button[type="submit"]:hover:not(:disabled), .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow:
+        0 22px 44px -10px rgba(37, 211, 102, 0.5),
+        inset 0 1px 0 rgba(255, 255, 255, 0.5);
+      filter: brightness(1.04);
+    }
+    input, select, textarea {
+      transition: border-color 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                  box-shadow 0.18s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: #25d366;
+      box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.18);
+      outline: 0;
+    }
+    ::selection { background: rgba(37, 211, 102, 0.3); color: #053b18; }
   </style>
   <link rel="stylesheet" href="/static/guest-calendar.css" />
   <script src="/static/guest-calendar.js" defer></script>

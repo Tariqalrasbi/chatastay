@@ -198,6 +198,21 @@ html{scrollbar-width:thin;scrollbar-color:rgba(7,94,84,.32) transparent}
 body::-webkit-scrollbar{width:10px;height:10px}
 body::-webkit-scrollbar-thumb{background:linear-gradient(180deg,rgba(37,211,102,.5),rgba(7,94,84,.45));border-radius:999px;border:2px solid transparent;background-clip:padding-box}
 @media (max-width:560px){.wrap{padding:18px}.hero{padding:36px 22px;border-radius:26px}.hero h1{font-size:32px}.hero p{font-size:16px}.profile-cover{height:220px;padding:22px;border-radius:24px}.search-form{padding:8px}.btn{padding:12px 16px}.card{padding:18px;border-radius:20px}}
+/* ===== Polish layer 3: premium SaaS depth, hierarchy, micro-interactions ===== */
+body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;background:radial-gradient(ellipse at 8% -8%,rgba(37,211,102,.18),transparent 35%),radial-gradient(ellipse at 95% 5%,rgba(18,140,126,.14),transparent 32%),radial-gradient(ellipse at 50% 100%,rgba(37,211,102,.06),transparent 40%),linear-gradient(180deg,#f7fcf9 0%,#eef7f2 45%,#e6f1ec 100%);background-attachment:fixed}
+.hero{background:linear-gradient(135deg,#064e46 0%,#0c7a6e 45%,#128c7e 100%),radial-gradient(circle at 20% 0%,rgba(37,211,102,.32),transparent 45%);box-shadow:0 36px 90px -16px rgba(7,68,58,.32),inset 0 1px 0 rgba(255,255,255,.12)}
+.hero h1{background:linear-gradient(135deg,#ffffff 0%,#d9fbe8 100%);-webkit-background-clip:text;background-clip:text;color:transparent;letter-spacing:-.04em}
+.hotel-card{background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 18px 48px -16px rgba(15,44,38,.16),inset 0 1px 0 rgba(255,255,255,.85);transition:transform .22s cubic-bezier(.25,1,.5,1),box-shadow .22s cubic-bezier(.25,1,.5,1)}
+.hotel-card:hover{transform:translateY(-4px);box-shadow:0 32px 80px -20px rgba(7,68,58,.22)}
+.hotel-card .price strong{background:linear-gradient(135deg,#0b1f1c 0%,#0e3d34 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.btn-primary,.btn-whatsapp{background:linear-gradient(135deg,#25d366 0%,#1bb673 50%,#128c7e 100%);color:#053b18;border:0;box-shadow:0 14px 30px -8px rgba(37,211,102,.4),inset 0 1px 0 rgba(255,255,255,.45);transition:transform .18s cubic-bezier(.25,1,.5,1),box-shadow .18s cubic-bezier(.25,1,.5,1),filter .18s cubic-bezier(.25,1,.5,1)}
+.btn-primary:hover,.btn-whatsapp:hover{transform:translateY(-1px);box-shadow:0 22px 44px -10px rgba(37,211,102,.5),inset 0 1px 0 rgba(255,255,255,.5);filter:brightness(1.04)}
+.search-form input,.search-form select{background:#ffffff;border:1px solid #d9e7e1;transition:border-color .18s cubic-bezier(.25,1,.5,1),box-shadow .18s cubic-bezier(.25,1,.5,1)}
+.search-form input:focus,.search-form select:focus{border-color:#25d366;box-shadow:0 0 0 4px rgba(37,211,102,.18);outline:0}
+.card{background:linear-gradient(180deg,rgba(255,255,255,.98) 0%,rgba(252,255,253,.92) 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 22px 60px -16px rgba(15,44,38,.16),inset 0 1px 0 rgba(255,255,255,.85)}
+.amenity{background:linear-gradient(135deg,#dcfce7 0%,#c7f5d6 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 2px 6px rgba(15,44,38,.04)}
+.badge{font-weight:700}
+::selection{background:rgba(37,211,102,.3);color:#053b18}
 `;
 
 function renderShell(opts: {

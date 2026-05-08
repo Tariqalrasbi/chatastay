@@ -1045,6 +1045,85 @@ function ownerLayout(content: string, authenticated: boolean): string {
         background: linear-gradient(180deg, rgba(37, 211, 102, 0.5), rgba(7, 94, 84, 0.45));
         border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
       }
+
+      /* ===== Polish layer 3: premium SaaS depth, hierarchy, micro-interactions ===== */
+      body {
+        font-family: "Inter", "SF Pro Display", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+        background:
+          radial-gradient(ellipse at 8% -8%, rgba(37, 211, 102, 0.16), transparent 35%),
+          radial-gradient(ellipse at 95% 5%, rgba(18, 140, 126, 0.12), transparent 32%),
+          linear-gradient(180deg, #f7fcf9 0%, #eef7f2 45%, #e6f1ec 100%);
+        background-attachment: fixed;
+      }
+      .sidebar {
+        background:
+          linear-gradient(180deg, rgba(6, 78, 70, 0.985) 0%, rgba(7, 88, 76, 0.985) 50%, rgba(8, 61, 45, 0.985) 100%),
+          radial-gradient(ellipse at 0% 0%, rgba(37, 211, 102, 0.28), transparent 38%);
+        box-shadow: 14px 0 50px -8px rgba(7, 68, 58, 0.24), inset -1px 0 0 rgba(255, 255, 255, 0.06);
+      }
+      nav a, nav button {
+        transition: transform 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    background 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    box-shadow 0.18s cubic-bezier(0.25, 1, 0.5, 1);
+      }
+      nav a:hover, nav button:hover { transform: translateX(2px); }
+      nav a.active {
+        background: linear-gradient(135deg, #25d366 0%, #1bb673 100%);
+        color: #053b18;
+        font-weight: 700;
+        box-shadow: 0 12px 28px -6px rgba(37, 211, 102, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+      }
+      .panel {
+        position: relative;
+        background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(252,255,253,0.92) 100%);
+        border: 1px solid rgba(220, 232, 227, 0.85);
+        box-shadow:
+          0 22px 60px -16px rgba(15, 44, 38, 0.16),
+          0 8px 20px -6px rgba(15, 44, 38, 0.08),
+          inset 0 1px 0 rgba(255, 255, 255, 0.85);
+        border-radius: 22px;
+      }
+      .stat {
+        background: linear-gradient(180deg, #ffffff 0%, #f7fdfa 100%);
+        border: 1px solid rgba(220, 232, 227, 0.85);
+        box-shadow: 0 14px 36px -12px rgba(15, 44, 38, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+        border-radius: 18px;
+        transition: transform 0.22s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.22s cubic-bezier(0.25, 1, 0.5, 1);
+      }
+      .stat:hover { transform: translateY(-3px); box-shadow: 0 32px 80px -20px rgba(7, 68, 58, 0.22); }
+      .stat p {
+        font-size: clamp(24px, 2.4vw, 34px);
+        font-weight: 800;
+        letter-spacing: -0.035em;
+        background: linear-gradient(135deg, #0b1f1c 0%, #0e3d34 70%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      h1 {
+        background: linear-gradient(135deg, #0b1f1c 0%, #0e3d34 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        letter-spacing: -0.04em;
+      }
+      input, select, textarea {
+        transition: border-color 0.18s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.18s cubic-bezier(0.25, 1, 0.5, 1);
+      }
+      input:focus, select:focus, textarea:focus {
+        border-color: #25d366 !important;
+        box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.18) !important;
+        outline: 0;
+      }
+      thead th {
+        background: linear-gradient(180deg, rgba(245, 251, 248, 0.98), rgba(238, 247, 242, 0.94));
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+      ::selection { background: rgba(37, 211, 102, 0.3); color: #053b18; }
     </style>
   </head>
   <body>
