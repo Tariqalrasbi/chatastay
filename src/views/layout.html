@@ -1368,10 +1368,12 @@
           });
         });
 
-        // Keep server-rendered navigation feeling fast: warm same-origin admin GET
-        // pages before the click, and show clicked state immediately on pointer down.
-        var prefetched = new Set();
-        var shouldPrefetch = function (link) {
+        // Admin instant navigation: keep the PMS shell mounted, fetch the next
+        // server-rendered page, then swap the content area. Routes and forms stay
+        // unchanged; failures fall back to normal browser navigation.
+        var pageCache = new Map();
+        var inFlightPages = new Map();
+        var shouldInstantNavigate = function (link) {
           if (!link || link.target || link.hasAttribute("download")) return false;
           var href = link.getAttribute("href") || "";
           if (!href || href[0] === "#" || href.startsWith("javascript:") || href.startsWith("mailto:") || href.startsWith("tel:")) return false;
@@ -1384,29 +1386,123 @@
             return false;
           }
         };
-        var prefetchLink = function (link) {
-          if (!shouldPrefetch(link)) return;
-          var href = new URL(link.getAttribute("href") || "", window.location.origin).toString();
-          if (prefetched.has(href)) return;
-          prefetched.add(href);
-          window.fetch(href, {
-            method: "GET",
-            credentials: "same-origin",
-            headers: { Accept: "text/html" },
-            priority: "low"
-          }).catch(function () {});
+        var loadPage = function (url) {
+          var href = new URL(url, window.location.origin).toString();
+          if (pageCache.has(href)) return Promise.resolve(pageCache.get(href));
+          if (inFlightPages.has(href)) return inFlightPages.get(href);
+          var req = window
+            .fetch(href, {
+              method: "GET",
+              credentials: "same-origin",
+              headers: { Accept: "text/html" },
+              priority: "low"
+            })
+            .then(function (res) {
+              if (!res.ok) throw new Error("Navigation fetch failed: " + res.status);
+              return res.text();
+            })
+            .then(function (html) {
+              var doc = new DOMParser().parseFromString(html, "text/html");
+              if (!doc.querySelector("main.content")) throw new Error("Missing admin content shell");
+              pageCache.set(href, doc);
+              return doc;
+            })
+            .finally(function () {
+              inFlightPages.delete(href);
+            });
+          inFlightPages.set(href, req);
+          return req;
         };
-        document.querySelectorAll(".sidebar-nav a, .section-tabs a").forEach(function (link) {
-          link.addEventListener("pointerenter", function () {
-            prefetchLink(link);
+        var prefetchLink = function (link) {
+          if (!shouldInstantNavigate(link)) return;
+          loadPage(new URL(link.getAttribute("href") || "", window.location.origin)).catch(function () {});
+        };
+        var runInsertedScripts = function (root) {
+          Array.from(root.querySelectorAll("script")).forEach(function (oldScript) {
+            var next = document.createElement("script");
+            Array.from(oldScript.attributes).forEach(function (attr) {
+              next.setAttribute(attr.name, attr.value);
+            });
+            next.text = oldScript.text || oldScript.textContent || "";
+            oldScript.parentNode.replaceChild(next, oldScript);
           });
-          link.addEventListener("focus", function () {
-            prefetchLink(link);
+        };
+        var applyActiveNavForPath = function (path) {
+          var cleanPath = (path || window.location.pathname || "/").replace(/\/+$/, "") || "/";
+          var active = groupByPath(cleanPath);
+          document.querySelectorAll(".top-level-link").forEach(function (link) {
+            link.classList.toggle("top-level-active", link.getAttribute("data-top-group") === active);
+            link.classList.remove("is-nav-clicked");
           });
-          link.addEventListener("pointerdown", function () {
-            if (!shouldPrefetch(link)) return;
-            link.classList.add("is-nav-clicked");
-            document.body.classList.add("admin-navigating");
+          document.querySelectorAll(".section-tabs").forEach(function (section) {
+            section.classList.toggle("active", section.getAttribute("data-section") === active);
+            Array.from(section.querySelectorAll("a")).forEach(function (subLink) {
+              var hrefPath = normalizePath(subLink.getAttribute("href"));
+              var exact = hrefPath === cleanPath;
+              var parent = hrefPath !== "/" && cleanPath.startsWith(hrefPath + "/");
+              subLink.classList.toggle("active-link", exact || parent);
+              subLink.classList.remove("is-nav-clicked");
+            });
+          });
+        };
+        var bindInstantLinks = function (root) {
+          root.querySelectorAll(".sidebar-nav a, .section-tabs a").forEach(function (link) {
+            if (link.dataset.instantNavBound === "1") return;
+            link.dataset.instantNavBound = "1";
+            link.addEventListener("pointerenter", function () {
+              prefetchLink(link);
+            });
+            link.addEventListener("focus", function () {
+              prefetchLink(link);
+            });
+            link.addEventListener("pointerdown", function () {
+              if (!shouldInstantNavigate(link)) return;
+              link.classList.add("is-nav-clicked");
+              document.body.classList.add("admin-navigating");
+            });
+            link.addEventListener("click", function (event) {
+              if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+              if (!shouldInstantNavigate(link)) return;
+              event.preventDefault();
+              var url = new URL(link.getAttribute("href") || "", window.location.origin);
+              navigateInstant(url.toString(), true).catch(function () {
+                window.location.assign(url.toString());
+              });
+            });
+          });
+        };
+        var navigateInstant = function (href, push) {
+          document.body.classList.add("admin-navigating");
+          return loadPage(href).then(function (doc) {
+            var incoming = doc.querySelector("main.content");
+            var current = document.querySelector("main.content");
+            if (!incoming || !current) throw new Error("Missing admin content shell");
+            current.innerHTML = incoming.innerHTML;
+            if (doc.title) document.title = doc.title;
+            var url = new URL(href, window.location.origin);
+            if (push) window.history.pushState({ instantAdmin: true, href: url.toString() }, doc.title || "", url.pathname + url.search + url.hash);
+            applyActiveNavForPath(url.pathname);
+            runInsertedScripts(current);
+            bindInstantLinks(current);
+            document.body.classList.remove("admin-navigating");
+            window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+          }).catch(function (err) {
+            document.body.classList.remove("admin-navigating");
+            throw err;
+          });
+        };
+        bindInstantLinks(document);
+        window.addEventListener("popstate", function () {
+          navigateInstant(window.location.href, false).catch(function () {
+            window.location.reload();
+          });
+        });
+        var scheduleWarmup = window.requestIdleCallback || function (fn) { return window.setTimeout(fn, 250); };
+        scheduleWarmup(function () {
+          Array.from(document.querySelectorAll(".sidebar-nav a, .section-tabs.active a")).slice(0, 18).forEach(function (link, idx) {
+            window.setTimeout(function () {
+              prefetchLink(link);
+            }, idx * 90);
           });
         });
 
