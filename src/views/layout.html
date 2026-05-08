@@ -1185,7 +1185,7 @@
           <ul id="adminAttentionList"></ul>
         </section>
         <div id="adminNavContext" class="nav-context" hidden></div>
-        <section class="panel">{{content}}</section>
+        <section id="adminPanelContent" class="panel">{{content}}</section>
       </main>
     </div>
     <script>
@@ -1330,43 +1330,47 @@
           }
         });
 
-        var navContext = document.getElementById("adminNavContext");
-        if (navContext) {
+        var updateNavContext = function (groupKey, sectionLink) {
+          var navContext = document.getElementById("adminNavContext");
+          if (!navContext) return;
           var h = document.querySelector(".panel h1, .panel h2");
           var pageTitle = h && h.textContent ? h.textContent.trim() : "";
-          var groupLabel = groupLabels[activeGroup] || "Today";
+          var groupLabel = groupLabels[groupKey] || "Today";
           var subLabel =
-            activeSectionLink && activeSectionLink.textContent
-              ? activeSectionLink.textContent.replace(/\s+/g, " ").trim()
+            sectionLink && sectionLink.textContent
+              ? sectionLink.textContent.replace(/\s+/g, " ").trim()
               : "";
           var parts = ["<strong>" + escapeText(groupLabel) + "</strong>"];
           if (subLabel && subLabel !== groupLabel) parts.push(escapeText(subLabel));
           if (pageTitle && pageTitle !== subLabel && pageTitle !== groupLabel) parts.push(escapeText(pageTitle));
           navContext.innerHTML = parts.join(" &rsaquo; ");
-          navContext.hidden = parts.length <= 1 && activeGroup === "dashboard";
-        }
+          navContext.hidden = parts.length <= 1 && groupKey === "dashboard";
+        };
+        updateNavContext(activeGroup, activeSectionLink);
 
-        var tables = document.querySelectorAll("table");
-        tables.forEach(function (table) {
-          var headerCells = Array.from(table.querySelectorAll("thead th")).map(function (th) {
-            return th.textContent ? th.textContent.trim() : "";
-          });
-
-          table.querySelectorAll("tbody tr").forEach(function (row) {
-            var rowHeader = row.querySelector("th");
-            var rowHeaderText = rowHeader && rowHeader.textContent ? rowHeader.textContent.trim() : "";
-            var dataCells = Array.from(row.querySelectorAll("td"));
-
-            dataCells.forEach(function (cell, index) {
-              if (cell.hasAttribute("data-label") || Number(cell.getAttribute("colspan") || "1") > 1) {
-                return;
-              }
-              var fallback = rowHeaderText || "Field " + (index + 1);
-              var label = headerCells[index] || fallback;
-              cell.setAttribute("data-label", label);
+        var decorateTables = function (root) {
+          var scope = root || document;
+          var tables = scope.querySelectorAll("table");
+          tables.forEach(function (table) {
+            var headerCells = Array.from(table.querySelectorAll("thead th")).map(function (th) {
+              return th.textContent ? th.textContent.trim() : "";
+            });
+            table.querySelectorAll("tbody tr").forEach(function (row) {
+              var rowHeader = row.querySelector("th");
+              var rowHeaderText = rowHeader && rowHeader.textContent ? rowHeader.textContent.trim() : "";
+              var dataCells = Array.from(row.querySelectorAll("td"));
+              dataCells.forEach(function (cell, index) {
+                if (cell.hasAttribute("data-label") || Number(cell.getAttribute("colspan") || "1") > 1) {
+                  return;
+                }
+                var fallback = rowHeaderText || "Field " + (index + 1);
+                var label = headerCells[index] || fallback;
+                cell.setAttribute("data-label", label);
+              });
             });
           });
-        });
+        };
+        decorateTables(document);
 
         // Admin instant navigation: keep the PMS shell mounted, fetch the next
         // server-rendered page, then swap the content area. Routes and forms stay
@@ -1409,7 +1413,7 @@
             })
             .then(function (payload) {
               var doc = new DOMParser().parseFromString(payload.html, "text/html");
-              if (!doc.querySelector("main.content")) throw new Error("Missing admin content shell");
+              if (!doc.querySelector("#adminPanelContent")) throw new Error("Missing admin content shell");
               pageCache.set(href, doc);
               return doc;
             })
@@ -1440,16 +1444,21 @@
             link.classList.toggle("top-level-active", link.getAttribute("data-top-group") === active);
             link.classList.remove("is-nav-clicked");
           });
+          var newActiveSectionLink = null;
           document.querySelectorAll(".section-tabs").forEach(function (section) {
             section.classList.toggle("active", section.getAttribute("data-section") === active);
             Array.from(section.querySelectorAll("a")).forEach(function (subLink) {
               var hrefPath = normalizePath(subLink.getAttribute("href"));
               var exact = hrefPath === cleanPath;
               var parent = hrefPath !== "/" && cleanPath.startsWith(hrefPath + "/");
-              subLink.classList.toggle("active-link", exact || parent);
+              var isActive = exact || parent;
+              subLink.classList.toggle("active-link", isActive);
               subLink.classList.remove("is-nav-clicked");
+              if (isActive && !newActiveSectionLink) newActiveSectionLink = subLink;
             });
           });
+          updateNavContext(active, newActiveSectionLink);
+          decorateTables(document.getElementById("adminPanelContent") || document);
         };
         var bindInstantLinks = function (root) {
           root.querySelectorAll(".sidebar-nav a, .section-tabs a").forEach(function (link) {
@@ -1481,16 +1490,16 @@
         var navigateInstant = function (href, push) {
           document.body.classList.add("admin-navigating");
           return loadPage(href).then(function (doc) {
-            var incoming = doc.querySelector("main.content");
-            var current = document.querySelector("main.content");
-            if (!incoming || !current) throw new Error("Missing admin content shell");
-            current.innerHTML = incoming.innerHTML;
+            var incomingPanel = doc.querySelector("#adminPanelContent");
+            var currentPanel = document.querySelector("#adminPanelContent");
+            if (!incomingPanel || !currentPanel) throw new Error("Missing admin content shell");
+            currentPanel.innerHTML = incomingPanel.innerHTML;
             if (doc.title) document.title = doc.title;
             var url = new URL(href, window.location.origin);
             if (push) window.history.pushState({ instantAdmin: true, href: url.toString() }, doc.title || "", url.pathname + url.search + url.hash);
             applyActiveNavForPath(url.pathname);
-            runInsertedScripts(current);
-            bindInstantLinks(current);
+            runInsertedScripts(currentPanel);
+            bindInstantLinks(currentPanel);
             document.body.classList.remove("admin-navigating");
             window.scrollTo({ top: 0, left: 0, behavior: "auto" });
           }).catch(function (err) {
