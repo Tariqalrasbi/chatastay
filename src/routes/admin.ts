@@ -1281,10 +1281,28 @@ function getAdminNotificationScript(): string {
     renderList(items);
     renderAttention(items);
   }
+  function positionNotifPanel() {
+    // When the bell lives inside the sticky sidebar (which has overflow:auto), an
+    // absolutely-positioned dropdown gets clipped. We anchor the panel with
+    // position:fixed + computed coordinates so it always escapes the sidebar bounds
+    // while still pointing at the bell.
+    if (!notifBtn.closest(".sidebar-top-controls")) return;
+    var rect = notifBtn.getBoundingClientRect();
+    var panelWidth = Math.min(360, window.innerWidth - 24);
+    panel.style.position = "fixed";
+    panel.style.top = Math.round(rect.bottom + 8) + "px";
+    panel.style.left = Math.round(Math.max(12, rect.left)) + "px";
+    panel.style.width = panelWidth + "px";
+    panel.style.right = "auto";
+  }
   notifBtn.addEventListener("click", function () {
+    var willOpen = panel.hidden;
     panel.hidden = !panel.hidden;
+    if (willOpen) positionNotifPanel();
     notifBtn.classList.remove("admin-notif-bell-pulse");
   });
+  window.addEventListener("resize", function () { if (!panel.hidden) positionNotifPanel(); });
+  window.addEventListener("scroll", function () { if (!panel.hidden) positionNotifPanel(); }, { passive: true });
   document.addEventListener("click", function (e) {
     if (panel.hidden) return;
     var t = e.target;

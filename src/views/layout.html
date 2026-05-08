@@ -108,6 +108,12 @@
         gap: 6px;
         margin-bottom: 12px;
       }
+      .sidebar-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+      }
       .lang-switcher {
         display: flex;
         gap: 6px;
@@ -274,6 +280,14 @@
         cursor: pointer;
         font-size: 17px;
       }
+      .sidebar-top-controls .admin-notif-bell {
+        width: 28px;
+        height: 28px;
+        border-color: rgba(255, 255, 255, 0.3);
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        font-size: 14px;
+      }
       @keyframes admin-notif-bell-pulse-kf {
         0%,
         100% {
@@ -319,6 +333,10 @@
         background: #fff;
         box-shadow: 0 16px 36px rgba(15, 23, 42, 0.15);
         z-index: 10020;
+      }
+      .sidebar-top-controls .admin-notif-panel {
+        top: 36px;
+        right: -44px;
       }
       .admin-notif-scroll {
         flex: 1;
@@ -684,6 +702,9 @@
         order: 1;
       }
       html[dir="rtl"] .sidebar-top-controls {
+        flex-direction: row-reverse;
+      }
+      html[dir="rtl"] .sidebar-actions {
         flex-direction: row-reverse;
       }
       html[dir="rtl"] .lang-switcher {
@@ -1628,7 +1649,26 @@
         </div>
         <div class="sidebar-top-controls">
           <div class="lang-switcher">{{langSwitcher}}</div>
-          <div class="sidebar-logout">{{logoutAction}}</div>
+          <div class="sidebar-actions">
+            <div class="admin-notif-wrap">
+              <button id="adminNotifBell" class="admin-notif-bell" type="button" title="Notifications">🔔</button>
+              <span id="adminNotifBadge" class="admin-notif-badge" hidden>0</span>
+              <div id="adminNotifPanel" class="admin-notif-panel" hidden>
+                <div class="admin-notif-panel-head">
+                  <strong style="font-size:13px">Notifications</strong>
+                  <div class="admin-notif-actions">
+                    <button id="adminNotifMute" type="button" title="Mute alert sound">🔔</button>
+                    <button id="adminNotifReadAll" type="button">Read all</button>
+                  </div>
+                </div>
+                <div class="admin-notif-scroll">
+                  <ul id="adminNotifList" class="admin-notif-list"></ul>
+                  <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
+                </div>
+              </div>
+            </div>
+            <div class="sidebar-logout">{{logoutAction}}</div>
+          </div>
         </div>
         <div class="hotel-card">
           <strong>{{hotelName}}</strong>
@@ -1641,23 +1681,6 @@
       <main class="content">
         <div class="top-subnav">
           <div class="top-subnav-main">{{sectionTabs}}</div>
-          <div class="admin-notif-wrap">
-            <button id="adminNotifBell" class="admin-notif-bell" type="button" title="Notifications">🔔</button>
-            <span id="adminNotifBadge" class="admin-notif-badge" hidden>0</span>
-            <div id="adminNotifPanel" class="admin-notif-panel" hidden>
-              <div class="admin-notif-panel-head">
-                <strong style="font-size:13px">Notifications</strong>
-                <div class="admin-notif-actions">
-                  <button id="adminNotifMute" type="button" title="Mute alert sound">🔔</button>
-                  <button id="adminNotifReadAll" type="button">Read all</button>
-                </div>
-              </div>
-              <div class="admin-notif-scroll">
-                <ul id="adminNotifList" class="admin-notif-list"></ul>
-                <p id="adminNotifEmpty" class="admin-notif-empty">No new notifications.</p>
-              </div>
-            </div>
-          </div>
         </div>
         <section id="adminAttentionStrip" class="attention-strip" hidden>
           <h4>Attention Needed</h4>
