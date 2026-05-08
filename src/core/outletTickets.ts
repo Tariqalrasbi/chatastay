@@ -5,9 +5,11 @@ import {
   FolioOutletCategory,
   FolioTransactionType,
   OutletTicketSource,
-  OutletTicketStatus
+  OutletTicketStatus,
+  UserRole
 } from "@prisma/client";
 import { prisma } from "../db";
+import { createRoleRoutedNotification, type NotificationSeverity } from "./notifications";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -102,6 +104,67 @@ export async function cancelOutletTicketForFolioTransaction(
     },
     data: { ticketStatus: OutletTicketStatus.CANCELLED }
   });
+}
+
+/**
+ * Fire an in-app notification for restaurant / café / room-service / activity staff when a
+ * new outlet ticket lands on the operational board. Reuses {@link createRoleRoutedNotification}
+ * (no new persistence path) so the existing bell + Today » Alert center surface light up
+ * automatically. Safe to fail silently — outlet ticket creation must never be blocked by a
+ * notification-delivery hiccup.
+ */
+function outletTicketLabel(outletKey: string): string {
+  switch (outletKey) {
+    case "RESTAURANT":
+      return "Restaurant";
+    case "CAFE":
+    case "COFFEE_SHOP":
+      return "Café";
+    case "ROOM_SERVICE":
+      return "Room service";
+    case "ACTIVITY":
+      return "Activity";
+    default:
+      return outletKey.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+}
+
+export async function notifyOutletTicketCreated(params: {
+  hotelId: string;
+  bookingId: string;
+  ticketId?: string;
+  outletKey: string;
+  serviceMode?: FbServiceMode | null;
+  notes?: string | null;
+  guestLabel?: string | null;
+  roomLabel?: string | null;
+}): Promise<void> {
+  const outletLabel = outletTicketLabel(params.outletKey);
+  const isRoomService =
+    params.outletKey === "ROOM_SERVICE" ||
+    params.serviceMode === FbServiceMode.ROOM_SERVICE;
+  const channelHint = params.serviceMode === FbServiceMode.DINING_IN ? "dining in" : isRoomService ? "room service" : "outlet";
+  const title = `New ${outletLabel} order · ${channelHint}`;
+  const subjectBits: string[] = [];
+  if (params.roomLabel) subjectBits.push(`Room ${params.roomLabel}`);
+  if (params.guestLabel) subjectBits.push(params.guestLabel);
+  const subjectLine = subjectBits.length ? subjectBits.join(" · ") : "Guest order";
+  const trimmedNotes = (params.notes ?? "").trim().slice(0, 220);
+  const body = trimmedNotes ? `${subjectLine} — ${trimmedNotes}` : `${subjectLine} — open the outlet board to acknowledge.`;
+  const severity: NotificationSeverity = isRoomService ? "high" : "normal";
+  await createRoleRoutedNotification({
+    hotelId: params.hotelId,
+    roles: [UserRole.MANAGER, UserRole.OWNER, "RESTAURANT" as UserRole],
+    title,
+    body,
+    category: "restaurant",
+    severity,
+    link: "/admin/outlet-orders",
+    sourceType: "OUTLET_TICKET_CREATED",
+    sourceId: params.ticketId ?? params.bookingId,
+    requiresAttention: true,
+    audience: ["restaurant", "owner"]
+  }).catch(() => undefined);
 }
 
 /** Record WhatsApp notify outcome on the matching ticket(s) for dashboard display. */

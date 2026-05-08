@@ -1,6 +1,6 @@
 import { FbOrderStatus, FbOutletType, FbServiceMode } from "@prisma/client";
 import { prisma } from "../db";
-import { createOutletTicketForFbOrder } from "./outletTickets";
+import { createOutletTicketForFbOrder, notifyOutletTicketCreated } from "./outletTickets";
 import { notifyFbOrdersAfterCreate, type FbOrderLineSnap } from "./outletOrderNotify";
 
 export type FbInvoiceLine = {
@@ -151,6 +151,28 @@ export async function createFbOrdersFromMenuLines(params: {
         lineTotal: row.lineTotal
       }))
     );
+  }
+
+  const stayForLabels = await prisma.booking.findFirst({
+    where: { id: params.bookingId },
+    select: {
+      guest: { select: { fullName: true, phoneE164: true } },
+      roomUnit: { select: { name: true } }
+    }
+  });
+  const guestLabel = stayForLabels?.guest?.fullName ?? stayForLabels?.guest?.phoneE164 ?? null;
+  const roomLabel = stayForLabels?.roomUnit?.name ?? null;
+  for (const [outletType, fbOrderId] of fbOrderIdByOutlet) {
+    await notifyOutletTicketCreated({
+      hotelId: params.hotelId,
+      bookingId: params.bookingId,
+      ticketId: fbOrderId,
+      outletKey: outletType,
+      serviceMode: params.serviceMode,
+      notes: params.notes,
+      guestLabel,
+      roomLabel
+    });
   }
 
   return notifyFbOrdersAfterCreate({

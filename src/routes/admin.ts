@@ -16,6 +16,7 @@ import {
   FolioTransactionType,
   FolioTxnPaymentStatus,
   FolioTxnSourceType,
+  GuestFeedbackStatus,
   HousekeepingAssignmentMode,
   HousekeepingTaskSource,
   HousekeepingTaskStatus,
@@ -101,7 +102,8 @@ import { notifyOutletForFolioCharge } from "../core/outletOrderNotify";
 import {
   cancelOutletTicketForFolioTransaction,
   createOutletTicketForFolioCharge,
-  folioChargeQualifiesForOutletTicket
+  folioChargeQualifiesForOutletTicket,
+  notifyOutletTicketCreated
 } from "../core/outletTickets";
 import {
   ensureActiveFolio,
@@ -1158,6 +1160,33 @@ function getAdminNotificationScript(): string {
     notifBadge.textContent = String(Math.min(99, count));
     notifBadge.hidden = count <= 0;
   }
+  function categoryLabel(cat) {
+    switch (cat) {
+      case "bookings": return { label: "Bookings", tone: "#0f766e" };
+      case "messages": return { label: "WhatsApp", tone: "#0a7f3f" };
+      case "housekeeping": return { label: "Housekeeping", tone: "#0369a1" };
+      case "maintenance": return { label: "Maintenance", tone: "#9a3412" };
+      case "rooms": return { label: "Front Desk", tone: "#5b21b6" };
+      case "payments": return { label: "Payments", tone: "#92400e" };
+      case "restaurant": return { label: "Restaurant", tone: "#7c2d12" };
+      case "activities": return { label: "Activities", tone: "#0f766e" };
+      case "support": return { label: "Complaints", tone: "#9f1239" };
+      default: return { label: cat || "System", tone: "#475569" };
+    }
+  }
+  function relTime(when) {
+    if (!when) return "";
+    var t = typeof when === "string" ? Date.parse(when) : (when instanceof Date ? when.getTime() : Number(when));
+    if (!t || isNaN(t)) return "";
+    var diff = Date.now() - t;
+    if (diff < 60000) return "just now";
+    var m = Math.round(diff / 60000);
+    if (m < 60) return m + "m ago";
+    var h = Math.round(m / 60);
+    if (h < 24) return h + "h ago";
+    var d = Math.round(h / 24);
+    return d + "d ago";
+  }
   function renderList(items) {
     notifList.innerHTML = "";
     if (!items || !items.length) {
@@ -1168,8 +1197,15 @@ function getAdminNotificationScript(): string {
     items.forEach(function (item) {
       var li = document.createElement("li");
       li.className = "admin-notif-item sev-" + sevClass(item.severity);
+      var cat = categoryLabel(item.category || "system");
+      var pill =
+        '<span class="admin-notif-cat" style="background:' + cat.tone + '1a;color:' + cat.tone +
+        ';border:1px solid ' + cat.tone + '40">' + esc(cat.label) + '</span>';
+      var when = relTime(item.createdAt);
       li.innerHTML =
         '<a href="' + esc(item.link || "#") + '" data-notif-id="' + esc(item.id) + '">' +
+        '<div class="admin-notif-meta">' + pill +
+        (when ? '<span class="admin-notif-time">' + esc(when) + '</span>' : "") + "</div>" +
         '<div class="admin-notif-title">' + esc(item.title || item.type || "Notification") + "</div>" +
         '<div class="admin-notif-body">' + esc(item.body || "") + "</div>" +
         "</a>";
@@ -1458,7 +1494,7 @@ function renderLayout(
     group: "dashboard",
     links: [
       { href: primaryTodayHref, label: "Command center" },
-      { href: "/admin/daily-digest", label: "Alerts &amp; briefing" }
+      { href: "/admin/alert-center", label: "Alerts &amp; briefing" }
     ]
   };
   const reservationTabs: AdminSection = {
@@ -11084,6 +11120,22 @@ adminRouter.post(
           outletCategory,
           notes: folioNotes
         });
+        const stayForLabels = await prisma.booking.findFirst({
+          where: { id: booking.id },
+          select: {
+            guest: { select: { fullName: true, phoneE164: true } },
+            roomUnit: { select: { name: true } }
+          }
+        });
+        await notifyOutletTicketCreated({
+          hotelId: hotel.id,
+          bookingId: booking.id,
+          ticketId: txn.id,
+          outletKey: outletCategory,
+          notes: folioNotes,
+          guestLabel: stayForLabels?.guest?.fullName ?? stayForLabels?.guest?.phoneE164 ?? null,
+          roomLabel: stayForLabels?.roomUnit?.name ?? null
+        });
       } catch (ticketErr) {
         console.error("[admin] outlet order ticket (folio)", ticketErr);
       }
@@ -13602,6 +13654,413 @@ adminRouter.get("/bookings/export", requirePermission("BOOKINGS", "VIEW"), async
 
 adminRouter.get("/reports", requirePermission("REPORTS", "VIEW"), (_req, res) => {
   res.redirect("/admin/reports-center");
+});
+
+/**
+ * Operational Alert Center.
+ *
+ * Replaces the old Today » "Alerts & briefing" link, which previously dropped operators on the
+ * SMTP digest configuration page. This view stitches together existing operational signals
+ * (Notification feed, today's arrivals/departures, housekeeping, restaurant tickets) into a
+ * single receptionist-friendly summary. No new persistence path is introduced — every section
+ * reads from existing models so disabling/enabling the page is non-destructive.
+ *
+ * The legacy /admin/daily-digest route remains for owners who actually configure email digests
+ * and is reachable from the footer of this page.
+ */
+adminRouter.get("/alert-center", requireAuth, async (req, res) => {
+  const session = getSession(req);
+  const staffId = session?.staffId && session.staffId !== "STAFF-SUPERADMIN" ? session.staffId : null;
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res
+      .type("html")
+      .send(
+        renderLayout(
+          '<h2>Alerts &amp; briefing</h2><p class="muted">No hotel data found for this session.</p>',
+          true
+        )
+      );
+    return;
+  }
+
+  const now = new Date();
+  const dayStart = startOfDay(now);
+  const dayEndExclusive = addDays(dayStart, 1);
+  const recentSince = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    urgentNotifications,
+    arrivalsNeedingRoom,
+    unpaidDepartures,
+    cleaningTasks,
+    pendingOutletTickets,
+    openComplaints
+  ] = await Promise.all([
+    staffId
+      ? prisma.notification.findMany({
+          where: {
+            hotelId: hotel.id,
+            hotelUserId: staffId,
+            readAt: null,
+            createdAt: { gte: recentSince }
+          },
+          orderBy: { createdAt: "desc" },
+          take: 30
+        })
+      : Promise.resolve([] as Array<Awaited<ReturnType<typeof prisma.notification.findFirst>>>),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: null,
+        checkIn: { gte: dayStart, lt: dayEndExclusive },
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.PENDING] }
+      },
+      include: { guest: true, roomType: true },
+      orderBy: { checkIn: "asc" },
+      take: 12
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        checkOut: { lt: dayEndExclusive },
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        paymentStatus: { not: PaymentStatus.SUCCEEDED }
+      },
+      include: { guest: true, roomType: true, roomUnit: true },
+      orderBy: { checkOut: "asc" },
+      take: 12
+    }),
+    prisma.housekeepingTask.findMany({
+      where: {
+        hotelId: hotel.id,
+        status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+      },
+      include: { roomUnit: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
+      take: 12
+    }),
+    prisma.outletOrderTicket.findMany({
+      where: {
+        hotelId: hotel.id,
+        ticketStatus: {
+          in: [OutletTicketStatus.NEW, OutletTicketStatus.ACKNOWLEDGED, OutletTicketStatus.PREPARING]
+        }
+      },
+      include: {
+        booking: { select: { roomUnit: { select: { name: true } }, guest: { select: { fullName: true } } } }
+      },
+      orderBy: { createdAt: "asc" },
+      take: 12
+    }),
+    prisma.guestFeedback.findMany({
+      where: {
+        hotelId: hotel.id,
+        OR: [
+          { lowRatingAlertedAt: { not: null }, status: { not: GuestFeedbackStatus.COMPLETED } },
+          { managerFollowUpRequestedAt: { not: null }, managerFollowUpClosedAt: null }
+        ]
+      },
+      include: { guest: { select: { fullName: true, phoneE164: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 8
+    })
+  ]);
+
+  const categoryLabel = (raw: string): { label: string; tone: string } => {
+    switch (raw) {
+      case "bookings":
+        return { label: "Bookings", tone: "#0f766e" };
+      case "messages":
+        return { label: "WhatsApp", tone: "#0a7f3f" };
+      case "housekeeping":
+        return { label: "Housekeeping", tone: "#0369a1" };
+      case "maintenance":
+        return { label: "Maintenance", tone: "#9a3412" };
+      case "rooms":
+        return { label: "Front Desk", tone: "#5b21b6" };
+      case "payments":
+        return { label: "Payments", tone: "#92400e" };
+      case "restaurant":
+        return { label: "Restaurant", tone: "#7c2d12" };
+      case "activities":
+        return { label: "Activities", tone: "#0f766e" };
+      case "support":
+        return { label: "Complaints", tone: "#9f1239" };
+      case "system":
+        return { label: "System", tone: "#475569" };
+      default:
+        return { label: raw, tone: "#475569" };
+    }
+  };
+
+  const severityDot = (severity: string): string => {
+    const colour =
+      severity === "critical"
+        ? "#dc2626"
+        : severity === "high"
+          ? "#ea580c"
+          : severity === "normal"
+            ? "#0369a1"
+            : "#64748b";
+    return `<span aria-hidden="true" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colour};box-shadow:0 0 0 3px ${colour}26;margin-right:8px;vertical-align:middle"></span>`;
+  };
+
+  const relativeTime = (when: Date | null | undefined): string => {
+    if (!when) return "—";
+    const diffMs = now.getTime() - when.getTime();
+    if (diffMs < 60_000) return "just now";
+    const mins = Math.round(diffMs / 60_000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.round(hours / 24);
+    return `${days}d ago`;
+  };
+
+  const renderEmpty = (msg: string) =>
+    `<p class="muted" style="margin:0;padding:10px 12px;border:1px dashed #d8dee6;border-radius:10px">${escapeHtml(msg)}</p>`;
+
+  type Tile = { html: string; sortKey: number };
+  const urgentTiles: Tile[] = [];
+  for (const row of urgentNotifications) {
+    if (!row) continue;
+    const payloadRaw = row.payloadJson;
+    let category = "system";
+    let severity = "info";
+    let link: string | undefined;
+    if (payloadRaw) {
+      try {
+        const parsed = JSON.parse(payloadRaw) as Record<string, unknown>;
+        if (typeof parsed.category === "string") category = parsed.category;
+        if (typeof parsed.severity === "string") severity = parsed.severity;
+        if (typeof parsed.link === "string") link = parsed.link;
+      } catch {
+        /* keep defaults */
+      }
+    }
+    const cat = categoryLabel(category);
+    const headline = row.title?.trim() || row.body.slice(0, 80);
+    const detail = row.body.length > 0 ? row.body : "";
+    const href = link ?? "#";
+    urgentTiles.push({
+      sortKey: -row.createdAt.getTime(),
+      html: `<li class="alert-row sev-${escapeHtml(severity)}">
+  ${severityDot(severity)}
+  <span class="alert-cat" style="background:${cat.tone}1a;color:${cat.tone};border:1px solid ${cat.tone}40">${escapeHtml(cat.label)}</span>
+  <div class="alert-body">
+    <div class="alert-title">${escapeHtml(headline)}</div>
+    ${detail ? `<div class="alert-detail">${escapeHtml(detail)}</div>` : ""}
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(row.createdAt))}</span>
+    ${href !== "#" ? `<a class="alert-open" href="${escapeHtml(href)}">Open →</a>` : ""}
+  </div>
+</li>`
+    });
+  }
+  urgentTiles.sort((a, b) => a.sortKey - b.sortKey);
+
+  const arrivalsHtml = arrivalsNeedingRoom.length
+    ? `<ul class="alert-list">${arrivalsNeedingRoom
+        .map((b) => {
+          const guestName = b.guest?.fullName ?? b.guest?.phoneE164 ?? "Guest";
+          const roomTypeName = b.roomType?.name ?? "Room type";
+          const ref = b.referenceCode ?? b.id.slice(-6).toUpperCase();
+          return `<li class="alert-row sev-high">
+  ${severityDot("high")}
+  <span class="alert-cat" style="background:#5b21b61a;color:#5b21b6;border:1px solid #5b21b640">Front Desk</span>
+  <div class="alert-body">
+    <div class="alert-title">${escapeHtml(guestName)} arrives today · ${escapeHtml(roomTypeName)}</div>
+    <div class="alert-detail">Reservation ${escapeHtml(ref)} has no room assigned yet.</div>
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(b.checkIn))}</span>
+    <a class="alert-open" href="/admin/room-board">Open room rack →</a>
+  </div>
+</li>`;
+        })
+        .join("")}</ul>`
+    : renderEmpty("No unassigned arrivals today.");
+
+  const unpaidHtml = unpaidDepartures.length
+    ? `<ul class="alert-list">${unpaidDepartures
+        .map((b) => {
+          const guestName = b.guest?.fullName ?? b.guest?.phoneE164 ?? "Guest";
+          const roomLabel = b.roomUnit?.name ? `Room ${b.roomUnit.name}` : (b.roomType?.name ?? "Room");
+          const ref = b.referenceCode ?? b.id.slice(-6).toUpperCase();
+          return `<li class="alert-row sev-critical">
+  ${severityDot("critical")}
+  <span class="alert-cat" style="background:#92400e1a;color:#92400e;border:1px solid #92400e40">Payments</span>
+  <div class="alert-body">
+    <div class="alert-title">${escapeHtml(guestName)} · ${escapeHtml(roomLabel)} — payment not settled</div>
+    <div class="alert-detail">Departure ${escapeHtml(b.checkOut.toISOString().slice(0, 10))} · ${escapeHtml(ref)} · status ${escapeHtml(String(b.paymentStatus))}.</div>
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(b.checkOut))}</span>
+    <a class="alert-open" href="/admin/front-desk/check-out">Settle &amp; check out →</a>
+  </div>
+</li>`;
+        })
+        .join("")}</ul>`
+    : renderEmpty("No unpaid departures pending.");
+
+  const cleaningHtml = cleaningTasks.length
+    ? `<ul class="alert-list">${cleaningTasks
+        .map((t) => {
+          const room = t.roomUnit?.name ?? "Room";
+          const sev = t.status === HousekeepingTaskStatus.IN_PROGRESS ? "normal" : "high";
+          return `<li class="alert-row sev-${sev}">
+  ${severityDot(sev)}
+  <span class="alert-cat" style="background:#0369a11a;color:#0369a1;border:1px solid #0369a140">Housekeeping</span>
+  <div class="alert-body">
+    <div class="alert-title">Room ${escapeHtml(room)} needs cleaning</div>
+    <div class="alert-detail">Source: ${escapeHtml(String(t.source).toLowerCase())} · status ${escapeHtml(String(t.status).toLowerCase().replace("_", " "))}</div>
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(t.createdAt))}</span>
+    <a class="alert-open" href="/admin/housekeeping">Open queue →</a>
+  </div>
+</li>`;
+        })
+        .join("")}</ul>`
+    : renderEmpty("Housekeeping queue is clear.");
+
+  const outletHtml = pendingOutletTickets.length
+    ? `<ul class="alert-list">${pendingOutletTickets
+        .map((t) => {
+          const room = t.booking?.roomUnit?.name ? `Room ${t.booking.roomUnit.name}` : "Room";
+          const guest = t.booking?.guest?.fullName ?? "Guest";
+          const status = String(t.ticketStatus).toLowerCase();
+          const sev = t.ticketStatus === OutletTicketStatus.NEW ? "high" : "normal";
+          return `<li class="alert-row sev-${sev}">
+  ${severityDot(sev)}
+  <span class="alert-cat" style="background:#7c2d121a;color:#7c2d12;border:1px solid #7c2d1240">Restaurant</span>
+  <div class="alert-body">
+    <div class="alert-title">${escapeHtml(t.outletKey.replace(/_/g, " ").toLowerCase())} · ${escapeHtml(room)} · ${escapeHtml(guest)}</div>
+    <div class="alert-detail">Ticket status ${escapeHtml(status)}${t.notes ? ` — ${escapeHtml(t.notes.slice(0, 120))}` : ""}.</div>
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(t.createdAt))}</span>
+    <a class="alert-open" href="/admin/outlet-orders">Open board →</a>
+  </div>
+</li>`;
+        })
+        .join("")}</ul>`
+    : renderEmpty("No open restaurant / café tickets.");
+
+  const complaintsHtml = openComplaints.length
+    ? `<ul class="alert-list">${openComplaints
+        .map((f) => {
+          const guest = f.guest?.fullName ?? f.guest?.phoneE164 ?? "Guest";
+          const ratingText = typeof f.rating === "number" ? `${f.rating}⭐` : "Pending rating";
+          return `<li class="alert-row sev-critical">
+  ${severityDot("critical")}
+  <span class="alert-cat" style="background:#9f12391a;color:#9f1239;border:1px solid #9f123940">Complaints</span>
+  <div class="alert-body">
+    <div class="alert-title">${escapeHtml(guest)} · ${escapeHtml(ratingText)}</div>
+    <div class="alert-detail">Status ${escapeHtml(String(f.status).toLowerCase().replace(/_/g, " "))} — recovery follow-up needed.</div>
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(f.createdAt))}</span>
+    <a class="alert-open" href="/admin/profile">Review feedback →</a>
+  </div>
+</li>`;
+        })
+        .join("")}</ul>`
+    : renderEmpty("No unresolved complaints.");
+
+  const urgentSection = urgentTiles.length
+    ? `<ul class="alert-list">${urgentTiles.map((t) => t.html).join("")}</ul>`
+    : renderEmpty("No urgent operational alerts in the last 7 days.");
+
+  const counts = {
+    urgent: urgentTiles.length,
+    arrivals: arrivalsNeedingRoom.length,
+    unpaid: unpaidDepartures.length,
+    cleaning: cleaningTasks.length,
+    outlet: pendingOutletTickets.length,
+    complaints: openComplaints.length
+  };
+
+  const headlineBadges = [
+    { label: "Urgent", value: counts.urgent, tone: "#dc2626" },
+    { label: "Arrivals to assign", value: counts.arrivals, tone: "#5b21b6" },
+    { label: "Unpaid departures", value: counts.unpaid, tone: "#92400e" },
+    { label: "Cleaning queue", value: counts.cleaning, tone: "#0369a1" },
+    { label: "Open F&amp;B tickets", value: counts.outlet, tone: "#7c2d12" },
+    { label: "Complaints", value: counts.complaints, tone: "#9f1239" }
+  ]
+    .map(
+      (b) =>
+        `<div class="alert-stat" style="border:1px solid ${b.tone}33;background:${b.tone}0d">
+  <span class="alert-stat-label">${b.label}</span>
+  <span class="alert-stat-value" style="color:${b.tone}">${b.value}</span>
+</div>`
+    )
+    .join("");
+
+  const content = `
+<style>
+.alert-shell { display:flex; flex-direction:column; gap:18px; }
+.alert-headline { display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); }
+.alert-stat { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-radius:12px; }
+.alert-stat-label { font-size:12px; font-weight:600; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }
+.alert-stat-value { font-size:22px; font-weight:800; }
+.alert-section { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:14px 16px 16px; box-shadow:0 8px 22px rgba(15,44,38,0.05); }
+.alert-section h3 { margin:0 0 10px; font-size:14px; font-weight:800; color:#0f172a; letter-spacing:0.01em; }
+.alert-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+.alert-row { display:grid; grid-template-columns:auto auto 1fr auto; gap:10px; align-items:center; padding:10px 12px; border:1px solid #e2e8f0; border-radius:12px; background:#fff; }
+.alert-row .alert-cat { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:0.02em; }
+.alert-row .alert-body .alert-title { font-size:14px; font-weight:700; color:#0f172a; line-height:1.35; }
+.alert-row .alert-body .alert-detail { font-size:12px; color:#475569; margin-top:2px; }
+.alert-row .alert-meta { display:flex; flex-direction:column; align-items:flex-end; gap:4px; min-width:130px; }
+.alert-row .alert-open { font-size:12px; font-weight:700; color:#075e54; text-decoration:none; }
+.alert-row .alert-open:hover { text-decoration:underline; }
+.alert-row.sev-critical { border-color:#fecaca; background:linear-gradient(180deg,#fff5f5 0%, #ffffff 100%); }
+.alert-row.sev-high { border-color:#fed7aa; background:linear-gradient(180deg,#fff7ed 0%, #ffffff 100%); }
+.alert-grid-2 { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(360px, 1fr)); }
+@media (max-width: 720px) { .alert-row { grid-template-columns:auto 1fr; row-gap:6px; } .alert-row .alert-cat { grid-column:2; justify-self:start; } .alert-row .alert-meta { grid-column:2; align-items:flex-start; } }
+</style>
+<div class="alert-shell">
+  <header>
+    <h2 style="margin:0 0 4px">Alerts &amp; briefing</h2>
+    <p class="muted" style="margin:0">Operational summary for ${escapeHtml(hotel.displayName ?? "this property")}. Newest items first.</p>
+  </header>
+  <div class="alert-headline">${headlineBadges}</div>
+  <section class="alert-section">
+    <h3>Urgent operational alerts</h3>
+    ${urgentSection}
+  </section>
+  <div class="alert-grid-2">
+    <section class="alert-section">
+      <h3>Arrivals needing room assignment</h3>
+      ${arrivalsHtml}
+    </section>
+    <section class="alert-section">
+      <h3>Unpaid departures</h3>
+      ${unpaidHtml}
+    </section>
+    <section class="alert-section">
+      <h3>Housekeeping queue</h3>
+      ${cleaningHtml}
+    </section>
+    <section class="alert-section">
+      <h3>Restaurant / café tickets</h3>
+      ${outletHtml}
+    </section>
+    <section class="alert-section">
+      <h3>Complaints &amp; recovery</h3>
+      ${complaintsHtml}
+    </section>
+  </div>
+  <p class="muted" style="font-size:12px;margin:0">Looking for the email digest configuration? <a href="/admin/daily-digest">Open daily email digest settings →</a></p>
+</div>`;
+
+  res.type("html").send(renderLayout(content, true));
 });
 
 adminRouter.get("/daily-digest", requireAuth, async (req, res) => {
