@@ -101,10 +101,17 @@
         opacity: 0.9;
         margin-top: 2px;
       }
+      .sidebar-top-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        margin-bottom: 12px;
+      }
       .lang-switcher {
         display: flex;
         gap: 6px;
-        margin-bottom: 12px;
+        min-width: 0;
       }
       .lang-switcher a {
         text-decoration: none;
@@ -154,17 +161,19 @@
         flex: 1;
       }
       .sidebar-logout {
-        position: sticky;
-        bottom: 0;
-        margin-top: 12px;
-        padding: 10px 0 2px;
-        border-top: 1px solid rgba(255, 255, 255, 0.2);
-        background: linear-gradient(180deg, rgba(18, 140, 126, 0), rgba(7, 94, 84, 0.96) 22%);
-        backdrop-filter: blur(10px);
+        flex: 0 0 auto;
       }
-      .sidebar-logout form,
+      .sidebar-logout form {
+        margin: 0;
+      }
       .sidebar-logout button {
-        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        color: #fff;
+        border-radius: 999px;
+        padding: 4px 10px;
+        font: 700 12px/1 Inter, "Segoe UI", Arial, sans-serif;
+        background: rgba(255, 255, 255, 0.1);
+        cursor: pointer;
       }
       /* Property switcher (top of sidebar). Hidden until JS detects multi-property access. */
       .sidebar-property-switch {
@@ -670,6 +679,9 @@
       }
       html[dir="rtl"] .content {
         order: 1;
+      }
+      html[dir="rtl"] .sidebar-top-controls {
+        flex-direction: row-reverse;
       }
       html[dir="rtl"] .lang-switcher {
         justify-content: flex-end;
@@ -1415,7 +1427,7 @@
         -webkit-backdrop-filter: blur(24px);
       }
 
-      /* Logout: distinct danger-tinted hover for clarity */
+      /* Logout: compact top control with clear hover feedback */
       .sidebar-logout button:hover {
         background: rgba(255, 90, 90, 0.18);
         border-color: rgba(255, 120, 120, 0.34);
@@ -1611,7 +1623,10 @@
             <p>{{brandTagline}}</p>
           </div>
         </div>
-        <div class="lang-switcher">{{langSwitcher}}</div>
+        <div class="sidebar-top-controls">
+          <div class="lang-switcher">{{langSwitcher}}</div>
+          <div class="sidebar-logout">{{logoutAction}}</div>
+        </div>
         <div class="hotel-card">
           <strong>{{hotelName}}</strong>
           <span>{{hotelSign}}</span>
@@ -1619,7 +1634,6 @@
         {{propertySwitcher}}
         {{userIdentity}}
         <nav class="sidebar-nav">{{navLinks}}</nav>
-        <div class="sidebar-logout">{{logoutAction}}</div>
       </aside>
       <main class="content">
         <div class="top-subnav">
