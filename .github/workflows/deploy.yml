@@ -18,28 +18,34 @@ jobs:
             set -Eeuo pipefail
             cd /var/www/chatastay
 
-            # Preserve runtime-managed files that the server writes to so a
-            # deploy can never destroy live data, then clean any local diffs
-            # so `git pull --ff-only` is guaranteed to succeed.
+            # Files the production server writes to at runtime. Back them up
+            # before syncing so a deploy can never destroy live data, then
+            # restore them on top of the freshly-synced tree.
             RUNTIME_FILES=(admin-user-permissions.json)
             BACKUP_DIR="$(mktemp -d)"
+            trap 'rm -rf "$BACKUP_DIR"' EXIT
+
             for f in "${RUNTIME_FILES[@]}"; do
               if [ -f "$f" ]; then
+                echo "[deploy] backing up runtime file: $f"
                 cp -a "$f" "$BACKUP_DIR/$(basename "$f")"
               fi
-              git checkout -- "$f" 2>/dev/null || true
             done
 
-            git pull --ff-only origin main
+            # Force the working tree to match origin/main exactly. This avoids
+            # any "would be overwritten by merge" errors caused by runtime
+            # writes to tracked files. Untracked files (including any
+            # restored runtime files below) are not affected by reset --hard.
+            echo "[deploy] fetching origin/main"
+            git fetch origin main
+            echo "[deploy] hard-resetting working tree to origin/main"
+            git reset --hard origin/main
 
-            # Restore runtime files (these are .gitignored after the
-            # admin-user-permissions untrack commit, so the restore is a no-op
-            # for git but keeps live data intact).
             for f in "${RUNTIME_FILES[@]}"; do
               if [ -f "$BACKUP_DIR/$(basename "$f")" ]; then
+                echo "[deploy] restoring runtime file: $f"
                 cp -a "$BACKUP_DIR/$(basename "$f")" "$f"
               fi
             done
-            rm -rf "$BACKUP_DIR"
 
             npm run deploy:production
