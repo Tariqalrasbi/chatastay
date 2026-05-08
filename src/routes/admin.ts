@@ -8127,7 +8127,7 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
   const boardDate = parseDateInput(req.body.date, startOfDay(new Date()));
   const unit = await prisma.roomUnit.findFirst({
     where: { id: unitId, hotelId: hotel.id },
-    select: { id: true, notes: true }
+    select: { id: true, name: true, notes: true }
   });
   if (!unit) {
     const fallback = `/admin/room-board?date=${formatDateForInput(boardDate)}`;
@@ -8237,14 +8237,18 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
       select: { id: true, checkIn: true, referenceCode: true }
     });
     if (status === "MAINTENANCE" || nextArrival) {
+      // Show the human-readable room number (e.g. "N3" / "102") in the
+      // notification body — never the internal CUID. Falls back to the id
+      // only if the row was somehow saved without a name.
+      const roomLabel = unit.name?.trim() ? unit.name : unit.id;
       await createRoleRoutedNotification({
         hotelId: hotel.id,
         roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER],
         title: status === "MAINTENANCE" ? "Room moved to maintenance" : "Room status requires attention",
         body:
           status === "MAINTENANCE"
-            ? `Room ${unit.id} is now in maintenance mode and may affect upcoming stays.`
-            : `Room ${unit.id} is cleaning with an arrival in the next 24 hours${nextArrival?.referenceCode ? ` (${nextArrival.referenceCode})` : ""}.`,
+            ? `Room ${roomLabel} is now in maintenance mode and may affect upcoming stays.`
+            : `Room ${roomLabel} is cleaning with an arrival in the next 24 hours${nextArrival?.referenceCode ? ` (${nextArrival.referenceCode})` : ""}.`,
         category: "rooms",
         severity: status === "MAINTENANCE" ? "high" : "critical",
         link: "/admin/room-board",

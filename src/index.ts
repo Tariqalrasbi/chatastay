@@ -3,6 +3,7 @@ import { createHttpApp } from "./httpApp";
 import { ensureGuestFeedbackFollowupColumnsSqlite } from "./core/sqliteGuestFeedbackSchemaRepair";
 import { ensureHotelAccountNumbersSqlite } from "./core/sqliteHotelAccountNumberRepair";
 import { ensureHotelUserAuthColumnsSqlite } from "./core/sqliteHotelUserSchemaRepair";
+import { repairRoomCuidNotificationBodies } from "./core/notificationRoomNameRepair";
 import { localSqliteBackgroundSchedulersEnabled } from "./core/sqliteLocalDevSchemaGate";
 import { logWhatsAppStartupHints } from "./whatsapp/send";
 import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
@@ -24,6 +25,9 @@ async function start(): Promise<void> {
   await ensureHotelAccountNumbersSqlite(prisma);
   await ensureHotelUserAuthColumnsSqlite(prisma);
   await ensureGuestFeedbackFollowupColumnsSqlite(prisma);
+  await repairRoomCuidNotificationBodies(prisma).catch((err: unknown) =>
+    console.error("[chatastay] Notification room-name repair skipped:", err instanceof Error ? err.message : String(err))
+  );
 
   const g = globalThis as typeof globalThis & { __server_started__?: boolean };
   if (g.__server_started__) {
