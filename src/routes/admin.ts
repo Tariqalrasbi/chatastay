@@ -86,7 +86,12 @@ import { recordBookingStatusChange } from "../core/bookingStatusHistory";
 import { createBookingPaymentLink } from "../core/bookingPayments";
 import { computeManualCheckInTotal, loadFrontDeskPricing, type MealPlanCode } from "../core/frontDeskPricing";
 import { sendInStayWelcomeMenuIfEligible } from "../core/inStayWelcome";
-import { writeManualRoomStatusToNotes as mergeRoomBoardStatusNote } from "../core/roomBoardNotes";
+import {
+  writeManualRoomStatusToNotes as mergeRoomBoardStatusNote,
+  parseMaintenanceUrgentFromNotes,
+  setMaintenanceUrgentInNotes,
+  stripRoomNoteTags
+} from "../core/roomBoardNotes";
 import {
   loadPartnerSetupConfig,
   savePartnerSetupConfig,
@@ -17236,10 +17241,60 @@ adminRouter.get("/restaurant-ops", requirePermission("OUTLET", "VIEW"), async (_
   res.type("html").send(renderLayout(content, true));
 });
 
+const maintenanceStyles = `<style>
+.maint-hero { background:linear-gradient(135deg,#fff7ed 0%,#fef3c7 100%); border:1px solid #fde68a; border-radius:18px; padding:18px 22px; margin-bottom:18px; }
+.maint-hero h2 { margin:0; font-size:22px; letter-spacing:-0.02em; color:#1f1f1f; }
+.maint-hero p { margin:6px 0 0; color:#475569; font-size:13.5px; }
+.maint-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:18px; }
+.maint-kpi { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:12px 14px; box-shadow:0 8px 22px rgba(15,23,42,.05); }
+.maint-kpi h4 { margin:0; font-size:11px; color:#64748b; letter-spacing:0.05em; text-transform:uppercase; font-weight:800; }
+.maint-kpi .v { font-size:30px; font-weight:900; color:#0b1f1c; letter-spacing:-0.02em; line-height:1.1; margin-top:4px; font-variant-numeric:tabular-nums; }
+.maint-kpi .v.alert { color:#b91c1c; }
+.maint-kpi .v.warn { color:#b45309; }
+.maint-kpi .v.ok { color:#15803d; }
+.maint-kpi .sub { font-size:11.5px; color:#94a3b8; margin-top:2px; }
+.maint-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr)); gap:14px; margin-bottom:22px; }
+.maint-card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:16px 18px 18px; box-shadow:0 10px 26px rgba(15,23,42,.05); position:relative; }
+.maint-card.urgent { border-color:#fecaca; background:linear-gradient(180deg,#fff5f5 0%,#fff 60%); box-shadow:0 12px 28px rgba(220,38,38,.12); }
+.maint-card .head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+.maint-card .room-name { margin:0; font-size:18px; color:#0f172a; letter-spacing:-0.01em; font-weight:800; }
+.maint-card .room-type { font-size:12px; color:#64748b; margin-top:2px; }
+.maint-card .badges { display:flex; gap:6px; flex-wrap:wrap; }
+.maint-pill { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:800; padding:3px 10px; border-radius:999px; letter-spacing:0.04em; text-transform:uppercase; }
+.maint-pill.maint { background:#f3e8ff; color:#6b21a8; }
+.maint-pill.urgent { background:#fee2e2; color:#991b1b; box-shadow:0 0 0 0 rgba(239,68,68,.5); animation:maint-pulse 2s ease-in-out infinite; }
+@keyframes maint-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,.45); } 50% { box-shadow:0 0 0 6px rgba(239,68,68,0); } }
+.maint-note { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; color:#1f2937; font-size:13.5px; line-height:1.5; white-space:pre-wrap; min-height:36px; }
+.maint-note.empty { color:#94a3b8; font-style:italic; }
+.maint-card .actions { margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.maint-card .actions form { margin:0; }
+.maint-btn { padding:9px 14px; border:0; border-radius:10px; font-weight:800; font-size:13px; cursor:pointer; transition:transform 0.12s ease, box-shadow 0.12s ease; }
+.maint-btn:hover { transform:translateY(-1px); }
+.maint-btn-fix { background:#22c55e; color:#fff; box-shadow:0 6px 14px rgba(34,197,94,.28); }
+.maint-btn-fix:hover { background:#16a34a; box-shadow:0 10px 22px rgba(22,163,74,.32); }
+.maint-btn-urgent { background:#ef4444; color:#fff; box-shadow:0 6px 14px rgba(239,68,68,.28); }
+.maint-btn-urgent:hover { background:#dc2626; box-shadow:0 10px 22px rgba(220,38,38,.32); }
+.maint-btn-clear { background:#fef3c7; color:#92400e; }
+.maint-btn-clear:hover { background:#fde68a; }
+.maint-btn-link { background:transparent; color:#0f766e; padding:9px 6px; }
+.maint-btn-link:hover { text-decoration:underline; }
+.maint-empty { padding:38px 16px; text-align:center; color:#94a3b8; background:#fff; border:1px dashed #e2e8f0; border-radius:14px; }
+.maint-flash { padding:10px 14px; border-radius:12px; font-size:13.5px; font-weight:600; margin:0 0 14px; border:1px solid; }
+.maint-flash.ok { background:#dcfce7; border-color:#86efac; color:#166534; }
+.maint-flash.warn { background:#fee2e2; border-color:#fca5a5; color:#991b1b; }
+.maint-flash.info { background:#e0f2fe; border-color:#7dd3fc; color:#075985; }
+.maint-tasks-card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:16px 18px; box-shadow:0 10px 26px rgba(15,23,42,.05); }
+.maint-tasks-card h3 { margin:0 0 6px; font-size:15px; color:#0f172a; letter-spacing:-0.01em; }
+.maint-tasks-card .muted { color:#64748b; font-size:13px; margin:0 0 10px; }
+.maint-tasks-card table { width:100%; border-collapse:collapse; font-size:13px; }
+.maint-tasks-card th { text-align:left; font-size:11px; color:#475569; text-transform:uppercase; letter-spacing:0.04em; padding:8px; border-bottom:1px solid #e2e8f0; }
+.maint-tasks-card td { padding:9px 8px; border-bottom:1px solid #f1f5f9; vertical-align:top; }
+</style>`;
+
 adminRouter.get(
   "/maintenance",
   requirePermissionAny([{ module: "HOUSEKEEPING", action: "VIEW" }, { module: "ROOMS", action: "EDIT" }]),
-  async (_req, res) => {
+  async (req, res) => {
     const hotel = await prisma.hotel.findFirst({
       where: { slug: activeHotelSlug() },
       select: { id: true, displayName: true }
@@ -17270,17 +17325,59 @@ adminRouter.get(
     ]);
 
     const maintenanceUnits = units.filter((u) => parseManualRoomStatusFromNotes(u.notes) === "MAINTENANCE");
-    const maintenanceTasks = tasks.filter((t) => /maintenance|repair|fix|broken|issue|fault/i.test(t.notes ?? ""));
-    const roomRows = maintenanceUnits
-      .map(
-        (u) => `<tr>
-  <td><strong>${escapeHtml(u.name)}</strong><div class="muted" style="font-size:12px">${escapeHtml(u.roomType.name)}</div></td>
-  <td><span class="badge alert">Maintenance</span></td>
-  <td>${escapeHtml((u.notes ?? "").replace(/\[status:MAINTENANCE\]/g, "").trim() || "Room marked out of service.")}</td>
-  <td><a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(u.id)}/details">Open room</a></td>
-</tr>`
-      )
+    const maintenanceTasks = tasks.filter((t) => /maintenance|repair|fix|broken|issue|fault|urgent/i.test(t.notes ?? ""));
+    const urgentCount = maintenanceUnits.filter((u) => parseMaintenanceUrgentFromNotes(u.notes)).length;
+
+    // Flash messages from POST redirects
+    const flashRaw = typeof req.query.ok === "string" ? req.query.ok : "";
+    let flashHtml = "";
+    if (flashRaw.startsWith("fixed-")) {
+      flashHtml = `<p class="maint-flash ok">✅ Room <strong>${escapeHtml(flashRaw.slice("fixed-".length))}</strong> marked as fixed and is back to AVAILABLE.</p>`;
+    } else if (flashRaw.startsWith("urgent-")) {
+      flashHtml = `<p class="maint-flash warn">🚨 Room <strong>${escapeHtml(flashRaw.slice("urgent-".length))}</strong> flagged as urgent. Housekeeping &amp; managers have been notified.</p>`;
+    } else if (flashRaw.startsWith("clear-")) {
+      flashHtml = `<p class="maint-flash info">Cleared the urgent flag on room <strong>${escapeHtml(flashRaw.slice("clear-".length))}</strong>.</p>`;
+    }
+
+    const roomCards = maintenanceUnits
+      .map((u) => {
+        const isUrgent = parseMaintenanceUrgentFromNotes(u.notes);
+        const noteText = stripRoomNoteTags(u.notes);
+        const noteHtml = noteText
+          ? `<div class="maint-note">${escapeHtml(noteText)}</div>`
+          : `<div class="maint-note empty">No reason logged. Click "Flag urgent" to add one.</div>`;
+        const urgentBtn = isUrgent
+          ? `<form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/flag-urgent">
+              <input type="hidden" name="urgent" value="false" />
+              <button type="submit" class="maint-btn maint-btn-clear">Clear urgent flag</button>
+            </form>`
+          : `<form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/flag-urgent">
+              <input type="hidden" name="urgent" value="true" />
+              <button type="submit" class="maint-btn maint-btn-urgent">🚨 Flag urgent</button>
+            </form>`;
+        return `<article class="maint-card ${isUrgent ? "urgent" : ""}" data-unit-id="${escapeHtml(u.id)}">
+          <div class="head">
+            <div>
+              <h3 class="room-name">Room ${escapeHtml(u.name)}</h3>
+              <div class="room-type">${escapeHtml(u.roomType.name)}</div>
+            </div>
+            <div class="badges">
+              <span class="maint-pill maint">Maintenance</span>
+              ${isUrgent ? `<span class="maint-pill urgent">🚨 Urgent</span>` : ""}
+            </div>
+          </div>
+          ${noteHtml}
+          <div class="actions">
+            <form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/mark-fixed">
+              <button type="submit" class="maint-btn maint-btn-fix" onclick="return confirm('Mark Room ${escapeHtml(u.name)} as fixed and back to AVAILABLE?');">✅ Mark fixed</button>
+            </form>
+            ${urgentBtn}
+            <a class="maint-btn maint-btn-link" href="/admin/room-board/unit/${encodeURIComponent(u.id)}/details">Open room →</a>
+          </div>
+        </article>`;
+      })
       .join("");
+
     const taskRows = maintenanceTasks
       .map(
         (t) => `<tr>
@@ -17293,27 +17390,186 @@ adminRouter.get(
       )
       .join("");
 
-    const content = `
-<h2>Maintenance</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — Rooms out of service and housekeeping notes that need engineering attention.</p>
-<div class="grid-2" style="align-items:start">
-  <section>
-    <h3>Rooms marked maintenance</h3>
-    <table>
-      <thead><tr><th>Room</th><th>Status</th><th>Note</th><th></th></tr></thead>
-      <tbody>${roomRows || '<tr><td colspan="4">No rooms are currently marked maintenance.</td></tr>'}</tbody>
-    </table>
-  </section>
-  <section>
-    <h3>Maintenance-like housekeeping notes</h3>
-    <table>
-      <thead><tr><th>Room</th><th>Task</th><th>Assignee</th><th>Note</th><th>Created</th></tr></thead>
-      <tbody>${taskRows || '<tr><td colspan="5">No open maintenance notes in the housekeeping queue.</td></tr>'}</tbody>
-    </table>
-  </section>
+    const content = `${maintenanceStyles}
+<div class="maint-hero">
+  <h2>🛠️ Maintenance</h2>
+  <p>${escapeHtml(hotel.displayName)} — Rooms out of service. Click <strong>Mark fixed</strong> when the work is done to put the room back into service, or <strong>Flag urgent</strong> to alert housekeeping and managers.</p>
 </div>
-<p class="muted" style="margin-top:12px">To move a room into or out of maintenance, use <a class="inline-link" href="/admin/room-board">Room rack</a> and update the room status.</p>`;
+${flashHtml}
+<div class="maint-strip">
+  <div class="maint-kpi"><h4>Rooms in maintenance</h4><div class="v ${maintenanceUnits.length ? "warn" : "ok"}">${maintenanceUnits.length}</div><div class="sub">Currently out of service</div></div>
+  <div class="maint-kpi"><h4>Urgent</h4><div class="v ${urgentCount ? "alert" : "ok"}">${urgentCount}</div><div class="sub">Flagged as priority</div></div>
+  <div class="maint-kpi"><h4>Open repair notes</h4><div class="v ${maintenanceTasks.length ? "warn" : "ok"}">${maintenanceTasks.length}</div><div class="sub">From the cleaning team</div></div>
+</div>
+<h3 style="margin:0 0 10px;font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:0.06em;font-weight:800">Rooms marked maintenance</h3>
+${roomCards
+  ? `<div class="maint-grid">${roomCards}</div>`
+  : `<div class="maint-empty">No rooms are currently in maintenance. To move a room out of service, open the <a class="inline-link" href="/admin/room-board">Room rack</a> and switch its status.</div>`}
+<section class="maint-tasks-card">
+  <h3>Repair-like notes from housekeeping</h3>
+  <p class="muted">Tasks where a cleaner mentioned a maintenance issue ("broken", "leak", "needs fixing"…). Pick them up before they turn into guest complaints.</p>
+  <table>
+    <thead><tr><th>Room</th><th>Task</th><th>Assignee</th><th>Note</th><th>Created</th></tr></thead>
+    <tbody>${taskRows || '<tr><td colspan="5" style="color:#94a3b8;text-align:center;padding:18px">No open repair-like housekeeping notes.</td></tr>'}</tbody>
+  </table>
+</section>
+<p class="muted" style="margin-top:14px">Tip: To move a different room <em>into</em> maintenance, open the <a class="inline-link" href="/admin/room-board">Room rack</a> and change its status.</p>`;
     res.type("html").send(renderLayout(content, true));
+  }
+);
+
+adminRouter.post(
+  "/maintenance/:unitId/mark-fixed",
+  requirePermissionAny([{ module: "ROOMS", action: "EDIT" }, { module: "HOUSEKEEPING", action: "EDIT" }]),
+  async (req, res) => {
+    const hotel = await prisma.hotel.findFirst({
+      where: { slug: activeHotelSlug() },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.redirect("/admin/maintenance");
+      return;
+    }
+    const unitId = String(req.params.unitId ?? "");
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: unitId, hotelId: hotel.id },
+      select: { id: true, name: true, notes: true }
+    });
+    if (!unit) {
+      res.redirect("/admin/maintenance");
+      return;
+    }
+    const session = getSession(req);
+    const staffId = session?.staffId ?? null;
+
+    await prisma.$transaction(async (tx) => {
+      const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
+      // Status -> AVAILABLE, urgent flag cleared
+      const cleanedNotes = setMaintenanceUrgentInNotes(
+        writeManualRoomStatusToNotes(fresh?.notes, "AVAILABLE"),
+        false
+      );
+      await tx.roomUnit.update({
+        where: { id: unit.id },
+        data: { notes: cleanedNotes }
+      });
+      // Auto-close any in-progress housekeeping tasks for this room
+      try {
+        await tx.housekeepingTask.updateMany({
+          where: {
+            hotelId: hotel.id,
+            roomUnitId: unit.id,
+            status: { in: [HousekeepingTaskStatus.PENDING, HousekeepingTaskStatus.IN_PROGRESS] }
+          },
+          data: {
+            status: HousekeepingTaskStatus.COMPLETED,
+            completedAt: new Date(),
+            completedByUserId: hotelUserIdForPrismaFk(staffId) ?? null,
+            notes: "Maintenance marked fixed from /admin/maintenance"
+          }
+        });
+      } catch (err) {
+        if (!isOptionalHousekeepingSchemaError(err)) throw err;
+      }
+    });
+
+    try {
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "MAINTENANCE_FIXED",
+        title: "Room is back in service",
+        body: `Room ${unit.name} — maintenance marked complete; status is now AVAILABLE.`,
+        severity: "info",
+        link: "/admin/maintenance"
+      });
+    } catch {
+      // notification failure is non-fatal
+    }
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "ROOM_BOARD_UNIT_STATUS",
+      entityType: "RoomUnit",
+      entityId: unit.id,
+      metadata: {
+        status: "AVAILABLE",
+        previousStatus: "MAINTENANCE",
+        unitName: unit.name,
+        source: "maintenance_page",
+        action: "mark_fixed"
+      }
+    });
+
+    res.redirect(`/admin/maintenance?ok=fixed-${encodeURIComponent(unit.name)}`);
+  }
+);
+
+adminRouter.post(
+  "/maintenance/:unitId/flag-urgent",
+  requirePermissionAny([{ module: "ROOMS", action: "EDIT" }, { module: "HOUSEKEEPING", action: "EDIT" }]),
+  async (req, res) => {
+    const hotel = await prisma.hotel.findFirst({
+      where: { slug: activeHotelSlug() },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.redirect("/admin/maintenance");
+      return;
+    }
+    const unitId = String(req.params.unitId ?? "");
+    const wantUrgent = String(req.body?.urgent ?? "true").toLowerCase() !== "false";
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: unitId, hotelId: hotel.id },
+      select: { id: true, name: true, notes: true }
+    });
+    if (!unit) {
+      res.redirect("/admin/maintenance");
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
+      // Make sure we keep MAINTENANCE status when flagging urgent.
+      const withStatus = wantUrgent
+        ? writeManualRoomStatusToNotes(fresh?.notes, "MAINTENANCE")
+        : (fresh?.notes ?? "");
+      const newNotes = setMaintenanceUrgentInNotes(withStatus, wantUrgent);
+      await tx.roomUnit.update({
+        where: { id: unit.id },
+        data: { notes: newNotes }
+      });
+    });
+
+    if (wantUrgent) {
+      try {
+        await notifyHousekeepingStaff({
+          hotelId: hotel.id,
+          type: "MAINTENANCE_URGENT",
+          title: "🚨 Urgent maintenance",
+          body: `Room ${unit.name} — flagged as urgent. Please prioritise.`,
+          severity: "critical",
+          link: "/admin/maintenance"
+        });
+      } catch {
+        // notification failure is non-fatal
+      }
+    }
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "ROOM_BOARD_UNIT_STATUS",
+      entityType: "RoomUnit",
+      entityId: unit.id,
+      metadata: {
+        status: "MAINTENANCE",
+        unitName: unit.name,
+        source: "maintenance_page",
+        action: wantUrgent ? "flag_urgent" : "clear_urgent"
+      }
+    });
+
+    const flashKey = wantUrgent ? "urgent" : "clear";
+    res.redirect(`/admin/maintenance?ok=${flashKey}-${encodeURIComponent(unit.name)}`);
   }
 );
 

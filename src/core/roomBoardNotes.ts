@@ -12,3 +12,31 @@ export function writeManualRoomStatusToNotes(notes: string | null | undefined, s
   const cleaned = (notes ?? "").replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/g, "").trim();
   return `${cleaned ? `${cleaned} ` : ""}[status:${status}]`.trim();
 }
+
+/**
+ * "Urgent" maintenance flag stored alongside the status tag in `RoomUnit.notes`
+ * as the literal token `[urgent]`. Lets a manager mark a maintenance room as
+ * priority — surfaced on the maintenance page with a red badge.
+ */
+const URGENT_TAG_RE = /\[urgent\]/gi;
+
+export function parseMaintenanceUrgentFromNotes(notes: string | null | undefined): boolean {
+  if (!notes) return false;
+  return URGENT_TAG_RE.test(notes);
+}
+
+export function setMaintenanceUrgentInNotes(notes: string | null | undefined, urgent: boolean): string {
+  const stripped = (notes ?? "").replace(URGENT_TAG_RE, "").replace(/\s{2,}/g, " ").trim();
+  if (!urgent) return stripped;
+  return stripped.length ? `${stripped} [urgent]` : "[urgent]";
+}
+
+/** Strip every meta tag and return the human-readable note part. */
+export function stripRoomNoteTags(notes: string | null | undefined): string {
+  if (!notes) return "";
+  return notes
+    .replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/gi, "")
+    .replace(URGENT_TAG_RE, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
