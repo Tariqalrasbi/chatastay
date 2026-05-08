@@ -1,5 +1,6 @@
 <div class="login-card-shell">
   <div class="login-card">
+    <div class="login-brand-kicker">WhatsApp-native hotel operations</div>
     <h1 class="login-card-title">Hotel Extranet Sign In</h1>
     <p class="muted login-card-sub">Al Ashkhara Beach Resort — one portal for management and operations.</p>
 
@@ -92,37 +93,83 @@
 
 <style>
   .login-card-shell {
-    max-width: 440px;
+    max-width: 960px;
     margin: 0 auto;
+    padding: 28px 0;
   }
   .login-card {
-    background: #fff;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 28px 24px 24px;
-    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.07);
+    position: relative;
+    overflow: hidden;
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(246, 255, 250, 0.96) 100%),
+      radial-gradient(circle at 100% 0, rgba(37, 211, 102, 0.2), transparent 30%);
+    border: 1px solid #dce8e3;
+    border-radius: 28px;
+    padding: 34px;
+    box-shadow: 0 24px 70px rgba(15, 44, 38, 0.14);
+  }
+  .login-card::before {
+    content: "";
+    position: absolute;
+    top: -80px;
+    right: -80px;
+    width: 220px;
+    height: 220px;
+    border-radius: 50%;
+    background: rgba(37, 211, 102, 0.14);
+    pointer-events: none;
+  }
+  .login-brand-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    background: #dcfce7;
+    color: #075e54;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  .login-brand-kicker::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #25d366;
+    box-shadow: 0 0 0 6px rgba(37, 211, 102, 0.16);
   }
   .login-card-title {
     margin: 0 0 8px;
-    font-size: 1.35rem;
+    font-size: clamp(1.65rem, 3vw, 2.3rem);
     font-weight: 800;
-    letter-spacing: -0.02em;
-    color: #0f172a;
+    letter-spacing: -0.04em;
+    color: #0b1f1c;
   }
   .login-card-sub {
     margin: 0 0 20px;
-    font-size: 14px;
+    font-size: 15px;
     line-height: 1.45;
   }
   .login-mode-hint {
-    margin: 0 0 18px;
+    margin: 0 0 22px;
+    padding: 14px 16px;
+    border: 1px solid #d9f3e4;
+    border-radius: 16px;
+    background: #f4fbf7;
     font-size: 13px;
     line-height: 1.5;
-    color: #64748b;
-    min-height: 2.75em;
+    color: #52635e;
   }
   .login-section {
-    margin-top: 6px;
+    margin-top: 10px;
+    padding: 18px;
+    border: 1px solid #e0ebe6;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 10px 26px rgba(15, 44, 38, 0.05);
   }
   .login-section-title {
     margin: 0 0 4px;
@@ -135,8 +182,8 @@
     font-size: 12px;
   }
   .login-divider {
-    margin: 16px 0;
-    border-top: 1px dashed #d8dee6;
+    margin: 18px 0;
+    border-top: 1px dashed #d8e7e1;
   }
   .login-panel[hidden] {
     display: none !important;
@@ -151,51 +198,57 @@
     display: block;
     font-size: 13px;
     font-weight: 600;
-    color: #334155;
+    color: #31413d;
     margin-bottom: 6px;
   }
   .login-input {
     width: 100%;
-    padding: 11px 12px;
+    padding: 12px 13px;
     margin-bottom: 14px;
-    border: 1px solid #d8dee6;
-    border-radius: 10px;
+    border: 1px solid #d7e5df;
+    border-radius: 13px;
     font-size: 15px;
     box-sizing: border-box;
+    background: #fff;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
   }
   .login-input:focus {
-    border-color: #0f766e;
+    border-color: #25d366;
     outline: 0;
-    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+    box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.16);
   }
   .login-btn {
     width: 100%;
     padding: 12px 16px;
     border: 0;
-    border-radius: 10px;
+    border-radius: 13px;
     font-weight: 700;
     font-size: 15px;
     cursor: pointer;
     margin-top: 4px;
-    transition: opacity 0.2s ease, filter 0.15s ease, transform 0.12s ease;
+    transition: opacity 0.2s ease, filter 0.15s ease, transform 0.12s ease, box-shadow 0.16s ease;
   }
   .login-btn:disabled {
     cursor: not-allowed;
     opacity: 0.72;
   }
   .login-btn--primary {
-    background: #25d366;
-    color: #083d2d;
+    background: linear-gradient(135deg, #25d366 0%, #7df0ad 100%);
+    color: #063d31;
+    box-shadow: 0 12px 24px rgba(37, 211, 102, 0.2);
   }
   .login-btn--primary:hover:not(:disabled) {
-    filter: brightness(0.97);
+    filter: brightness(0.99);
+    transform: translateY(-1px);
   }
   .login-btn--staff {
-    background: #0b6e6e;
+    background: linear-gradient(135deg, #075e54 0%, #128c7e 100%);
     color: #fff;
+    box-shadow: 0 12px 24px rgba(7, 94, 84, 0.17);
   }
   .login-btn--staff:hover:not(:disabled) {
     filter: brightness(1.05);
+    transform: translateY(-1px);
   }
   .login-btn.is-loading {
     position: relative;
@@ -207,7 +260,7 @@
   .login-demo-details {
     margin-top: 20px;
     padding-top: 16px;
-    border-top: 1px solid #e2e8f0;
+    border-top: 1px solid #e2eee8;
     font-size: 13px;
   }
   .login-demo-details summary {
@@ -228,10 +281,46 @@
     line-height: 1.55;
   }
   .login-demo-details code {
-    background: #f1f5f9;
+    background: #ecfdf3;
     padding: 2px 6px;
     border-radius: 6px;
     font-size: 12px;
+  }
+  @media (min-width: 820px) {
+    .login-card {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+    .login-brand-kicker,
+    .login-card-title,
+    .login-card-sub,
+    .login-mode-hint,
+    .login-demo-details {
+      grid-column: 1 / -1;
+    }
+    .login-divider {
+      display: none;
+    }
+  }
+  @media (max-width: 620px) {
+    .login-card-shell {
+      padding: 8px 0;
+    }
+    .login-card {
+      padding: 22px 18px;
+      border-radius: 20px;
+    }
+    .login-section {
+      padding: 14px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .login-input,
+    .login-btn {
+      transition: none;
+    }
   }
 </style>
 

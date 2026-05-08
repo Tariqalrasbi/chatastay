@@ -787,6 +787,257 @@
           font-weight: 600;
         }
       }
+
+      /* Premium WhatsApp-themed SaaS/PMS visual refresh. These overrides keep existing
+         routes and form contracts intact while modernizing the operational chrome. */
+      :root {
+        --wa-green: #25d366;
+        --wa-green-dark: #128c7e;
+        --wa-deep: #064e46;
+        --wa-mint: #d9fbe8;
+        --wa-soft: #f4fbf7;
+        --wa-ink: #0b1f1c;
+        --card: rgba(255, 255, 255, 0.96);
+        --text: #10201d;
+        --muted: #64736f;
+        --border: #dce8e3;
+        --shadow-soft: 0 18px 55px rgba(15, 44, 38, 0.09);
+        --shadow-card: 0 10px 30px rgba(15, 44, 38, 0.07);
+        --radius-lg: 20px;
+        --radius-md: 14px;
+      }
+      body {
+        background:
+          radial-gradient(circle at 14% -10%, rgba(37, 211, 102, 0.22), transparent 30%),
+          radial-gradient(circle at 92% 8%, rgba(18, 140, 126, 0.16), transparent 28%),
+          linear-gradient(180deg, #f8fcfa 0%, #eef7f3 42%, #e8f2ee 100%);
+        color: var(--text);
+        font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+      }
+      .shell {
+        grid-template-columns: 294px minmax(0, 1fr);
+      }
+      .sidebar {
+        position: sticky;
+        top: 0;
+        min-height: 100vh;
+        background:
+          linear-gradient(180deg, rgba(6, 78, 70, 0.98) 0%, rgba(9, 93, 80, 0.98) 52%, rgba(8, 61, 45, 0.98) 100%),
+          radial-gradient(circle at top left, rgba(37, 211, 102, 0.28), transparent 34%);
+        box-shadow: 12px 0 45px rgba(7, 68, 58, 0.18);
+        border-right: 1px solid rgba(255, 255, 255, 0.12);
+      }
+      .brand-logo {
+        background: linear-gradient(135deg, #25d366 0%, #b9f7d3 100%);
+        color: #063d31;
+        box-shadow: 0 10px 26px rgba(37, 211, 102, 0.22);
+      }
+      .brand h1 {
+        letter-spacing: -0.02em;
+      }
+      .hotel-card,
+      .user-card,
+      .sidebar-property-switch select {
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.22);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(16px);
+      }
+      nav a,
+      nav button {
+        position: relative;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.07);
+        border-radius: 13px;
+        transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+      }
+      nav a:hover,
+      nav button:hover {
+        background: rgba(255, 255, 255, 0.14);
+        border-color: rgba(255, 255, 255, 0.28);
+        transform: translateX(2px);
+      }
+      nav a.top-level-active,
+      nav a.active-link {
+        background: linear-gradient(135deg, #25d366 0%, #8df2b7 100%);
+        box-shadow: 0 10px 24px rgba(37, 211, 102, 0.22);
+      }
+      .content {
+        padding: 28px;
+      }
+      .top-subnav {
+        border: 1px solid rgba(220, 232, 227, 0.86);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.82);
+        box-shadow: var(--shadow-card);
+        backdrop-filter: blur(18px);
+      }
+      .section-tabs a,
+      .btn-link,
+      button,
+      input,
+      select,
+      textarea {
+        transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background 0.16s ease;
+      }
+      .section-tabs a {
+        border-color: #d9e7e1;
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.75);
+      }
+      .section-tabs a:hover,
+      .btn-link:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 8px 20px rgba(15, 44, 38, 0.09);
+      }
+      .section-tabs a.active-link,
+      .btn-link.primary,
+      button[type="submit"] {
+        background: linear-gradient(135deg, #25d366 0%, #6ee7a4 100%);
+        color: #063d31;
+        border-color: transparent;
+        box-shadow: 0 10px 24px rgba(37, 211, 102, 0.18);
+      }
+      .panel,
+      section,
+      .card,
+      .stat {
+        border-color: rgba(220, 232, 227, 0.9);
+      }
+      .panel {
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-soft);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(252, 255, 253, 0.94));
+      }
+      h1,
+      h2,
+      h3 {
+        color: var(--wa-ink);
+        letter-spacing: -0.025em;
+      }
+      .grid-4,
+      .grid-2 {
+        gap: 16px;
+      }
+      .stat {
+        position: relative;
+        overflow: hidden;
+        border-left: 0;
+        border-radius: 18px;
+        background: linear-gradient(180deg, #ffffff 0%, #f9fffb 100%);
+        box-shadow: var(--shadow-card);
+      }
+      .stat::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto;
+        height: 4px;
+        background: linear-gradient(90deg, #25d366, #128c7e);
+      }
+      .stat p {
+        font-size: clamp(22px, 2.2vw, 30px);
+        color: var(--wa-deep);
+      }
+      table {
+        border-collapse: separate;
+        border-spacing: 0;
+      }
+      thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: #f5fbf8;
+        color: #52635e;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-size: 11px;
+      }
+      tbody tr {
+        transition: background 0.14s ease, transform 0.14s ease;
+      }
+      tbody tr:hover {
+        background: #f8fdfb;
+      }
+      th,
+      td {
+        border-bottom-color: #e6efeb;
+        padding: 12px 10px;
+      }
+      input,
+      select,
+      textarea {
+        border-color: #d7e5df !important;
+        border-radius: 12px !important;
+        background: #ffffff;
+      }
+      input:focus,
+      select:focus,
+      textarea:focus {
+        border-color: #25d366 !important;
+        outline: 0;
+        box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.16);
+      }
+      .badge {
+        border: 1px solid transparent;
+        font-weight: 800;
+        letter-spacing: 0.01em;
+      }
+      .badge.ok {
+        background: #dcfce7;
+        color: #10643a;
+        border-color: #b7f1cc;
+      }
+      .badge.pending {
+        background: #fff7d6;
+        color: #8a5a08;
+        border-color: #fde68a;
+      }
+      .badge.alert {
+        background: #ffe4e6;
+        color: #9f1239;
+        border-color: #fecdd3;
+      }
+      .bubble {
+        border-radius: 18px;
+        box-shadow: 0 8px 22px rgba(15, 44, 38, 0.06);
+      }
+      .bubble.outbound {
+        background: linear-gradient(135deg, #dcfce7 0%, #effdf4 100%);
+        border-color: #b7f1cc;
+      }
+      .bubble.inbound {
+        background: #ffffff;
+      }
+      .nav-live-badge,
+      .admin-notif-bell.admin-notif-bell-pulse {
+        animation: admin-notif-bell-pulse-kf 1.8s ease-in-out infinite;
+      }
+      .room-board-card {
+        box-shadow: 0 8px 22px rgba(15, 44, 38, 0.08);
+        transition: transform 0.16s ease, box-shadow 0.16s ease;
+      }
+      .room-board-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 16px 34px rgba(15, 44, 38, 0.13);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          scroll-behavior: auto !important;
+          transition-duration: 0.001ms !important;
+        }
+      }
+      @media (max-width: 980px) {
+        .sidebar {
+          position: static;
+          min-height: auto;
+        }
+        .content {
+          padding: 16px;
+        }
+      }
     </style>
   </head>
   <body{{uiErrorContextAttrs}}>

@@ -85,9 +85,9 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ChatStay Guest Portal</title>
   <style>
-    body { font-family: Inter, Arial, sans-serif; margin: 0; background: linear-gradient(180deg, #f6fbf9 0%, #eef7f4 100%); color: #0f172a; }
-    main { max-width: 860px; margin: 20px auto; background: #ffffff; border: 1px solid #d8eee5; border-radius: 16px; padding: 18px; box-shadow: 0 8px 28px rgba(7, 94, 84, 0.08); }
-    h1, h2 { margin-top: 0; }
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: radial-gradient(circle at 12% -10%, rgba(37,211,102,.22), transparent 30%), radial-gradient(circle at 92% 8%, rgba(18,140,126,.15), transparent 28%), linear-gradient(180deg, #f9fffc 0%, #eef7f4 100%); color: #0b1f1c; }
+    main { max-width: 900px; margin: 24px auto; background: rgba(255,255,255,.96); border: 1px solid #dce8e3; border-radius: 24px; padding: 24px; box-shadow: 0 24px 70px rgba(15,44,38,.12); }
+    h1, h2 { margin-top: 0; letter-spacing: -.03em; }
     html[dir="rtl"] body, html[dir="rtl"] th, html[dir="rtl"] td { text-align: right; }
     .muted { color: #475569; }
     .inline-link { color:#0b6e6e; font-weight: 700; text-decoration: none; padding: 6px 10px; border-radius: 999px; background: #ecfff5; border:1px solid #bbf7d0; }
@@ -96,26 +96,33 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
     .ok { background:#dcfce7; color:#166534; }
     .pending { background:#fef9c3; color:#854d0e; }
     .alert { background:#fee2e2; color:#991b1b; }
-    table { width:100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { text-align:left; border-bottom: 1px solid #e2e8f0; padding: 9px 8px; }
+    table { width:100%; border-collapse: separate; border-spacing:0; margin-top: 12px; }
+    th, td { text-align:left; border-bottom: 1px solid #e6efeb; padding: 11px 9px; }
+    th { background:#f5fbf8; color:#52635e; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
     form { display:grid; gap: 8px; max-width: 460px; }
-    input, select, textarea { padding: 9px; border:1px solid #cbd5e1; border-radius: 8px; font: inherit; }
+    input, select, textarea { padding: 11px 12px; border:1px solid #d7e5df; border-radius: 12px; font: inherit; background:#fff; transition:border-color .16s ease, box-shadow .16s ease; }
+    input:focus, select:focus, textarea:focus { outline:0; border-color:#25d366; box-shadow:0 0 0 4px rgba(37,211,102,.16); }
     textarea { min-height: 78px; resize: vertical; }
-    button { border:0; background:#075e54; color:#fff; padding:10px 14px; border-radius: 10px; font-weight: 700; cursor: pointer; }
+    button { border:0; background:linear-gradient(135deg,#075e54,#128c7e); color:#fff; padding:11px 15px; border-radius: 13px; font-weight: 800; cursor: pointer; box-shadow:0 12px 24px rgba(7,94,84,.16); transition:transform .16s ease, filter .16s ease; }
+    button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
     button:disabled { opacity:.45; cursor:not-allowed; }
     .row { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
-    .meal-plan-fieldset { border: 1px solid #cfe8e0; border-radius: 14px; padding: 12px 14px; margin: 0; background: #f7fdfb; }
+    .meal-plan-fieldset { border: 1px solid #cfe8e0; border-radius: 18px; padding: 14px 16px; margin: 0; background: #f7fdfb; box-shadow:0 8px 22px rgba(15,44,38,.05); }
     .meal-plan-fieldset legend { font-weight: 700; font-size: 15px; padding: 0 4px; color: #0f172a; }
     .meal-plan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 8px; }
     @media (min-width: 520px) { .meal-plan-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-    .meal-plan-card { display: flex; flex-direction: column; gap: 4px; border: 2px solid #d8eee5; border-radius: 10px; padding: 10px 8px; cursor: pointer; background: #fff; position: relative; min-height: 72px; transition: border-color 0.15s, box-shadow 0.15s, background 0.15s; }
-    .meal-plan-card:hover { border-color: #94d4c9; }
+    .meal-plan-card { display: flex; flex-direction: column; gap: 4px; border: 2px solid #d8eee5; border-radius: 14px; padding: 12px 10px; cursor: pointer; background: #fff; position: relative; min-height: 76px; transition: border-color 0.15s, box-shadow 0.15s, background 0.15s, transform .15s; }
+    .meal-plan-card:hover { border-color: #94d4c9; transform: translateY(-1px); }
     .meal-plan-card:has(input:checked) { border-color: #128c7e; box-shadow: 0 0 0 1px #128c7e; background: #ecfff8; }
     .meal-plan-card input { position: absolute; opacity: 0; width: 1px; height: 1px; }
     .meal-plan-card .t { font-weight: 700; font-size: 14px; }
     .meal-plan-card .d { font-size: 12px; color: #64748b; line-height: 1.35; }
-    .hero-card { background: linear-gradient(135deg, #075e54 0%, #128c7e 100%); color: #fff; border-radius: 18px; padding: 18px; margin-bottom: 14px; }
+    .hero-card { position:relative; overflow:hidden; background: linear-gradient(135deg, #064e46 0%, #128c7e 62%, #25d366 145%); color: #fff; border-radius: 24px; padding: 24px; margin-bottom: 16px; box-shadow:0 18px 45px rgba(7,94,84,.18); }
+    .hero-card::after { content:""; position:absolute; right:-70px; top:-70px; width:190px; height:190px; border-radius:999px; background:rgba(255,255,255,.13); pointer-events:none; }
     .hero-card .muted { color: rgba(255,255,255,.82); }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important; }
+    }
     @media (max-width: 700px) {
       .row { grid-template-columns: 1fr; }
       main { margin: 0; min-height: 100vh; border-radius: 0; border: 0; padding: 14px; }
