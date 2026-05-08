@@ -5148,32 +5148,49 @@ adminRouter.post("/users", requireAuth, async (req, res) => {
       isActive: true
     };
 
+    /**
+     * Two-phase create so a stale production Prisma client (which may not yet know
+     * about a newly added UserRole enum value such as RESTAURANT) cannot block staff
+     * onboarding. Phase 1 always upserts with `STAFF`, a role that has existed since
+     * the very first migration. Phase 2 then writes the requested role via a
+     * parameterized raw UPDATE — safe because SQLite stores Prisma enums as plain
+     * TEXT and we already validated `role` against the explicit allow-list above.
+     */
+    const createPayloadBootstrap = { ...createPayload, role: UserRole.STAFF };
     try {
       if (email) {
         await prisma.hotelUser.upsert({
           where: { hotelId_email: { hotelId: hotel.id, email } },
-          create: createPayload,
+          create: createPayloadBootstrap,
           update: {
             fullName,
             username,
             passwordHash,
             pinHash,
-            role: roleSafe,
+            role: UserRole.STAFF,
             isActive: true
           }
         });
       } else {
         await prisma.hotelUser.upsert({
           where: { hotelId_username: { hotelId: hotel.id, username: username! } },
-          create: createPayload,
+          create: createPayloadBootstrap,
           update: {
             fullName,
             passwordHash,
             pinHash,
-            role: roleSafe,
+            role: UserRole.STAFF,
             isActive: true
           }
         });
+      }
+      // Phase 2: persist the requested role. Allow-list already enforced above; we
+      // additionally pin the WHERE to (hotelId, email|username) so a typo cannot
+      // touch a different tenant.
+      if (email) {
+        await prisma.$executeRaw`UPDATE "HotelUser" SET role = ${roleSafe} WHERE "hotelId" = ${hotel.id} AND email = ${email}`;
+      } else {
+        await prisma.$executeRaw`UPDATE "HotelUser" SET role = ${roleSafe} WHERE "hotelId" = ${hotel.id} AND username = ${username}`;
       }
     } catch (upsertErr) {
       console.error(
@@ -5193,12 +5210,9 @@ adminRouter.post("/users", requireAuth, async (req, res) => {
         return;
       }
       if (upsertErr instanceof Prisma.PrismaClientValidationError) {
-        // Most common: server still running an old Prisma client that does not know
-        // about a freshly added enum value (e.g. RESTAURANT). Surface the root cause
-        // directly to the signed-in admin so they can fix the deploy without log diving.
         jsonErr(
           500,
-          `Could not create user: Prisma rejected the payload (likely role "${roleSafe}" is not in the deployed Prisma client). Run prisma generate on the server and restart.`
+          `Could not create user: Prisma rejected the payload. Run prisma generate on the server and restart.`
         );
         return;
       }
@@ -5299,11 +5313,14 @@ adminRouter.post("/users/:id", requirePermission("USERS", "EDIT"), async (req, r
       return;
     }
 
+    // Same two-phase write as POST /admin/users so a stale Prisma client cannot
+    // refuse a freshly added enum value (e.g. RESTAURANT). The role allow-list
+    // was already enforced via roleMap.
     const updateData: Prisma.HotelUserUpdateInput = {
       fullName,
       email,
       username,
-      role: roleSafe,
+      role: UserRole.STAFF,
       isActive
     };
     if (password) {
@@ -5315,6 +5332,7 @@ adminRouter.post("/users/:id", requirePermission("USERS", "EDIT"), async (req, r
     if (pin) updateData.pinHash = hashPassword(pin);
 
     await prisma.hotelUser.update({ where: { id: existing.id }, data: updateData });
+    await prisma.$executeRaw`UPDATE "HotelUser" SET role = ${roleSafe} WHERE id = ${existing.id}`;
 
     const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
     const oldKey = hotelUserPermissionKey(existing);
