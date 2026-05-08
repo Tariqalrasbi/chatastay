@@ -17,5 +17,29 @@ jobs:
           script: |
             set -Eeuo pipefail
             cd /var/www/chatastay
+
+            # Preserve runtime-managed files that the server writes to so a
+            # deploy can never destroy live data, then clean any local diffs
+            # so `git pull --ff-only` is guaranteed to succeed.
+            RUNTIME_FILES=(admin-user-permissions.json)
+            BACKUP_DIR="$(mktemp -d)"
+            for f in "${RUNTIME_FILES[@]}"; do
+              if [ -f "$f" ]; then
+                cp -a "$f" "$BACKUP_DIR/$(basename "$f")"
+              fi
+              git checkout -- "$f" 2>/dev/null || true
+            done
+
             git pull --ff-only origin main
+
+            # Restore runtime files (these are .gitignored after the
+            # admin-user-permissions untrack commit, so the restore is a no-op
+            # for git but keeps live data intact).
+            for f in "${RUNTIME_FILES[@]}"; do
+              if [ -f "$BACKUP_DIR/$(basename "$f")" ]; then
+                cp -a "$BACKUP_DIR/$(basename "$f")" "$f"
+              fi
+            done
+            rm -rf "$BACKUP_DIR"
+
             npm run deploy:production
