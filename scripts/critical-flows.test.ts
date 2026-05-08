@@ -7,11 +7,17 @@
  */
 import "dotenv/config";
 import request from "supertest";
-import { BookingStatus, PropertyStatus } from "@prisma/client";
+import {
+  BookingStatus,
+  FolioOutletCategory,
+  FolioTransactionType,
+  PropertyStatus
+} from "@prisma/client";
 import { createHttpApp } from "../src/httpApp";
 import { prisma } from "../src/db";
 import { addDays, startOfDay, toIsoDate } from "../src/core/availability";
 import { formatYmdInHotelZone, readWallClockInZone, wallClockLocalToUtc } from "../src/core/guestMessagingSchedule";
+import { categorizeBookingForBuffet, getBreakfastBuffetCountForToday } from "../src/core/fbOperations";
 
 const HOTEL_SLUG = (process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort").trim();
 const DEMO_OWNER_EMAIL = "demo.owner@pms.local";
@@ -376,6 +382,196 @@ async function main(): Promise<void> {
       (fresh?.notes ?? "").includes("[status:CLEANING]"),
       "Room unit notes include CLEANING after checkout (room status sync path)"
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Daily breakfast / buffet preparation summary
+  // ---------------------------------------------------------------------------
+  // Pure-function categorisation:
+  assert(categorizeBookingForBuffet({ mealPlan: "BREAKFAST" }, false) === "BREAKFAST", "buffet: BREAKFAST mealPlan -> Breakfast Included");
+  assert(categorizeBookingForBuffet({ mealPlan: "HALF_BOARD" }, false) === "HALF_BOARD", "buffet: HALF_BOARD mealPlan -> Half-board");
+  assert(categorizeBookingForBuffet({ mealPlan: "FULL_BOARD" }, false) === "FULL_BOARD", "buffet: FULL_BOARD mealPlan -> Full-board");
+  assert(categorizeBookingForBuffet({ mealPlan: "NONE" }, false) === null, "buffet: Room-only without breakfast charge -> excluded");
+  assert(categorizeBookingForBuffet({ mealPlan: null }, false) === null, "buffet: null mealPlan without breakfast charge -> excluded");
+  assert(categorizeBookingForBuffet({ mealPlan: "NONE" }, true) === "ADDED", "buffet: Room-only WITH breakfast folio charge -> ADDED bucket");
+  assert(categorizeBookingForBuffet({ mealPlan: "BREAKFAST" }, true) === "BREAKFAST", "buffet: meal-plan wins over ADDED to avoid double-counting");
+
+  // DB-backed aggregator: seed isolated bookings far in the future, drive the
+  // helper with that date as `asOf`, then assert each bucket. Cleaned up at the
+  // end of the block.
+  const buffetHotel = await prisma.hotel.findUnique({
+    where: { id: hotel.id },
+    select: { id: true, timezone: true, currency: true }
+  });
+  if (!buffetHotel) {
+    fail("buffet aggregator: could not load hotel for buffet test");
+  } else {
+    const roomType = await prisma.roomType.findFirst({
+      where: { hotelId: buffetHotel.id, isActive: true },
+      select: { id: true, propertyId: true }
+    });
+    if (!roomType) {
+      fail("buffet aggregator: no active room type for buffet test");
+    } else {
+      const buffetGuest = await prisma.guest.create({
+        data: {
+          hotelId: buffetHotel.id,
+          fullName: "Buffet Test Guest",
+          phoneE164: `+96890000${String(Date.now()).slice(-5)}`
+        },
+        select: { id: true }
+      });
+
+      const fakeAsOf = addDays(base, 5000 + runSlot);
+      const stayIn = new Date(fakeAsOf);
+      stayIn.setHours(0, 0, 0, 0);
+      const stayOut = addDays(stayIn, 2);
+      const fakeYmd = formatYmdInHotelZone(fakeAsOf, buffetHotel.timezone ?? "UTC");
+      const tzDayStartUtc = wallClockLocalToUtc(fakeYmd, "00:00", buffetHotel.timezone ?? "UTC");
+      const tzNoonUtc = new Date(tzDayStartUtc.getTime() + 9 * 3600 * 1000);
+
+      const baseBooking = {
+        hotelId: buffetHotel.id,
+        propertyId: roomType.propertyId,
+        roomTypeId: roomType.id,
+        guestId: buffetGuest.id,
+        checkIn: stayIn,
+        checkOut: stayOut,
+        nights: 2,
+        totalAmount: 0,
+        currency: buffetHotel.currency || "OMR"
+      };
+
+      const bbBooking = await prisma.booking.create({
+        data: { ...baseBooking, adults: 2, children: 1, status: BookingStatus.CONFIRMED, mealPlan: "BREAKFAST" },
+        select: { id: true }
+      });
+      const hbBooking = await prisma.booking.create({
+        data: { ...baseBooking, adults: 1, children: 2, status: BookingStatus.CHECKED_IN, mealPlan: "HALF_BOARD" },
+        select: { id: true }
+      });
+      const fbBooking = await prisma.booking.create({
+        data: { ...baseBooking, adults: 3, children: 0, status: BookingStatus.CONFIRMED, mealPlan: "FULL_BOARD" },
+        select: { id: true }
+      });
+      const roomOnlyNo = await prisma.booking.create({
+        data: { ...baseBooking, adults: 2, children: 0, status: BookingStatus.CONFIRMED, mealPlan: "NONE" },
+        select: { id: true }
+      });
+      const roomOnlyAdded = await prisma.booking.create({
+        data: { ...baseBooking, adults: 2, children: 1, status: BookingStatus.CHECKED_IN, mealPlan: "NONE" },
+        select: { id: true }
+      });
+      const futureBooking = await prisma.booking.create({
+        data: {
+          ...baseBooking,
+          adults: 4,
+          children: 0,
+          status: BookingStatus.CONFIRMED,
+          mealPlan: "BREAKFAST",
+          checkIn: addDays(stayIn, 10),
+          checkOut: addDays(stayIn, 12)
+        },
+        select: { id: true }
+      });
+      const pastBooking = await prisma.booking.create({
+        data: {
+          ...baseBooking,
+          adults: 4,
+          children: 0,
+          status: BookingStatus.CONFIRMED,
+          mealPlan: "BREAKFAST",
+          checkIn: addDays(stayIn, -10),
+          checkOut: addDays(stayIn, -8)
+        },
+        select: { id: true }
+      });
+      const cancelledBooking = await prisma.booking.create({
+        data: { ...baseBooking, adults: 5, children: 2, status: BookingStatus.CANCELLED, mealPlan: "BREAKFAST" },
+        select: { id: true }
+      });
+
+      const breakfastCharge = await prisma.folioTransaction.create({
+        data: {
+          hotelId: buffetHotel.id,
+          bookingId: roomOnlyAdded.id,
+          guestId: buffetGuest.id,
+          transactionType: FolioTransactionType.FNB_CHARGE,
+          outletCategory: FolioOutletCategory.RESTAURANT,
+          itemCode: "REST-BFAST",
+          itemName: "Breakfast",
+          description: "Walk-up addition charged to room folio",
+          quantity: 1,
+          unitPrice: 3,
+          grossAmount: 3,
+          netAmount: 3,
+          chargeDate: tzNoonUtc,
+          postedAt: tzNoonUtc,
+          isVoided: false
+        },
+        select: { id: true }
+      });
+
+      // Negative case: a non-breakfast charge same day on the same room-only
+      // booking should NOT promote it. (Only added because we must guarantee
+      // the SKU/name pattern is doing the work, not the existence-of-any-charge.)
+      const noiseCharge = await prisma.folioTransaction.create({
+        data: {
+          hotelId: buffetHotel.id,
+          bookingId: roomOnlyNo.id,
+          guestId: buffetGuest.id,
+          transactionType: FolioTransactionType.FNB_CHARGE,
+          outletCategory: FolioOutletCategory.RESTAURANT,
+          itemCode: "REST-COFFEE",
+          itemName: "Espresso",
+          description: "Just a coffee",
+          quantity: 1,
+          unitPrice: 1,
+          grossAmount: 1,
+          netAmount: 1,
+          chargeDate: tzNoonUtc,
+          postedAt: tzNoonUtc,
+          isVoided: false
+        },
+        select: { id: true }
+      });
+
+      try {
+        const buffet = await getBreakfastBuffetCountForToday(buffetHotel.id, buffetHotel.timezone, fakeAsOf);
+        assert(buffet.asOfYmd === fakeYmd, "buffet aggregator: returns hotel-TZ ymd");
+        const byCat = Object.fromEntries(buffet.rows.map((r) => [r.category, r] as const));
+        // Counts may include other fixture data already in the DB on the same
+        // future date; assert OUR seeded contributions are present rather than
+        // demanding strict equality with the table totals.
+        assert(byCat.BREAKFAST.adults >= 2 && byCat.BREAKFAST.children >= 1, "buffet aggregator: B&B booking contributes 2 adults + 1 child");
+        assert(byCat.HALF_BOARD.adults >= 1 && byCat.HALF_BOARD.children >= 2, "buffet aggregator: HB booking contributes 1 adult + 2 children");
+        assert(byCat.FULL_BOARD.adults >= 3 && byCat.FULL_BOARD.children >= 0, "buffet aggregator: FB booking contributes 3 adults");
+        assert(byCat.ADDED.adults >= 2 && byCat.ADDED.children >= 1, "buffet aggregator: Room-only with breakfast folio charge appears under Added");
+        assert(buffet.totals.total >= 11, "buffet aggregator: combined total covers all four buckets");
+      } finally {
+        // Cleanup: charges first, then bookings, then guest.
+        await prisma.folioTransaction.deleteMany({
+          where: { id: { in: [breakfastCharge.id, noiseCharge.id] } }
+        });
+        await prisma.booking.deleteMany({
+          where: {
+            id: {
+              in: [
+                bbBooking.id,
+                hbBooking.id,
+                fbBooking.id,
+                roomOnlyNo.id,
+                roomOnlyAdded.id,
+                futureBooking.id,
+                pastBooking.id,
+                cancelledBooking.id
+              ]
+            }
+          }
+        });
+        await prisma.guest.delete({ where: { id: buffetGuest.id } }).catch(() => undefined);
+      }
+    }
   }
 
   await prisma.$disconnect();

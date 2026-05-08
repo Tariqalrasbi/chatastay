@@ -155,7 +155,14 @@ import {
   renderShiftReportHtml,
   type ShiftCloseSnapshotFile
 } from "../core/shiftCloseReport";
-import { getFbOperationsSummary, listInHouseBookingsForHotelDay, recordWalkInDirectSale } from "../core/fbOperations";
+import {
+  getBreakfastBuffetCountForToday,
+  getFbOperationsSummary,
+  listInHouseBookingsForHotelDay,
+  recordWalkInDirectSale,
+  type BreakfastBuffetCount,
+  type BuffetCategory
+} from "../core/fbOperations";
 import { buildManualCheckInPageHtml, manualCheckInFormFromBody, resolveRoomTypeIdForUnit } from "./manualCheckInForm";
 import { computeManualCheckInRoomSelection } from "./manualCheckInRoomSelection";
 import { sendWhatsAppDocument, sendWhatsAppText, trySendWhatsAppText } from "../whatsapp/send";
@@ -1885,6 +1892,92 @@ const pmsWorkspacePageStyles = `<style>
 .pms-card:hover,.pms-picker button:hover { border-color:#25d366; box-shadow:0 16px 34px rgba(15,44,38,.11); }
 .pms-card a { color:#075e54; }
 </style>`;
+
+const buffetCountCardStyles = `<style>
+.buffet-card { background:#fff; border:1px solid #d6ebe1; border-radius:18px; padding:20px 22px 18px; margin:0 0 20px; box-shadow:0 12px 30px rgba(15,44,38,.08); position:relative; overflow:hidden; }
+.buffet-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:6px; background:linear-gradient(180deg,#25d366,#128c7e); }
+.buffet-card-head { display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:10px 18px; margin-bottom:14px; padding-left:6px; }
+.buffet-card-title { margin:0; font-size:18px; font-weight:800; color:#064e3b; letter-spacing:-0.01em; }
+.buffet-card-subtitle { margin:4px 0 0; font-size:13px; color:#0f766e; font-weight:600; }
+.buffet-card-helper { font-size:13px; color:#475569; max-width:520px; margin:0; }
+.buffet-card-date { font-size:12px; color:#475569; background:#ecfdf5; padding:4px 10px; border-radius:999px; font-weight:700; letter-spacing:.02em; }
+.buffet-table-wrap { overflow-x:auto; border-radius:14px; border:1px solid #e2e8f0; }
+.buffet-table { width:100%; border-collapse:collapse; font-size:14px; min-width:520px; }
+.buffet-table thead { background:#f0fdf4; }
+.buffet-table th, .buffet-table td { padding:10px 14px; text-align:left; border-bottom:1px solid #e6efe9; }
+.buffet-table th { font-size:12px; font-weight:800; color:#064e3b; letter-spacing:.06em; text-transform:uppercase; }
+.buffet-table td { color:#0f172a; vertical-align:middle; }
+.buffet-table td.num, .buffet-table th.num { text-align:right; font-variant-numeric:tabular-nums; }
+.buffet-row-total { background:#ecfdf5; border-top:2px solid #25d366; }
+.buffet-row-total td { font-weight:800; color:#064e3b; }
+.buffet-cat-tag { display:inline-flex; align-items:center; gap:6px; font-weight:700; }
+.buffet-cat-dot { width:9px; height:9px; border-radius:50%; background:#25d366; box-shadow:0 0 0 3px rgba(37,211,102,.18); }
+.buffet-cat-dot.bf-bb { background:#22c55e; }
+.buffet-cat-dot.bf-hb { background:#0ea5e9; }
+.buffet-cat-dot.bf-fb { background:#a855f7; }
+.buffet-cat-dot.bf-add { background:#f59e0b; }
+.buffet-empty { padding:18px; color:#64748b; font-size:13px; text-align:center; }
+@media (max-width:560px) {
+  .buffet-card-head { align-items:flex-start; }
+  .buffet-table th, .buffet-table td { padding:9px 10px; }
+}
+</style>`;
+
+function renderBuffetCountCard(buffet: BreakfastBuffetCount): string {
+  const categoryMeta: Record<BuffetCategory, { label: string; dot: string }> = {
+    BREAKFAST: { label: "Breakfast Included", dot: "bf-bb" },
+    HALF_BOARD: { label: "Half-board", dot: "bf-hb" },
+    FULL_BOARD: { label: "Full-board", dot: "bf-fb" },
+    ADDED: { label: "Added Breakfast / In-house Request", dot: "bf-add" }
+  };
+  const rows = buffet.rows
+    .map((r) => {
+      const meta = categoryMeta[r.category];
+      return `<tr>
+  <td><span class="buffet-cat-tag"><span class="buffet-cat-dot ${meta.dot}"></span>${escapeHtml(meta.label)}</span></td>
+  <td class="num">${r.adults}</td>
+  <td class="num">${r.children}</td>
+  <td class="num">${r.total}</td>
+</tr>`;
+    })
+    .join("");
+  const totals = buffet.totals;
+  const totalRow = `<tr class="buffet-row-total">
+  <td>Total Buffet Count</td>
+  <td class="num">${totals.adults}</td>
+  <td class="num">${totals.children}</td>
+  <td class="num">${totals.total}</td>
+</tr>`;
+  const empty = totals.total === 0
+    ? `<div class="buffet-empty">No breakfast/buffet covers required for ${escapeHtml(buffet.asOfYmd)} yet — counts update automatically as guests check in or breakfast is added to a folio.</div>`
+    : "";
+  return `<section class="buffet-card" aria-label="Today's breakfast and buffet preparation count">
+  <div class="buffet-card-head">
+    <div>
+      <h2 class="buffet-card-title">Today's Breakfast / Buffet Count</h2>
+      <p class="buffet-card-subtitle">Used by the chef to prepare breakfast buffet quantities.</p>
+    </div>
+    <span class="buffet-card-date">${escapeHtml(buffet.asOfYmd)}</span>
+  </div>
+  <div class="buffet-table-wrap">
+    <table class="buffet-table">
+      <thead>
+        <tr>
+          <th>Category</th>
+          <th class="num">Adults</th>
+          <th class="num">Children</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+        ${totalRow}
+      </tbody>
+    </table>
+  </div>
+  ${empty}
+</section>`;
+}
 
 const commandCenterExtraStyles = `<style>
 .cc-shell { max-width:1320px; margin:0 auto; }
@@ -3618,12 +3711,32 @@ adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"
   }
 });
 
-adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"), (_req, res) => {
+adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"), async (_req, res) => {
+  let buffetCardHtml = "";
+  try {
+    const hotel = await prisma.hotel.findUnique({
+      where: { slug: activeHotelSlug() },
+      select: { id: true, timezone: true }
+    });
+    if (hotel) {
+      const buffet = await getBreakfastBuffetCountForToday(hotel.id, hotel.timezone);
+      buffetCardHtml = renderBuffetCountCard(buffet);
+    }
+  } catch (err) {
+    // Card is non-essential; never block the workspace landing if the
+    // aggregator hits a transient DB issue.
+    console.error(
+      "[admin] /module/restaurant buffet count failed:",
+      err instanceof Error ? err.stack ?? err.message : String(err)
+    );
+  }
   const content = `${pmsWorkspacePageStyles}
+${buffetCountCardStyles}
 <div class="pms-hero">
   <h1>Restaurant workspace</h1>
   <p>Food &amp; beverage execution: menus, outlet flow, and guest folio context — without management or reception noise.</p>
 </div>
+${buffetCardHtml}
 <div class="pms-grid">
   <div class="pms-card"><h3>F&amp;B master</h3><p>Menus, pricing, and catalogue control.</p><a href="/admin/fb/menu">Open F&amp;B master →</a></div>
   <div class="pms-card"><h3>Outlet board</h3><p>Kitchen and service orchestration.</p><a href="/admin/outlet-dashboard">Open outlet board →</a></div>

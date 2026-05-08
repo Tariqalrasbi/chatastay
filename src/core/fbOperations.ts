@@ -13,6 +13,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "../db";
 import { optionalHotelUserId } from "./folioService";
 import { bucketFolioPaymentMethod } from "./shiftCloseReport";
+import { formatYmdInHotelZone, hotelTimezoneOrUtc, wallClockLocalToUtc } from "./guestMessagingSchedule";
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -394,4 +395,178 @@ function mapOutletCategoryToRevenue(o: FolioOutletCategory): FolioRevenueCategor
     default:
       return FolioRevenueCategory.OTHER;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Daily breakfast / buffet preparation summary
+// ---------------------------------------------------------------------------
+//
+// Drives the "Today's Breakfast / Buffet Count" card on the chef's restaurant
+// landing page. Categorises every in-house booking for the hotel's local
+// "today" by meal-plan/board-type. Room-Only bookings are excluded by default
+// and only counted if breakfast was added later (folio FNB charge with a
+// breakfast SKU or name) — matches the WhatsApp in-stay flow, the front-desk
+// manual folio charge path, and outlet ticket → folio path.
+
+export type BuffetCategory = "BREAKFAST" | "HALF_BOARD" | "FULL_BOARD" | "ADDED";
+
+export type BuffetCountRow = {
+  category: BuffetCategory;
+  bookings: number;
+  adults: number;
+  children: number;
+  total: number;
+};
+
+export type BreakfastBuffetCount = {
+  /** YYYY-MM-DD in the hotel's local timezone. */
+  asOfYmd: string;
+  rows: BuffetCountRow[];
+  totals: { bookings: number; adults: number; children: number; total: number };
+};
+
+const BREAKFAST_SKU_CODES = new Set(["REST-BFAST", "RESTBFAST", "BFAST", "BREAKFAST"]);
+const BREAKFAST_NAME_PATTERN = /breakfast/i;
+
+type CandidateBooking = {
+  id: string;
+  mealPlan: string | null;
+  adults: number;
+  children: number;
+  checkIn: Date;
+  checkOut: Date;
+  status: BookingStatus;
+};
+
+/**
+ * Decide which buffet bucket a booking belongs to (or `null` for none).
+ * Pure function — extracted so unit tests can exercise every branch without
+ * touching the database.
+ */
+export function categorizeBookingForBuffet(
+  booking: { mealPlan: string | null | undefined },
+  hasAddedBreakfastToday: boolean
+): BuffetCategory | null {
+  const plan = String(booking.mealPlan ?? "NONE").toUpperCase();
+  if (plan === "BREAKFAST") return "BREAKFAST";
+  if (plan === "HALF_BOARD") return "HALF_BOARD";
+  if (plan === "FULL_BOARD") return "FULL_BOARD";
+  if (hasAddedBreakfastToday) return "ADDED";
+  return null;
+}
+
+function isBreakfastFolioLine(line: { itemCode: string | null; itemName: string; description: string | null }): boolean {
+  const code = (line.itemCode ?? "").trim().toUpperCase();
+  if (code && BREAKFAST_SKU_CODES.has(code)) return true;
+  if (BREAKFAST_NAME_PATTERN.test(line.itemName ?? "")) return true;
+  if (line.description && BREAKFAST_NAME_PATTERN.test(line.description)) return true;
+  return false;
+}
+
+function emptyBuffetRow(category: BuffetCategory): BuffetCountRow {
+  return { category, bookings: 0, adults: 0, children: 0, total: 0 };
+}
+
+/**
+ * Aggregate today's breakfast/buffet expectation for the hotel.
+ *
+ * Eligible booking statuses: CONFIRMED + CHECKED_IN (PENDING / CANCELLED /
+ * NO_SHOW are excluded — matches the chef's "people actually staying with us"
+ * mental model). The hotel-TZ calendar overlap is inclusive of the checkout
+ * date so a guest leaving today still gets breakfast.
+ */
+export async function getBreakfastBuffetCountForToday(
+  hotelId: string,
+  hotelTimezone: string | null | undefined,
+  asOf: Date = new Date()
+): Promise<BreakfastBuffetCount> {
+  const tz = hotelTimezoneOrUtc(hotelTimezone);
+  const ymd = formatYmdInHotelZone(asOf, tz);
+  const dayStartUtc = wallClockLocalToUtc(ymd, "00:00", tz);
+  const dayEndUtc = new Date(dayStartUtc.getTime() + 24 * 3600 * 1000);
+
+  // Wider DB filter on the date columns prunes the result set without forcing
+  // us to compute hotel-TZ ymds inside the query. The post-filter below is the
+  // authoritative overlap check.
+  const candidatesRaw = await prisma.booking.findMany({
+    where: {
+      hotelId,
+      status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+      checkIn: { lt: new Date(dayEndUtc.getTime() + 36 * 3600 * 1000) },
+      checkOut: { gt: new Date(dayStartUtc.getTime() - 36 * 3600 * 1000) }
+    },
+    select: {
+      id: true,
+      mealPlan: true,
+      adults: true,
+      children: true,
+      checkIn: true,
+      checkOut: true,
+      status: true
+    }
+  });
+
+  const eligible: CandidateBooking[] = candidatesRaw.filter((b) => {
+    const cin = formatYmdInHotelZone(b.checkIn, tz);
+    const cout = formatYmdInHotelZone(b.checkOut, tz);
+    return ymd >= cin && ymd <= cout;
+  });
+
+  // Only Room-Only / unset-meal-plan bookings need the folio lookup.
+  const noPlanIds: string[] = eligible
+    .filter((b) => {
+      const plan = String(b.mealPlan ?? "NONE").toUpperCase();
+      return plan !== "BREAKFAST" && plan !== "HALF_BOARD" && plan !== "FULL_BOARD";
+    })
+    .map((b) => b.id);
+
+  const addedBreakfastBookingIds = new Set<string>();
+  if (noPlanIds.length > 0) {
+    const charges = await prisma.folioTransaction.findMany({
+      where: {
+        hotelId,
+        bookingId: { in: noPlanIds },
+        transactionType: FolioTransactionType.FNB_CHARGE,
+        isVoided: false,
+        chargeDate: { gte: dayStartUtc, lt: dayEndUtc }
+      },
+      select: { bookingId: true, itemCode: true, itemName: true, description: true }
+    });
+    for (const c of charges) {
+      if (!c.bookingId) continue;
+      if (isBreakfastFolioLine(c)) addedBreakfastBookingIds.add(c.bookingId);
+    }
+  }
+
+  const acc: Record<BuffetCategory, BuffetCountRow> = {
+    BREAKFAST: emptyBuffetRow("BREAKFAST"),
+    HALF_BOARD: emptyBuffetRow("HALF_BOARD"),
+    FULL_BOARD: emptyBuffetRow("FULL_BOARD"),
+    ADDED: emptyBuffetRow("ADDED")
+  };
+
+  for (const b of eligible) {
+    const adults = Math.max(0, Math.floor(b.adults ?? 0));
+    const children = Math.max(0, Math.floor(b.children ?? 0));
+    const bucket = categorizeBookingForBuffet(b, addedBreakfastBookingIds.has(b.id));
+    if (!bucket) continue;
+    const row = acc[bucket];
+    row.bookings += 1;
+    row.adults += adults;
+    row.children += children;
+    row.total += adults + children;
+  }
+
+  const rows: BuffetCountRow[] = [acc.BREAKFAST, acc.HALF_BOARD, acc.FULL_BOARD, acc.ADDED];
+  const totals = rows.reduce(
+    (s, r) => ({
+      bookings: s.bookings + r.bookings,
+      adults: s.adults + r.adults,
+      children: s.children + r.children,
+      total: s.total + r.total
+    }),
+    { bookings: 0, adults: 0, children: 0, total: 0 }
+  );
+
+  return { asOfYmd: ymd, rows, totals };
 }
