@@ -375,42 +375,6 @@
 
 <script>
   (function () {
-    var formMgmt = document.getElementById("loginFormMgmt");
-    var btnMgmt = document.getElementById("loginBtnMgmt");
-    var formStaff = document.getElementById("loginFormStaff");
-    var btnStaff = document.getElementById("loginBtnStaff");
-    var LABEL_MGMT_LOADING = "Signing in…";
-    var LABEL_MGMT_DEFAULT = "Continue to Workspace";
-    var LABEL_STAFF_LOADING = "Signing in…";
-    var LABEL_STAFF_DEFAULT = "Sign in as Staff";
-
-    function wireSubmitLoading(form, button, loadingLabel, defaultLabel) {
-      if (!form || !button) return;
-      function resetLoadingState() {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-        button.classList.remove("is-loading");
-        button.textContent = defaultLabel;
-        var fs2 = form.querySelector("fieldset");
-        if (fs2) fs2.removeAttribute("aria-busy");
-      }
-      form.addEventListener("submit", function () {
-        if (button.disabled) return;
-        button.disabled = true;
-        button.setAttribute("aria-busy", "true");
-        button.classList.add("is-loading");
-        button.textContent = loadingLabel;
-        var fs = form.querySelector("fieldset");
-        if (fs) fs.setAttribute("aria-busy", "true");
-        window.setTimeout(resetLoadingState, 12000);
-      });
-      window.addEventListener("pageshow", function (ev) {
-        resetLoadingState();
-      });
-    }
-
-    wireSubmitLoading(formMgmt, btnMgmt, LABEL_MGMT_LOADING, LABEL_MGMT_DEFAULT);
-    wireSubmitLoading(formStaff, btnStaff, LABEL_STAFF_LOADING, LABEL_STAFF_DEFAULT);
     requestAnimationFrame(function () {
       var e = document.getElementById("loginId");
       if (e && !e.disabled) e.focus({ preventScroll: true });

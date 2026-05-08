@@ -4971,12 +4971,22 @@ adminRouter.get("/audit-trail", requirePermission("USERS", "VIEW"), async (req, 
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/users", requirePermission("USERS", "CREATE"), async (req, res) => {
+adminRouter.post("/users", requireAuth, async (req, res) => {
   const jsonErr = (status: number, message: string) => {
     if (!res.headersSent) res.status(status).json({ error: message });
   };
 
   try {
+    const session = getSession(req);
+    const canCreateUsers =
+      session != null &&
+      (hasPermission(session.permissions, "USERS", "CREATE") ||
+        (["MANAGER", "OWNER"].includes(String(session.role)) && hasPermission(session.permissions, "USERS", "VIEW")));
+    if (!canCreateUsers) {
+      jsonErr(403, "Your account can view staff but cannot create staff accounts. Ask an owner to grant Users: Create.");
+      return;
+    }
+
     const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
     if (!hotel) {
       jsonErr(404, "Hotel not found.");
