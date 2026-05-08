@@ -1439,9 +1439,151 @@
       /* Selection */
       ::selection { background: rgba(37, 211, 102, 0.3); color: #053b18; }
 
+      /* ===== Polish layer 4: WhatsApp pulse signals + premium hover reveal ===== */
+      /* Pulsing dot on active sidebar tab (green WhatsApp heartbeat) */
+      @keyframes wa-active-dot-pulse {
+        0%   { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.85), 0 0 0 0 rgba(37, 211, 102, 0.7); }
+        50%  { box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.45), 0 0 0 8px rgba(37, 211, 102, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0), 0 0 0 0 rgba(37, 211, 102, 0); }
+      }
+      nav a.top-level-active::after,
+      nav a.active-link::after {
+        content: "";
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #ffffff;
+        box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7);
+        animation: wa-active-dot-pulse 1.6s ease-out infinite;
+      }
+      html[dir="rtl"] nav a.top-level-active::after,
+      html[dir="rtl"] nav a.active-link::after { right: auto; left: 12px; }
+
+      /* Leading green vertical bar on the active sidebar link (slides in) */
+      .sidebar nav a, .sidebar nav button { overflow: hidden; }
+      .sidebar nav a::before, .sidebar nav button::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 8px;
+        bottom: 8px;
+        width: 3px;
+        border-radius: 0 4px 4px 0;
+        background: linear-gradient(180deg, #25d366 0%, #1bb673 100%);
+        transform: scaleY(0);
+        transform-origin: center;
+        transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+        box-shadow: 0 0 12px rgba(37, 211, 102, 0.5);
+      }
+      .sidebar nav a:hover::before, .sidebar nav button:hover::before { transform: scaleY(0.6); }
+      .sidebar nav a.top-level-active::before,
+      .sidebar nav a.active-link::before { transform: scaleY(1); }
+      html[dir="rtl"] .sidebar nav a::before, html[dir="rtl"] .sidebar nav button::before {
+        left: auto; right: 0; border-radius: 4px 0 0 4px;
+      }
+
+      /* Section-tabs: animated underline grow on hover, brighter on active */
+      .section-tabs a { position: relative; overflow: hidden; }
+      .section-tabs a::after {
+        content: "";
+        position: absolute;
+        left: 14px;
+        right: 14px;
+        bottom: 4px;
+        height: 2px;
+        border-radius: 2px;
+        background: linear-gradient(90deg, #25d366, #1bb673);
+        transform: scaleX(0);
+        transform-origin: left center;
+        transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      .section-tabs a:hover::after { transform: scaleX(1); }
+      .section-tabs a.active-link::after { display: none; }
+
+      /* Hover reveal: chevron arrow slides into view on sidebar items */
+      .sidebar nav a, .sidebar nav button {
+        padding-right: 32px !important;
+      }
+      .sidebar nav a > .nav-hover-arrow,
+      .sidebar nav button > .nav-hover-arrow { display: none; }
+      .sidebar nav a:not(.top-level-active):not(.active-link)::after,
+      .sidebar nav button:not(.top-level-active):not(.active-link)::after {
+        content: "›";
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%) translateX(-4px);
+        opacity: 0;
+        font-size: 18px;
+        font-weight: 800;
+        color: rgba(255, 255, 255, 0.85);
+        transition: opacity 0.18s ease, transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+        pointer-events: none;
+      }
+      .sidebar nav a:hover:not(.top-level-active):not(.active-link)::after,
+      .sidebar nav button:hover:not(.top-level-active):not(.active-link)::after {
+        opacity: 1;
+        transform: translateY(-50%) translateX(0);
+      }
+      html[dir="rtl"] .sidebar nav a:not(.top-level-active):not(.active-link)::after,
+      html[dir="rtl"] .sidebar nav button:not(.top-level-active):not(.active-link)::after {
+        right: auto; left: 12px; content: "‹";
+        transform: translateY(-50%) translateX(4px);
+      }
+      html[dir="rtl"] .sidebar nav a:hover:not(.top-level-active):not(.active-link)::after,
+      html[dir="rtl"] .sidebar nav button:hover:not(.top-level-active):not(.active-link)::after {
+        transform: translateY(-50%) translateX(0);
+      }
+
+      /* Bell pulse: stronger green-themed ring (still red when alarm-class set) */
+      @keyframes wa-bell-glow {
+        0%   { box-shadow: 0 0 0 0 rgba(37, 211, 102, 0.55), 0 6px 18px -4px rgba(15, 44, 38, 0.1); }
+        60%  { box-shadow: 0 0 0 12px rgba(37, 211, 102, 0), 0 6px 18px -4px rgba(15, 44, 38, 0.1); }
+        100% { box-shadow: 0 0 0 0 rgba(37, 211, 102, 0), 0 6px 18px -4px rgba(15, 44, 38, 0.1); }
+      }
+      .admin-notif-bell.admin-notif-bell-pulse {
+        border-color: #25d366;
+        animation: wa-bell-glow 1.6s ease-out infinite, admin-notif-bell-pulse-kf 1.6s ease-in-out infinite;
+      }
+      /* Subtle "you have something" hint on the bell badge counter */
+      .admin-notif-badge:not([hidden]) {
+        background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
+        color: #fff;
+        font-weight: 800;
+        box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18), 0 4px 10px rgba(239, 68, 68, 0.32);
+      }
+
+      /* Hover lift on stat cards now also tints the gradient strip slightly more */
+      .stat:hover::before { filter: brightness(1.18); }
+
+      /* Sidebar nav text hint: tiny shift + brightness on hover for affordance */
+      .sidebar nav a, .sidebar nav button {
+        transition: transform 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    background 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    border-color 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    box-shadow 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    color 0.18s cubic-bezier(0.25, 1, 0.5, 1),
+                    padding-left 0.18s cubic-bezier(0.25, 1, 0.5, 1);
+      }
+      .sidebar nav a:hover, .sidebar nav button:hover { padding-left: 18px !important; }
+      html[dir="rtl"] .sidebar nav a:hover, html[dir="rtl"] .sidebar nav button:hover {
+        padding-left: 14px !important; padding-right: 32px !important;
+      }
+
+      /* Top-level-active green active state already exists; ensure dot contrasts well */
+      nav a.top-level-active::after, nav a.active-link::after {
+        background: #053b18;
+      }
+
       /* Reduced motion still wins */
       @media (prefers-reduced-motion: reduce) {
         .grid-4 > .stat, .grid-4 > .card, .grid-2 > .card { animation: none !important; }
+        nav a.top-level-active::after, nav a.active-link::after { animation: none !important; }
+        .admin-notif-bell.admin-notif-bell-pulse { animation: none !important; }
         * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
       }
     </style>
