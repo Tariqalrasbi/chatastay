@@ -357,7 +357,7 @@ export function buildManualCheckInPageHtml(
 .fd-meal-card-desc { font-size: 12px; color: #64748b; line-height: 1.35; }
 </style>
 <div class="fd-checkin-wrap">
-<h2 style="margin-bottom:8px">Manual check-in</h2>
+<h2 style="margin-bottom:8px">Arrivals / check-in</h2>
 <p class="muted" style="margin-top:0;line-height:1.5">${escapeHtml(hotel.displayName)} — Walk-in or phone booking: one room, confirmed stay, board updated. <strong>Tab</strong> moves top-to-bottom; start with guest name.</p>
 <p class="fd-legend"><span class="fd-req">*</span> = required before confirm.</p>
 ${errorMsg ? `<p class="badge" role="alert" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:10px 14px;font-size:14px">${escapeHtml(errorMsg)}</p>` : ""}

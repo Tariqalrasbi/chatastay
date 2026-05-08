@@ -8086,12 +8086,6 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
 <h2>Room Status Board</h2>
 <p class="muted">Front-desk view of room status for the selected date. Click a room for details.</p>
 ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCheckIn}${invoiceErrFromCheckIn}${printInvoiceScript}
-<div class="actions" style="margin-bottom:14px; display:flex; flex-wrap:wrap; gap:8px; align-items:center">
-  <a class="btn-link primary" href="/admin/calendar?start=${formatDateForInput(boardDate)}&days=7">Calendar</a>
-  <a class="btn-link" href="/admin/front-desk/check-in?date=${formatDateForInput(boardDate)}" target="_blank" rel="noopener noreferrer">Manual check-in</a>
-  <a class="btn-link" href="/admin/bookings/search" target="_blank" rel="noopener noreferrer">Find booking</a>
-  <a class="btn-link" href="/admin/front-desk/check-out?date=${formatDateForInput(boardDate)}" target="_blank" rel="noopener noreferrer">Manual check-out</a>
-</div>
 <form method="get" action="/admin/room-board" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px">
   <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
     <span style="font-size:14px; font-weight:600; color:var(--muted)">Date</span>
@@ -8220,7 +8214,7 @@ adminRouter.get("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"),
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
-    res.type("html").send(renderLayout("<h2>Manual check-in</h2><p>No hotel data found.</p>", true));
+    res.type("html").send(renderLayout("<h2>Arrivals / check-in</h2><p>No hotel data found.</p>", true));
     return;
   }
   const defaultDay = parseDateInput(req.query.date, startOfDay(new Date()));
@@ -8677,7 +8671,7 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
     select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
-    res.type("html").send(renderLayout("<h2>Manual check-out</h2><p>No hotel data found.</p>", true));
+    res.type("html").send(renderLayout("<h2>Departures / check-out</h2><p>No hotel data found.</p>", true));
     return;
   }
   const boardDay = parseDateInput(req.query.date, startOfDay(new Date()));
@@ -8757,7 +8751,7 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
   ).join("");
 
   const content = `
-<h2>Manual check-out</h2>
+<h2>Departures / check-out</h2>
 <p class="muted">${escapeHtml(hotel.displayName)} — One-page checkout: identify the guest, review folio, settle payment, then complete checkout and send the room to housekeeping.</p>
 ${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px">${escapeHtml(errorMsg)}</p>` : ""}
 ${settledMsg}
@@ -13421,8 +13415,6 @@ ${errMsg}${noResults}${multiHint}
     <input type="search" name="q" value="${escapeHtml(qRaw)}" autocomplete="off" placeholder="e.g. WS-…, guest name, or phone" style="width:100%; margin-top:4px; padding:10px 12px; border:1px solid #d8dee6; border-radius:10px" autofocus />
   </label>
   <button type="submit" style="padding:10px 18px; border:0; border-radius:10px; background:#128c7e; color:#fff; font-weight:700">Search</button>
-  <a class="btn-link" href="/admin/bookings">Booking report</a>
-  <a class="btn-link" href="/admin/room-board">Room board</a>
 </form>
 ${
   queryOk && bookings.length > 0
@@ -13499,7 +13491,6 @@ adminRouter.get("/guests", requirePermission("BOOKINGS", "VIEW"), async (req, re
   </label>
   <button type="submit" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Search</button>
   <a class="btn-link" href="/admin/guests">Clear</a>
-  <a class="btn-link" href="/admin/bookings/search">Find booking / folio</a>
 </form>
 <table>
   <thead><tr><th>Guest</th><th>Phone</th><th>Email</th><th>Bookings</th><th>Latest stay</th><th>Status</th><th>Latest booking</th></tr></thead>
@@ -13587,8 +13578,6 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
 <p class="muted">${escapeHtml(hotel.displayName)} — Segmentation, VIP, and recent bookings.</p>
 ${savedNotice}
 <div class="actions">
-  <a class="btn-link" href="/admin/bookings/search">Find booking</a>
-  <a class="btn-link" href="/admin/bookings">Booking report</a>
   <a class="btn-link" href="/admin/conversations">Conversations</a>
 </div>
 

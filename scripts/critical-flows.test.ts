@@ -124,43 +124,27 @@ async function main(): Promise<void> {
     return;
   }
 
-  let unit = await prisma.roomUnit.findFirst({
+  const rt = await prisma.roomType.findFirst({
     where: { hotelId: hotel.id, isActive: true },
+    orderBy: { name: "asc" },
+    select: { id: true }
+  });
+  if (!rt) {
+    console.error("No room types for hotel — run prisma seed / bootstrap.");
+    process.exitCode = 1;
+    return;
+  }
+  const unit = await prisma.roomUnit.create({
+    data: {
+      hotelId: hotel.id,
+      roomTypeId: rt.id,
+      name: `CF-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      isActive: true,
+      sortOrder: 999
+    },
     select: { id: true, name: true }
   });
-  if (!unit) {
-    const dormant = await prisma.roomUnit.findFirst({
-      where: { hotelId: hotel.id },
-      select: { id: true }
-    });
-    if (dormant) {
-      await prisma.roomUnit.update({ where: { id: dormant.id }, data: { isActive: true } });
-      unit = await prisma.roomUnit.findUniqueOrThrow({ where: { id: dormant.id }, select: { id: true, name: true } });
-    }
-  }
-  if (!unit) {
-    const rt = await prisma.roomType.findFirst({
-      where: { hotelId: hotel.id, isActive: true },
-      orderBy: { name: "asc" },
-      select: { id: true }
-    });
-    if (!rt) {
-      console.error("No room types for hotel — run prisma seed / bootstrap.");
-      process.exitCode = 1;
-      return;
-    }
-    unit = await prisma.roomUnit.create({
-      data: {
-        hotelId: hotel.id,
-        roomTypeId: rt.id,
-        name: `CF-${Date.now().toString(36)}`,
-        isActive: true,
-        sortOrder: 999
-      },
-      select: { id: true, name: true }
-    });
-    console.log(`[test:critical] created scratch room unit ${unit.name} for front-desk tests`);
-  }
+  console.log(`[test:critical] created scratch room unit ${unit.name} for front-desk tests`);
 
   const app = createHttpApp();
   const agent = request.agent(app);
@@ -354,7 +338,7 @@ async function main(): Promise<void> {
 
   {
     const res = await agent.get("/admin/front-desk/check-in");
-    assert(res.status === 200 && res.text.includes("Manual check-in"), "GET /admin/front-desk/check-in (auth)");
+    assert(res.status === 200 && res.text.includes("Arrivals / check-in"), "GET /admin/front-desk/check-in (auth)");
   }
 
   {
