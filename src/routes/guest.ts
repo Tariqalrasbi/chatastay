@@ -127,6 +127,42 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
       .row { grid-template-columns: 1fr; }
       main { margin: 0; min-height: 100vh; border-radius: 0; border: 0; padding: 14px; }
     }
+
+    /* ===== Polish layer 2: hierarchy, spacing, animations ===== */
+    ::selection { background: rgba(37, 211, 102, 0.32); color: #053b18; }
+    *:focus-visible { outline: 2px solid #25d366; outline-offset: 2px; border-radius: 8px; }
+    main { padding: 32px; }
+    h1, h2 { letter-spacing: -0.03em; }
+    h1 { font-size: clamp(24px, 2vw + 14px, 32px); font-weight: 800; }
+    h2 { font-size: clamp(18px, 0.6vw + 14px, 22px); font-weight: 800; }
+    p, li { line-height: 1.6; }
+    .hero-card { padding: 28px; border-radius: 26px; }
+    .hero-card h1 { font-size: clamp(26px, 3vw + 14px, 36px); }
+    .inline-link { padding: 7px 12px; font-weight: 700; }
+    .inline-link:hover { background: #d9fbe8; }
+    .badge { padding: 5px 11px; letter-spacing: 0.01em; }
+    table { font-size: 13.5px; }
+    th, td { padding: 13px 10px; }
+    tbody tr { transition: background 0.18s ease; }
+    tbody tr:hover { background: #f6fdf9; }
+    label { font-weight: 600; color: #2c3a36; }
+    button { padding: 13px 18px; font-size: 15px; letter-spacing: 0.005em; }
+    button:active:not(:disabled) { transform: translateY(0) scale(0.985); }
+    @keyframes wa-fade-up {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    main { animation: wa-fade-up 0.36s ease-out both; }
+    html { scrollbar-width: thin; scrollbar-color: rgba(7, 94, 84, 0.32) transparent; }
+    body::-webkit-scrollbar { width: 10px; height: 10px; }
+    body::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(37, 211, 102, 0.5), rgba(7, 94, 84, 0.45));
+      border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+    }
+    @media (max-width: 700px) {
+      main { padding: 18px; }
+      .hero-card { padding: 22px; border-radius: 22px; }
+    }
   </style>
   <link rel="stylesheet" href="/static/guest-calendar.css" />
   <script src="/static/guest-calendar.js" defer></script>

@@ -147,6 +147,57 @@ a{color:var(--brand)}
 .empty{text-align:center;padding:44px 16px;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 @media (max-width:560px){.wrap{padding:14px}.hero{padding:28px 18px;border-radius:22px}.hero h1{font-size:30px}.profile-cover{height:180px;border-radius:22px}.room-card{display:block}.room-card .price{text-align:left;margin-top:10px}}
+/* ===== Polish layer 2: spacing, hierarchy, animations, premium SaaS feel ===== */
+::selection{background:rgba(37,211,102,.32);color:#053b18}
+html{scroll-behavior:smooth}
+*:focus-visible{outline:2px solid #25d366;outline-offset:2px;border-radius:8px}
+h1,h2,h3{letter-spacing:-.025em}
+p,li{line-height:1.6}
+.wrap{padding:28px 22px}
+.nav{padding:6px 0 14px}
+.hero{padding:64px 36px;border-radius:32px}
+.hero::before{content:"";position:absolute;left:-90px;bottom:-90px;width:260px;height:260px;border-radius:999px;background:rgba(255,255,255,.08);pointer-events:none}
+.hero h1{margin-bottom:14px;font-size:clamp(32px,5.4vw,58px);max-width:780px}
+.hero p{font-size:18px;line-height:1.55;max-width:680px}
+.search-form{margin-top:26px;padding:14px;border-radius:22px;background:rgba(255,255,255,.18);box-shadow:0 22px 60px rgba(7,68,58,.14)}
+.search-form input,.search-form select,.search-form button{padding:13px 14px;font-size:15px;border-radius:14px}
+.search-form input:hover,.search-form select:hover{border-color:#b9d8cd}
+.search-form button:active,.btn:active,.hotel-card:active{transform:translateY(0) scale(.99)}
+.grid{gap:20px;margin-top:8px}
+.hotel-card{transform:translateZ(0)}
+.hotel-card .cover{position:relative;height:180px;transition:filter .25s ease}
+.hotel-card:hover .cover{filter:saturate(1.08) brightness(1.02)}
+.hotel-card .body{padding:18px 18px 20px}
+.hotel-card h3{font-size:18px;letter-spacing:-.02em}
+.hotel-card .price{margin-top:12px}
+.hotel-card .price strong{font-size:22px}
+.hotel-card a.btn{margin-top:14px;padding:12px 16px}
+.btn{padding:13px 18px;font-size:15px;border-radius:14px;letter-spacing:.005em}
+.btn-primary:hover,.btn-whatsapp:hover{filter:brightness(1.04);box-shadow:0 16px 32px rgba(7,94,84,.22)}
+.profile-cover{position:relative;height:320px;padding:32px;border-radius:32px}
+.profile-cover::after{content:"";position:absolute;inset:auto 0 0 0;height:55%;background:linear-gradient(180deg,transparent 0%,rgba(0,0,0,.55) 100%);pointer-events:none;border-bottom-left-radius:32px;border-bottom-right-radius:32px}
+.profile-cover>*{position:relative;z-index:1}
+.amenity{padding:7px 13px;font-size:12.5px}
+.room-card{padding:18px 0;gap:16px}
+.room-card h3{font-size:17px}
+.room-card .price strong{font-size:22px}
+.card{padding:22px;border-radius:24px}
+.card h2{font-size:19px;margin-bottom:8px}
+.empty{padding:56px 18px;font-size:15px}
+.badge{padding:5px 11px;font-size:11.5px;letter-spacing:.02em}
+@keyframes wa-fade-up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.hero{animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both}
+.card{animation:wa-fade-up .36s ease-out both}
+.hotel-card{animation:wa-fade-up .42s ease-out both}
+.hotel-card:nth-child(2){animation-delay:.04s}
+.hotel-card:nth-child(3){animation-delay:.08s}
+.hotel-card:nth-child(4){animation-delay:.12s}
+.hotel-card:nth-child(5){animation-delay:.16s}
+.hotel-card:nth-child(n+6){animation-delay:.18s}
+html{scrollbar-width:thin;scrollbar-color:rgba(7,94,84,.32) transparent}
+body::-webkit-scrollbar{width:10px;height:10px}
+body::-webkit-scrollbar-thumb{background:linear-gradient(180deg,rgba(37,211,102,.5),rgba(7,94,84,.45));border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+@media (max-width:560px){.wrap{padding:18px}.hero{padding:36px 22px;border-radius:26px}.hero h1{font-size:32px}.hero p{font-size:16px}.profile-cover{height:220px;padding:22px;border-radius:24px}.search-form{padding:8px}.btn{padding:12px 16px}.card{padding:18px;border-radius:20px}}
 `;
 
 function renderShell(opts: {

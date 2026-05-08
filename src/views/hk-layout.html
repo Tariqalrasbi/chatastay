@@ -347,6 +347,34 @@
           padding-top: 8px;
         }
       }
+
+      /* ===== Polish layer 2: hierarchy, spacing, animations ===== */
+      ::selection { background: rgba(37, 211, 102, 0.32); color: #053b18; }
+      *:focus-visible { outline: 2px solid #25d366; outline-offset: 2px; border-radius: 6px; }
+      h1, h2 { font-size: clamp(20px, 1.6vw + 12px, 26px); font-weight: 800; letter-spacing: -0.03em; }
+      .muted { font-size: 13px; line-height: 1.55; }
+      main { padding: 32px 32px 40px; }
+      .panel { padding: 24px 26px; }
+      .hk-topbar { margin-bottom: 14px; }
+      aside nav a { padding: 11px 14px; font-size: 13.5px; font-weight: 600; }
+      aside nav a.active { box-shadow: 0 12px 24px rgba(37, 211, 102, 0.22); }
+      button:active, .btn-link:active { transform: translateY(0) scale(0.985); }
+      input, select, textarea { padding: 11px 13px !important; font-size: 14px; }
+      @keyframes wa-fade-up {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      .panel { animation: wa-fade-up 0.32s ease-out both; }
+      html { scrollbar-width: thin; scrollbar-color: rgba(7, 94, 84, 0.32) transparent; }
+      body::-webkit-scrollbar, .panel::-webkit-scrollbar { width: 10px; height: 10px; }
+      body::-webkit-scrollbar-thumb, .panel::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(37, 211, 102, 0.5), rgba(7, 94, 84, 0.45));
+        border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+      }
+      @media (max-width: 720px) {
+        main { padding: 18px; }
+        .panel { padding: 18px; }
+      }
     </style>
   </head>
   <body{{uiErrorContextAttrs}}>

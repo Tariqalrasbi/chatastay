@@ -999,6 +999,53 @@ function ownerLayout(content: string, authenticated: boolean): string {
         .content { padding: 14px; }
         .panel { padding: 14px; }
       }
+
+      /* ===== Polish layer 2: spacing, hierarchy, animations ===== */
+      ::selection { background: rgba(37, 211, 102, 0.32); color: #053b18; }
+      *:focus-visible { outline: 2px solid #25d366; outline-offset: 2px; border-radius: 6px; }
+      h1 { font-size: clamp(22px, 1.8vw + 12px, 30px); font-weight: 800; line-height: 1.15; letter-spacing: -0.035em; }
+      h2 { font-size: clamp(17px, 0.6vw + 13px, 21px); font-weight: 800; line-height: 1.25; letter-spacing: -0.025em; }
+      h3 { font-size: 14px; font-weight: 800; }
+      p, li { line-height: 1.55; }
+      .muted { font-size: 13px; }
+      .content { padding: 32px 32px 40px; }
+      .panel { padding: 26px 28px; }
+      .panel + .panel { margin-top: 14px; }
+      .actions { gap: 10px; margin: 14px 0 16px; }
+      .btn-link { padding: 9px 14px; }
+      .btn-link:active, button:active { transform: translateY(0) scale(0.985); }
+      .grid-4, .grid-2 { gap: 18px; }
+      .stat { padding: 16px 18px; }
+      .stat h3 { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #64736f; }
+      .stat p { margin-top: 10px; }
+      .stat:hover { transform: translateY(-2px); box-shadow: 0 18px 36px rgba(15, 44, 38, 0.13); }
+      .sidebar { padding: 26px 16px; }
+      nav { gap: 6px; padding-top: 4px; }
+      nav a, nav button { padding: 11px 14px; font-size: 13.5px; font-weight: 600; position: relative; }
+      .owner-topbar { margin-bottom: 14px; }
+      table { font-size: 13.5px; }
+      th, td { padding: 13px 12px; }
+      thead th { background: rgba(245, 251, 248, 0.96); backdrop-filter: blur(8px); }
+      tbody tr { transition: background 0.18s ease; }
+      tbody tr:hover { background: linear-gradient(90deg, #f4fbf7 0%, #ffffff 100%); }
+      label { display: inline-block; font-weight: 600; color: #2c3a36; margin-bottom: 4px; }
+      input, select, textarea { padding: 11px 13px !important; font-size: 14px; }
+      .badge { letter-spacing: 0.01em; padding: 4px 10px; }
+      @keyframes wa-fade-up {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      .panel { animation: wa-fade-up 0.32s ease-out both; }
+      .stat { animation: wa-fade-up 0.36s ease-out both; }
+      .stat:nth-child(2) { animation-delay: 0.04s; }
+      .stat:nth-child(3) { animation-delay: 0.08s; }
+      .stat:nth-child(4) { animation-delay: 0.12s; }
+      html { scrollbar-width: thin; scrollbar-color: rgba(7, 94, 84, 0.32) transparent; }
+      body::-webkit-scrollbar, .panel::-webkit-scrollbar { width: 10px; height: 10px; }
+      body::-webkit-scrollbar-thumb, .panel::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(37, 211, 102, 0.5), rgba(7, 94, 84, 0.45));
+        border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+      }
     </style>
   </head>
   <body>
