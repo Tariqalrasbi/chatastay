@@ -112,7 +112,11 @@ a{color:var(--brand)}
 .nav .brand{display:inline-flex;align-items:center;gap:10px;font-weight:900;font-size:22px;color:var(--brand);text-decoration:none;letter-spacing:-.04em}
 .nav .brand::before{content:"";width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg,#25d366,#b9f7d3);box-shadow:0 12px 26px rgba(37,211,102,.24)}
 .nav .brand-tag{background:var(--mint);color:#075e54;padding:3px 9px;border-radius:999px;font-size:11px;margin-left:4px;letter-spacing:.02em}
+.nav .links{display:flex;gap:9px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .nav .muted{text-decoration:none;font-weight:800}
+.nav .nav-pill{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-weight:900;border:1px solid rgba(7,94,84,.12);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.78);color:var(--brand);box-shadow:0 8px 18px rgba(15,44,38,.05)}
+.nav .nav-pill.hotel{background:linear-gradient(135deg,#075e54,#128c7e);color:#fff;border-color:transparent}
+.nav .nav-pill.traveller{background:linear-gradient(135deg,#dcfce7,#ecfff5);color:#064e46;border-color:#bbf7d0}
 .card{background:rgba(255,255,255,.96);border:1px solid var(--border);border-radius:22px;padding:18px;margin-bottom:16px;box-shadow:var(--shadow-card)}
 .muted{color:var(--muted)}
 .hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#064e46 0%,#128c7e 58%,#25d366 145%);color:#fff;padding:44px 30px;border-radius:28px;margin-bottom:20px;box-shadow:var(--shadow)}
@@ -235,7 +239,12 @@ function renderShell(opts: {
   <div class="wrap">
     <nav class="nav">
       <a class="brand" href="/">ChatAstay<span class="brand-tag">marketplace</span></a>
-      <div><a class="muted" href="/search">Search</a></div>
+      <div class="links">
+        <a class="muted" href="/search">Search</a>
+        <a class="nav-pill hotel" href="/admin/login">Hotel / Partner Extranet</a>
+        <a class="nav-pill traveller" href="/guest/account">Traveller Account</a>
+        <a class="nav-pill" href="/guest/trips">My Trips</a>
+      </div>
     </nav>
     ${opts.body}
   </div>

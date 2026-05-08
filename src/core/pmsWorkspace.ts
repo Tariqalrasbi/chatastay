@@ -36,7 +36,7 @@ export function listAccessibleWorkspaces(role: string, perm: PermissionMatrixLik
     acc.add("front_desk");
   }
 
-  if (matrixRowAllows(perm, "OUTLET", "VIEW") || matrixRowAllows(perm, "BOOKINGS", "VIEW")) {
+  if (role === "RESTAURANT" || matrixRowAllows(perm, "OUTLET", "VIEW")) {
     acc.add("restaurant");
   }
 
@@ -61,6 +61,7 @@ export function inferDefaultWorkspace(role: string, perm: PermissionMatrixLike):
   if (role === "FINANCE") return acc.includes("owner") ? "owner" : acc[0];
   if (role === "MANAGER") return acc.includes("front_desk") ? "front_desk" : acc[0];
   if (role === "FRONTDESK") return acc.includes("front_desk") ? "front_desk" : acc[0];
+  if (role === "RESTAURANT") return acc.includes("restaurant") ? "restaurant" : acc[0];
   if (acc.includes("front_desk")) return "front_desk";
   if (acc.includes("restaurant")) return "restaurant";
   return acc[0];

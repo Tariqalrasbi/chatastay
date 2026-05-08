@@ -14,6 +14,7 @@ enum UserRole {
   FRONTDESK
   FINANCE
   HOUSEKEEPING
+  RESTAURANT
 }
 
 enum MessageDirection {
@@ -663,8 +664,27 @@ model Guest {
   guestFollowUps              GuestFollowUp[]
   marketingCampaignRecipients MarketingCampaignRecipient[]
   feedbacks                   GuestFeedback[]
+  travellerAccounts           TravellerAccount[]
 
   @@unique([hotelId, phoneE164])
+}
+
+/// Public traveller account for website guests. Kept separate from HotelUser so guest login
+/// can never grant PMS/staff access.
+model TravellerAccount {
+  id           String    @id @default(cuid())
+  guestId      String?
+  guest        Guest?    @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  email        String    @unique
+  passwordHash String
+  fullName     String?
+  phoneE164    String?
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([guestId])
 }
 
 /// Targeted WhatsApp campaign (filters JSON + aggregates + per-guest outcomes).

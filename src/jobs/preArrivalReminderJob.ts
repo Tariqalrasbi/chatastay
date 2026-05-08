@@ -1,4 +1,4 @@
-import { BookingStatus, ConversationState, MessageDirection, Prisma } from "@prisma/client";
+import { BookingStatus, ConversationState, MessageDirection, PaymentStatus, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import {
@@ -573,6 +573,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       where: {
         hotelId: hotel.id,
         status: { in: postStayBookingStatuses },
+        paymentStatus: PaymentStatus.SUCCEEDED,
         checkOut: { lte: now }
       },
       select: { id: true }
@@ -604,6 +605,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       where: {
         hotelId: hotel.id,
         status: { in: postStayBookingStatuses },
+        paymentStatus: PaymentStatus.SUCCEEDED,
         guestJourneyPostCheckoutThankYouSentAt: null,
         checkOut: { lte: now }
       },
@@ -692,6 +694,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       where: {
         hotelId: hotel.id,
         status: { in: postStayBookingStatuses },
+        paymentStatus: PaymentStatus.SUCCEEDED,
         guestJourneyReviewRequestSentAt: null,
         guestJourneyPostCheckoutThankYouSentAt: { not: null }
       },
@@ -770,6 +773,7 @@ export async function runGuestJourneyMessagingSweep(): Promise<GuestJourneySweep
       where: {
         hotelId: hotel.id,
         status: { in: postStayBookingStatuses },
+        paymentStatus: PaymentStatus.SUCCEEDED,
         guestJourneyReviewRequestSentAt: { not: null },
         guestJourneyReviewReminderSentAt: null,
         guestJourneyPostCheckoutThankYouSentAt: { not: null },

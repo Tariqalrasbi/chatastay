@@ -410,6 +410,11 @@ function buildNoPermissions(): PermissionMatrix {
 
 function defaultPermissionsForRole(role: string): PermissionMatrix {
   if (role === "MANAGER" || role === "OWNER") return buildFullPermissions();
+  if (role === "RESTAURANT") {
+    const p = buildNoPermissions();
+    p.OUTLET = { VIEW: true, EDIT: true, CREATE: true, DELETE: false, MANAGE: false };
+    return p;
+  }
   if (role === "HOUSEKEEPING") {
     const p = buildNoPermissions();
     p.HOUSEKEEPING = { VIEW: true, EDIT: true, CREATE: false, DELETE: false, MANAGE: false };
@@ -439,6 +444,12 @@ function defaultPermissionsForRole(role: string): PermissionMatrix {
     return p;
   }
   return buildNoPermissions();
+}
+
+function permissionMatrixHasAny(matrix: PermissionMatrix): boolean {
+  return permissionModules.some((moduleName) =>
+    permissionActions.some((action) => matrix[moduleName][action] === true)
+  );
 }
 
 function normalizePermissionMatrix(input: unknown): PermissionMatrix {
@@ -1316,10 +1327,8 @@ function renderLayout(
     !perm ||
     hasPermission(perm, "HOUSEKEEPING", "VIEW") ||
     hasPermission(perm, "ROOMS", "EDIT");
-  const canNavOutlet =
-    !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "ROOMS", "VIEW");
-  const canNavFb =
-    !perm || hasPermission(perm, "OUTLET", "VIEW") || hasPermission(perm, "BOOKINGS", "VIEW");
+  const canNavOutlet = !perm || hasPermission(perm, "OUTLET", "VIEW");
+  const canNavFb = !perm || hasPermission(perm, "OUTLET", "VIEW");
   const canNavComms = !perm || hasPermission(perm, "CONVERSATIONS", "VIEW");
   const canNavBookings = !perm || hasPermission(perm, "BOOKINGS", "VIEW");
   const canNavRooms = !perm || hasPermission(perm, "ROOMS", "VIEW");
@@ -2245,6 +2254,12 @@ export async function sendInvoicePdfForBooking(params: {
       paymentIntentsSucceededTotal
     })
   ]);
+  if (
+    documentKind === "invoice" &&
+    (booking.paymentStatus !== PaymentStatus.SUCCEEDED || folioSummary.outstandingBalance > 0.005)
+  ) {
+    return { sent: false, skipped: true, error: "Invoice is held until payment is fully settled." };
+  }
   const grandTotal = folioSummary.totalCharges;
   const refPrefix = documentKind === "quotation" ? "QUO" : documentKind === "receipt" ? "RCP" : "INV";
   const invoiceNumber = `${refPrefix}-${booking.id}`;
@@ -3338,17 +3353,11 @@ function setProtectedNoStoreHeaders(res: Response): void {
 
 /** Master F&amp;B page: outlet/restaurant staff or reservations — backward compatible with BOOKINGS-only users. */
 function requireFbOperationsView() {
-  return requirePermissionAny([
-    { module: "OUTLET", action: "VIEW" },
-    { module: "BOOKINGS", action: "VIEW" }
-  ]);
+  return requirePermission("OUTLET", "VIEW");
 }
 
 function requireFbOperationsEdit() {
-  return requirePermissionAny([
-    { module: "OUTLET", action: "EDIT" },
-    { module: "BOOKINGS", action: "EDIT" }
-  ]);
+  return requirePermission("OUTLET", "EDIT");
 }
 
 function classifyConversationActivity(
@@ -4177,7 +4186,7 @@ async function authenticateStaffLogin(req: Request, res: Response): Promise<stri
       });
       return null;
     }
-    if (!["FRONTDESK", "HOUSEKEEPING", "STAFF", "OWNER"].includes(String(hotelUser.role))) {
+    if (!["FRONTDESK", "HOUSEKEEPING", "STAFF", "RESTAURANT", "OWNER"].includes(String(hotelUser.role))) {
       recordStaffLoginFailure(req, hotel.id, identifier);
       await prisma.auditLog.create({
         data: {
@@ -4724,7 +4733,7 @@ adminRouter.get("/users", requirePermission("USERS", "VIEW"), async (req, res) =
         .filter((m) => perms[m].MANAGE || perms[m].VIEW || perms[m].EDIT || perms[m].CREATE || perms[m].DELETE)
         .map((m) => permissionModuleLabels[m])
         .join(", ");
-      const roleOptions = ["OWNER", "MANAGER", "STAFF", "FRONTDESK", "FINANCE", "HOUSEKEEPING"]
+      const roleOptions = ["OWNER", "MANAGER", "STAFF", "FRONTDESK", "FINANCE", "HOUSEKEEPING", "RESTAURANT"]
         .map((role) => `<option value="${role}" ${role === roleKey ? "selected" : ""}>${role}</option>`)
         .join("");
       const editFormId = `edit-user-${escapeHtml(user.id)}`;
@@ -4789,6 +4798,7 @@ ${created}${updated}${resetSent}${deleted}${deactivated}${userErrorNotice}
           <option value="FRONTDESK">FRONTDESK</option>
           <option value="FINANCE">FINANCE</option>
           <option value="HOUSEKEEPING">HOUSEKEEPING</option>
+          <option value="RESTAURANT">RESTAURANT / CAFÉ</option>
         </select>
       </label>
     </div>
@@ -4880,9 +4890,7 @@ ${created}${updated}${resetSent}${deleted}${deactivated}${userErrorNotice}
         return;
       }
       if (preset === "RESTAURANT") {
-        setModuleLevel(form, "OUTLET", "admin");
-        setModuleLevel(form, "BOOKINGS", "view");
-        setModuleLevel(form, "ROOMS", "view");
+        setModuleLevel(form, "OUTLET", "operate");
         return;
       }
       if (preset === "FINANCE") {
@@ -5019,11 +5027,13 @@ adminRouter.post("/users", requireAuth, async (req, res) => {
       STAFF: UserRole.STAFF,
       FRONTDESK: UserRole.FRONTDESK,
       FINANCE: UserRole.FINANCE,
-      HOUSEKEEPING: UserRole.HOUSEKEEPING
+      HOUSEKEEPING: UserRole.HOUSEKEEPING,
+      RESTAURANT: "RESTAURANT" as UserRole
     };
 
-    const permissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
     const roleSafe = roleMap[role] ?? UserRole.MANAGER;
+    const parsedPermissions = parsePermissionsFromBody(req.body as Record<string, unknown>);
+    const permissions = permissionMatrixHasAny(parsedPermissions) ? parsedPermissions : defaultPermissionsForRole(roleSafe);
     const pinHash = pin.length >= 4 ? hashPassword(pin) : null;
     const passwordHash = hashPassword(password);
 
@@ -5137,7 +5147,8 @@ adminRouter.post("/users/:id", requirePermission("USERS", "EDIT"), async (req, r
       STAFF: UserRole.STAFF,
       FRONTDESK: UserRole.FRONTDESK,
       FINANCE: UserRole.FINANCE,
-      HOUSEKEEPING: UserRole.HOUSEKEEPING
+      HOUSEKEEPING: UserRole.HOUSEKEEPING,
+      RESTAURANT: "RESTAURANT" as UserRole
     };
     const roleSafe = roleMap[roleRaw] ?? existing.role;
 
@@ -5811,7 +5822,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         hotelId: hotel.id,
         checkIn: { lt: dayEndExclusive },
         checkOut: { gt: dayStart },
-        status: { in: ["CONFIRMED", "PENDING"] }
+        status: { in: ["CONFIRMED", "CHECKED_IN", "PENDING"] }
       },
       include: { guest: true, roomUnit: true },
       orderBy: { checkIn: "asc" }
@@ -8375,6 +8386,28 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
   }
 });
 
+async function getBookingFolioSettlementSnapshot(booking: {
+  id: string;
+  hotelId: string;
+  totalAmount: number;
+  currency: string;
+  paymentStatus: PaymentStatus;
+}) {
+  const paidAgg = await prisma.paymentIntent.aggregate({
+    where: { hotelId: booking.hotelId, bookingId: booking.id, status: PaymentStatus.SUCCEEDED },
+    _sum: { amount: true }
+  });
+  const folio = await getFolioSummary({
+    hotelId: booking.hotelId,
+    bookingId: booking.id,
+    bookingTotalAmount: booking.totalAmount,
+    currency: booking.currency,
+    paymentIntentsSucceededTotal: round2(paidAgg._sum.amount ?? 0)
+  });
+  const isPaid = folio.outstandingBalance <= 0.005 || booking.paymentStatus === PaymentStatus.SUCCEEDED;
+  return { folio, isPaid };
+}
+
 adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
@@ -8386,8 +8419,10 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
   }
   const boardDay = parseDateInput(req.query.date, startOfDay(new Date()));
   const boardDateStr = formatDateForInput(boardDay);
+  const dateEndExclusive = addDays(boardDay, 1);
   const errRaw = typeof req.query.error === "string" ? req.query.error : "";
   const errorMsg = errRaw ? errRaw.slice(0, 500) : "";
+  const settledMsg = req.query.settled ? '<p class="badge ok">Payment recorded. Settlement information updated.</p>' : "";
   const roomTypes = await prisma.roomType.findMany({
     where: { hotelId: hotel.id, isActive: true },
     orderBy: { name: "asc" },
@@ -8397,11 +8432,79 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
     .flatMap((rt) => rt.roomUnits.map((u) => ({ rt, u })))
     .map(({ rt, u }) => `<option value="${escapeHtml(u.id)}">${escapeHtml(u.name)} — ${escapeHtml(rt.name)}</option>`)
     .join("");
+  const checkoutCandidates = await prisma.booking.findMany({
+    where: {
+      hotelId: hotel.id,
+      roomUnitId: { not: null },
+      status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+      checkIn: { lt: dateEndExclusive },
+      checkOut: { gte: boardDay }
+    },
+    include: { guest: true, roomType: true, roomUnit: true, property: true },
+    orderBy: [{ checkOut: "asc" }, { checkIn: "asc" }]
+  });
+  const candidateRows = (
+    await Promise.all(
+      checkoutCandidates.map(async (b) => {
+        const { folio, isPaid } = await getBookingFolioSettlementSnapshot(b);
+        const guestName = b.guest.fullName || b.guest.phoneE164 || "Guest";
+        const outstanding = `${folio.outstandingBalance.toFixed(2)} ${escapeHtml(folio.currency)}`;
+        return `<tr>
+          <td><strong>${escapeHtml(guestName)}</strong><br /><span class="muted">${escapeHtml(b.guest.phoneE164)}</span></td>
+          <td>${escapeHtml(b.roomUnit?.name ?? "Unassigned")}<br /><span class="muted">${escapeHtml(b.roomType.name)}</span></td>
+          <td>${escapeHtml(displayBookingReference(b))}<br /><span class="muted">${escapeHtml(b.source)}</span></td>
+          <td>${escapeHtml(formatDateTime(b.checkIn))}</td>
+          <td>${escapeHtml(formatDateTime(b.checkOut))}</td>
+          <td><span class="badge ${isPaid ? "ok" : "pending"}">${escapeHtml(b.paymentStatus)}</span><br /><strong>${outstanding}</strong></td>
+          <td>
+            <details>
+              <summary>Folio / settlement</summary>
+              <div style="display:grid;gap:8px;margin-top:8px;min-width:260px">
+                <div>Room charges: <strong>${folio.roomChargesTotal.toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Meal plan / F&amp;B: <strong>${(folio.fbMenuSubtotal + folio.fnbTotal).toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Activities/services/extras: <strong>${(folio.activitiesTotal + folio.extrasTotal).toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Discounts: <strong>${folio.discountsTotal.toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Taxes/fees: <strong>${folio.taxTotal.toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Total expenses: <strong>${folio.totalCharges.toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Paid amount: <strong>${folio.paidBalance.toFixed(2)} ${escapeHtml(folio.currency)}</strong></div>
+                <div>Outstanding: <strong>${outstanding}</strong></div>
+                ${
+                  isPaid
+                    ? '<span class="badge ok">Ready for final checkout</span>'
+                    : `<form method="post" action="/admin/front-desk/check-out/settle" style="display:grid;gap:6px;margin-top:4px">
+                        <input type="hidden" name="bookingId" value="${escapeHtml(b.id)}" />
+                        <input type="hidden" name="date" value="${escapeHtml(boardDateStr)}" />
+                        <label>Amount <input type="number" min="0.001" step="0.001" name="amount" value="${folio.outstandingBalance.toFixed(3)}" /></label>
+                        <label>Method <select name="folioPaymentMethod"><option>CASH</option><option>CARD</option><option>TRANSFER</option><option>POS</option><option>OTHER</option></select></label>
+                        <label>Reference <input name="referenceNumber" placeholder="POS / bank ref" /></label>
+                        <button type="submit">Mark payment settled</button>
+                      </form>`
+                }
+              </div>
+            </details>
+            <form method="post" action="/admin/front-desk/check-out" style="margin-top:8px;display:grid;gap:6px">
+              <input type="hidden" name="roomUnitId" value="${escapeHtml(b.roomUnitId ?? "")}" />
+              <input type="hidden" name="departureDate" value="${escapeHtml(formatDateForInput(b.checkOut))}" />
+              <button type="submit" ${isPaid ? "" : "disabled"}>${isPaid ? "Complete checkout" : "Settle payment first"}</button>
+            </form>
+          </td>
+        </tr>`;
+      })
+    )
+  ).join("");
 
   const content = `
 <h2>Manual check-out</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — Record departure: shortens an active stay (releases future nights in inventory), updates the room charge (prorated minus any staff discount), and marks the room for housekeeping. The action is logged with your staff account.</p>
+<p class="muted">${escapeHtml(hotel.displayName)} — One-page checkout: identify the guest, review folio, settle payment, then complete checkout and send the room to housekeeping.</p>
 ${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px">${escapeHtml(errorMsg)}</p>` : ""}
+${settledMsg}
+<section style="margin:12px 0 18px">
+  <h3>Departures and active stays</h3>
+  <table>
+    <thead><tr><th>Guest</th><th>Room</th><th>Reservation</th><th>Check-in</th><th>Expected departure</th><th>Payment</th><th>Settlement / checkout</th></tr></thead>
+    <tbody>${candidateRows || '<tr><td colspan="7">No assigned active stays found for this date.</td></tr>'}</tbody>
+  </table>
+</section>
 <form method="post" action="/admin/front-desk/check-out" style="max-width:640px;display:grid;gap:12px">
   <label>Room unit <span style="color:#b91c1c">*</span>
     <select name="roomUnitId" required style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">
@@ -8428,6 +8531,63 @@ ${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-ra
   </div>
 </form>`;
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/front-desk/check-out/settle", requirePermission("ROOMS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  const date = String(req.body.date ?? "").trim() || formatDateForInput(new Date());
+  const errRedirect = (msg: string) => {
+    res.redirect(`/admin/front-desk/check-out?date=${encodeURIComponent(date)}&error=${encodeURIComponent(msg)}`);
+  };
+  if (!hotel) {
+    errRedirect("Hotel not found.");
+    return;
+  }
+  const bookingId = String(req.body.bookingId ?? "").trim();
+  const amountRaw = parseFloat(String(req.body.amount ?? ""));
+  if (!bookingId || !Number.isFinite(amountRaw) || amountRaw <= 0) {
+    errRedirect("Enter a valid settlement amount.");
+    return;
+  }
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    include: { guest: true, roomType: true }
+  });
+  if (!booking) {
+    errRedirect("Booking not found for settlement.");
+    return;
+  }
+  const session = getSession(req);
+  const amount = round2(amountRaw);
+  await postPaymentToFolio(prisma, {
+    hotelId: hotel.id,
+    bookingId: booking.id,
+    guestId: booking.guestId,
+    roomUnitId: booking.roomUnitId,
+    roomTypeId: booking.roomTypeId,
+    currency: booking.currency,
+    staffId: session?.staffId ?? null,
+    amount,
+    folioPaymentMethod: String(req.body.folioPaymentMethod ?? "CASH").trim().slice(0, 48) || "CASH",
+    postingTarget: parsePostingTarget("BOOKING_ACCOUNT"),
+    chargeDate: new Date(),
+    referenceNumber: String(req.body.referenceNumber ?? "").trim().slice(0, 120) || null,
+    notes: "Final checkout settlement",
+    sourceType: FolioTxnSourceType.MANUAL_FRONTDESK,
+    allocateFifo: true
+  });
+  const { isPaid } = await getBookingFolioSettlementSnapshot(booking);
+  if (isPaid) {
+    await prisma.booking.update({ where: { id: booking.id }, data: { paymentStatus: PaymentStatus.SUCCEEDED } });
+  }
+  await logAudit({
+    hotelId: hotel.id,
+    action: "FRONT_DESK_CHECKOUT_PAYMENT_SETTLED",
+    entityType: "Booking",
+    entityId: booking.id,
+    metadata: { amount, method: String(req.body.folioPaymentMethod ?? "CASH"), reference: String(req.body.referenceNumber ?? "") }
+  });
+  res.redirect(`/admin/front-desk/check-out?date=${encodeURIComponent(date)}&settled=1`);
 });
 
 adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
@@ -8468,6 +8628,26 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
   const executedByEmail = staffSession?.email ?? "unknown";
 
   try {
+    const paymentBooking = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomUnitId: unit.id,
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        checkIn: { lte: departureDate },
+        checkOut: { gte: departureDate }
+      },
+      orderBy: { checkIn: "asc" }
+    });
+    if (paymentBooking) {
+      const { isPaid, folio } = await getBookingFolioSettlementSnapshot(paymentBooking);
+      if (!isPaid) {
+        errRedirect(
+          `Checkout cannot be completed until the outstanding balance is settled. Outstanding balance: ${folio.outstandingBalance.toFixed(2)} ${folio.currency}.`
+        );
+        return;
+      }
+    }
+
     let auditBookingId: string | undefined;
     let hkFromCheckout: { created: boolean; taskId: string | null } = { created: false, taskId: null };
     let auditMetadata: Record<string, unknown> = {
@@ -8486,7 +8666,7 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
           roomUnitId: unit.id,
           status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
           checkIn: { lte: departureDate },
-          checkOut: { gt: departureDate }
+          checkOut: { gte: departureDate }
         },
         orderBy: { checkIn: "asc" }
       });
@@ -8498,8 +8678,8 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
         if (newCheckOut.getTime() < checkInDay.getTime()) {
           throw new Error("Departure cannot be before check-in.");
         }
-        if (newCheckOut.getTime() >= oldCheckOut.getTime()) {
-          throw new Error("Departure must be before the scheduled checkout date (pick an earlier day).");
+        if (newCheckOut.getTime() > oldCheckOut.getTime()) {
+          throw new Error("Departure cannot be after the scheduled checkout date.");
         }
         const priorNights = Math.round((oldCheckOut.getTime() - checkInDay.getTime()) / 86400000);
         if (priorNights < 1) {
@@ -8521,13 +8701,15 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
           }
         });
 
-        await releaseInventoryForStayRange({
-          tx,
-          roomTypeId: booking.roomTypeId,
-          start: newCheckOut,
-          endExclusive: oldCheckOut,
-          rooms: 1
-        });
+        if (newCheckOut.getTime() < oldCheckOut.getTime()) {
+          await releaseInventoryForStayRange({
+            tx,
+            roomTypeId: booking.roomTypeId,
+            start: newCheckOut,
+            endExclusive: oldCheckOut,
+            rooms: 1
+          });
+        }
 
         auditBookingId = booking.id;
         auditMetadata = {
@@ -10780,7 +10962,13 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
+adminRouter.post(
+  "/room-board/unit/:unitId/folio/charge",
+  requirePermissionAnyJson([
+    { module: "ROOMS", action: "EDIT" },
+    { module: "OUTLET", action: "CREATE" }
+  ]),
+  async (req, res) => {
   try {
     const staffId = requireHotelStaffIdForFolioJson(req, res);
     if (staffId === null) return;
@@ -10923,7 +11111,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
     });
     await createRoleRoutedNotification({
       hotelId: hotel.id,
-      roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER, UserRole.STAFF],
+      roles: [UserRole.FRONTDESK, UserRole.MANAGER, UserRole.OWNER, UserRole.STAFF, "RESTAURANT" as UserRole],
       title: "Guest folio charge posted",
       body: `${itemName} (${qty}×) — ${displayBookingReference(booking)} on room folio.`,
       category: "payments",
@@ -10937,7 +11125,8 @@ adminRouter.post("/room-board/unit/:unitId/folio/charge", requirePermissionJson(
   } catch (e) {
     res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Failed to post charge" });
   }
-});
+  }
+);
 
 adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
   try {
@@ -10968,7 +11157,7 @@ adminRouter.post("/room-board/unit/:unitId/folio/payment", requirePermissionJson
         roomUnitId: unit.id,
         checkIn: { lt: dateEndExclusive },
         checkOut: { gt: boardDate },
-        status: { in: ["CONFIRMED", "PENDING"] }
+        status: { in: ["CONFIRMED", "CHECKED_IN", "PENDING"] }
       }
     });
     if (!booking) {
@@ -15406,7 +15595,7 @@ function outletTicketWhatsappBadgeHtml(t: {
   return `<span class="outlet-wa outlet-wa-unk" title="No notify attempt recorded yet">WhatsApp —</span>`;
 }
 
-adminRouter.get("/restaurant-ops", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (_req, res) => {
+adminRouter.get("/restaurant-ops", requirePermission("OUTLET", "VIEW"), async (_req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { displayName: true } });
   const title = hotel?.displayName ?? "Hotel";
   const content = `
@@ -16346,7 +16535,7 @@ adminRouter.post("/housekeeping/task/:taskId/complete", requirePermissionAny([{ 
   res.redirect("/admin/housekeeping");
 });
 
-adminRouter.get("/outlet-dashboard", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (req, res) => {
+adminRouter.get("/outlet-dashboard", requirePermission("OUTLET", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
@@ -16559,7 +16748,7 @@ ${errBanner}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/outlet-orders", requirePermissionAny([{ module: "OUTLET", action: "VIEW" }, { module: "ROOMS", action: "VIEW" }]), async (req, res) => {
+adminRouter.get("/outlet-orders", requirePermission("OUTLET", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     select: { id: true, displayName: true, currency: true }
@@ -16706,7 +16895,7 @@ ${errBanner}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/outlet-orders/:ticketId/status", requirePermissionAny([{ module: "OUTLET", action: "EDIT" }, { module: "ROOMS", action: "EDIT" }]), async (req, res) => {
+adminRouter.post("/outlet-orders/:ticketId/status", requirePermission("OUTLET", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/outlet-dashboard");

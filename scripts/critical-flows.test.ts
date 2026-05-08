@@ -327,7 +327,7 @@ async function main(): Promise<void> {
       guest: { fullName: "Critical Flow Walk-in" }
     },
     orderBy: { createdAt: "desc" },
-    select: { id: true }
+    select: { id: true, totalAmount: true, currency: true }
   });
   assert(manualBooking, "Prisma: manual check-in booking exists for walk-in guest (CHECKED_IN or CONFIRMED)");
 
@@ -337,6 +337,34 @@ async function main(): Promise<void> {
       departureDate: ymdLocal(departureEarly),
       departureTime: "",
       departureReason: "critical-flows test early checkout",
+      discountAmount: ""
+    });
+    assert(
+      res.status === 302 && String(res.headers.location ?? "").includes("outstanding%20balance"),
+      "POST /admin/front-desk/check-out blocks unpaid checkout"
+    );
+  }
+
+  if (manualBooking) {
+    const settle = await agent.post("/admin/front-desk/check-out/settle").type("form").send({
+      bookingId: manualBooking.id,
+      date: ymdLocal(departureEarly),
+      amount: String(manualBooking.totalAmount),
+      folioPaymentMethod: "CASH",
+      referenceNumber: "critical-flow-settlement"
+    });
+    assert(
+      settle.status === 302 && String(settle.headers.location ?? "").includes("settled=1"),
+      "POST /admin/front-desk/check-out/settle records checkout payment"
+    );
+  }
+
+  {
+    const res = await agent.post("/admin/front-desk/check-out").type("form").send({
+      roomUnitId: unit.id,
+      departureDate: ymdLocal(departureEarly),
+      departureTime: "",
+      departureReason: "critical-flows test early checkout after settlement",
       discountAmount: ""
     });
     assert(res.status === 302 && String(res.headers.location ?? "").includes("manualCheckOut=1"), "POST /admin/front-desk/check-out redirects with success flag");

@@ -34,6 +34,10 @@
         color: #fff;
         padding: 22px 16px;
         box-shadow: 6px 0 24px rgba(7, 94, 84, 0.18);
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow: auto;
       }
       .brand {
         display: flex;
@@ -150,9 +154,17 @@
         flex: 1;
       }
       .sidebar-logout {
+        position: sticky;
+        bottom: 0;
         margin-top: 12px;
-        padding-top: 10px;
+        padding: 10px 0 2px;
         border-top: 1px solid rgba(255, 255, 255, 0.2);
+        background: linear-gradient(180deg, rgba(18, 140, 126, 0), rgba(7, 94, 84, 0.96) 22%);
+        backdrop-filter: blur(10px);
+      }
+      .sidebar-logout form,
+      .sidebar-logout button {
+        width: 100%;
       }
       /* Property switcher (top of sidebar). Hidden until JS detects multi-property access. */
       .sidebar-property-switch {

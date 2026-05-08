@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { ChannelProvider } from "@prisma/client";
+import crypto from "node:crypto";
+import { ChannelProvider, GuestFeedbackStatus, PaymentStatus, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
 import { createBookingPaymentLink } from "../core/bookingPayments";
@@ -13,6 +14,7 @@ import {
 import { formatHotelOfferDetails, readActiveHotelOffers } from "../core/hotelOffers";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
+import { hashPassword, verifyPassword } from "../core/authSecurity";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
 
 export const guestRouter = Router();
@@ -41,6 +43,58 @@ function addDays(input: Date, days: number): Date {
 }
 
 const defaultHotelSlug = process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort";
+const travellerCookieName = "chatastay_traveller_session";
+const travellerSessionSecret = process.env.TRAVELLER_SESSION_SECRET ?? process.env.ADMIN_SESSION_SECRET ?? "dev-traveller-secret";
+
+function signTravellerSession(accountId: string): string {
+  const payload = `${accountId}.${Date.now()}`;
+  const sig = crypto.createHmac("sha256", travellerSessionSecret).update(payload).digest("hex");
+  return `${payload}.${sig}`;
+}
+
+function verifyTravellerSession(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length !== 3) return null;
+  const payload = `${parts[0]}.${parts[1]}`;
+  const expected = crypto.createHmac("sha256", travellerSessionSecret).update(payload).digest("hex");
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(parts[2], "hex");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  return parts[0] || null;
+}
+
+function readCookie(req: { headers: { cookie?: string } }, name: string): string | undefined {
+  const raw = req.headers.cookie ?? "";
+  return raw
+    .split(";")
+    .map((p) => p.trim())
+    .find((p) => p.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+}
+
+async function getTravellerAccount(req: { headers: { cookie?: string } }) {
+  const accountId = verifyTravellerSession(readCookie(req, travellerCookieName));
+  if (!accountId) return null;
+  return prisma.travellerAccount.findFirst({
+    where: { id: accountId, isActive: true },
+    include: { guest: true }
+  });
+}
+
+function setTravellerCookie(res: { setHeader(name: string, value: string): void }, accountId: string): void {
+  res.setHeader(
+    "Set-Cookie",
+    `${travellerCookieName}=${signTravellerSession(accountId)}; HttpOnly; Path=/guest; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax`
+  );
+}
+
+function clearTravellerCookie(res: { setHeader(name: string, value: string): void }): void {
+  res.setHeader(
+    "Set-Cookie",
+    `${travellerCookieName}=; HttpOnly; Path=/guest; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax`
+  );
+}
 
 function normalizeMealPlan(raw: unknown): MealPlanCode {
   const value = String(raw ?? "NONE").toUpperCase();
@@ -76,6 +130,25 @@ function formatMonthKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function normalizeEmail(input: unknown): string {
+  return String(input ?? "").trim().toLowerCase();
+}
+
+function redirectToTravellerLogin(res: { redirect(url: string): void }, next: string = "/guest/trips"): void {
+  res.redirect(`/guest/account/login?next=${encodeURIComponent(next)}`);
+}
+
+function travellerBookingWhereClauses(account: {
+  guestId?: string | null;
+  email: string;
+  phoneE164?: string | null;
+}): Prisma.BookingWhereInput[] {
+  const clauses: Prisma.BookingWhereInput[] = [{ guest: { email: account.email } }];
+  if (account.guestId) clauses.push({ guestId: account.guestId });
+  if (account.phoneE164) clauses.push({ guest: { phoneE164: account.phoneE164 } });
+  return clauses;
+}
+
 function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
   const dir = lang === "ar" ? "rtl" : "ltr";
   return `<!doctype html>
@@ -92,6 +165,11 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
     .muted { color: #475569; }
     .inline-link { color:#0b6e6e; font-weight: 700; text-decoration: none; padding: 6px 10px; border-radius: 999px; background: #ecfff5; border:1px solid #bbf7d0; }
     .inline-link:hover { text-decoration: underline; }
+    .guest-topbar { max-width: 900px; margin: 18px auto -8px; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:0 6px; }
+    .guest-topbar .brand { color:#075e54; font-weight:900; text-decoration:none; letter-spacing:-.03em; }
+    .guest-topbar .links { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .guest-topbar a, .guest-topbar button { color:#075e54; background:#ecfff5; border:1px solid #bbf7d0; border-radius:999px; padding:7px 11px; font-weight:800; text-decoration:none; font:inherit; cursor:pointer; box-shadow:none; }
+    .guest-topbar a.hotel-login { background:linear-gradient(135deg,#075e54,#128c7e); color:#fff; border-color:transparent; }
     .badge { display:inline-block; padding:4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
     .ok { background:#dcfce7; color:#166534; }
     .pending { background:#fef9c3; color:#854d0e; }
@@ -236,10 +314,246 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
   <script src="/static/guest-calendar.js" defer></script>
 </head>
 <body>
+  <div class="guest-topbar">
+    <a class="brand" href="/">ChatAstay</a>
+    <div class="links">
+      <a class="hotel-login" href="/admin/login">Hotel / Partner Extranet</a>
+      <a href="/guest/account">Traveller Login</a>
+      <a href="/guest/trips">My Trips</a>
+    </div>
+  </div>
   <main>${content}</main>
 </body>
 </html>`;
 }
+
+guestRouter.get("/account", async (req, res) => {
+  const account = await getTravellerAccount(req);
+  if (account) {
+    res.redirect("/guest/trips");
+    return;
+  }
+  const content = `
+<section class="hero-card">
+  <h1>Traveller Account</h1>
+  <p>Save your details, view booking history, manage My Trips, and leave post-stay reviews after checkout.</p>
+</section>
+<div class="row">
+  <article>
+    <h2>Traveller Login</h2>
+    <p class="muted">For guests and repeat travellers.</p>
+    <p><a class="inline-link" href="/guest/account/login">Login to My Trips</a></p>
+  </article>
+  <article>
+    <h2>Create Traveller Account</h2>
+    <p class="muted">Create a guest account separate from hotel staff access.</p>
+    <p><a class="inline-link" href="/guest/account/register">Create account</a></p>
+  </article>
+</div>
+<p class="muted" style="margin-top:14px">Hotel teams should use <a href="/admin/login">Hotel / Partner Extranet Login</a>.</p>`;
+  res.type("html").send(guestLayout(content));
+});
+
+guestRouter.get("/account/register", (_req, res) => {
+  const content = `
+<h1>Create Traveller Account</h1>
+<p class="muted">Use this account for My Trips, loyalty, saved details, booking history, and reviews.</p>
+<form method="post" action="/guest/account/register">
+  <label>Full name <input name="fullName" required autocomplete="name" /></label>
+  <label>Email <input name="email" type="email" required autocomplete="email" /></label>
+  <label>Phone / WhatsApp number <input name="phone" autocomplete="tel" placeholder="9689XXXXXXX" /></label>
+  <label>Password <input name="password" type="password" minlength="8" required autocomplete="new-password" /></label>
+  <button type="submit">Create Traveller Account</button>
+</form>
+<p><a href="/guest/account/login">Already have an account? Login</a></p>`;
+  res.type("html").send(guestLayout(content));
+});
+
+guestRouter.post("/account/register", async (req, res) => {
+  const fullName = String(req.body.fullName ?? "").trim().slice(0, 160);
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(String(req.body.phone ?? ""));
+  const password = String(req.body.password ?? "");
+  if (!fullName || !email || password.length < 8) {
+    res.type("html").status(400).send(guestLayout(`<h1>Create Traveller Account</h1><p class="badge alert">Name, valid email, and an 8+ character password are required.</p><p><a href="/guest/account/register">Try again</a></p>`));
+    return;
+  }
+  const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
+  const normalizedPhone = phone ? `+${phone}` : "";
+  const guest =
+    hotel && normalizedPhone
+      ? await prisma.guest.upsert({
+          where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedPhone } },
+          update: { fullName, email },
+          create: { hotelId: hotel.id, phoneE164: normalizedPhone, fullName, email }
+        })
+      : null;
+  try {
+    const account = await prisma.travellerAccount.create({
+      data: {
+        guestId: guest?.id ?? null,
+        email,
+        fullName,
+        phoneE164: normalizedPhone || null,
+        passwordHash: await hashPassword(password)
+      }
+    });
+    setTravellerCookie(res, account.id);
+    res.redirect("/guest/trips?created=1");
+  } catch {
+    res.type("html").status(409).send(guestLayout(`<h1>Create Traveller Account</h1><p class="badge alert">A traveller account already exists for this email.</p><p><a href="/guest/account/login">Login instead</a></p>`));
+  }
+});
+
+guestRouter.get("/account/login", (req, res) => {
+  const next = typeof req.query.next === "string" ? req.query.next : "/guest/trips";
+  const content = `
+<h1>Traveller Login</h1>
+<p class="muted">For guests. Hotel staff should use the Partner Extranet login.</p>
+<form method="post" action="/guest/account/login">
+  <input type="hidden" name="next" value="${escapeHtml(next)}" />
+  <label>Email <input name="email" type="email" required autocomplete="email" /></label>
+  <label>Password <input name="password" type="password" required autocomplete="current-password" /></label>
+  <button type="submit">Login to My Trips</button>
+</form>
+<p><a href="/guest/account/register">Create Traveller Account</a> · <a href="/admin/login">Hotel / Partner Extranet Login</a></p>`;
+  res.type("html").send(guestLayout(content));
+});
+
+guestRouter.post("/account/login", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password ?? "");
+  const next = String(req.body.next ?? "/guest/trips");
+  const account = await prisma.travellerAccount.findUnique({ where: { email } });
+  if (!account?.isActive || !(await verifyPassword(password, account.passwordHash))) {
+    res.type("html").status(401).send(guestLayout(`<h1>Traveller Login</h1><p class="badge alert">Invalid email or password.</p><p><a href="/guest/account/login">Try again</a></p>`));
+    return;
+  }
+  await prisma.travellerAccount.update({ where: { id: account.id }, data: { lastLoginAt: new Date() } });
+  setTravellerCookie(res, account.id);
+  res.redirect(next.startsWith("/guest/") ? next : "/guest/trips");
+});
+
+guestRouter.post("/account/logout", (_req, res) => {
+  clearTravellerCookie(res);
+  res.redirect("/guest/account/login");
+});
+
+guestRouter.get("/trips", async (req, res) => {
+  const account = await getTravellerAccount(req);
+  if (!account) {
+    redirectToTravellerLogin(res, "/guest/trips");
+    return;
+  }
+  const bookings = await prisma.booking.findMany({
+    where: { OR: travellerBookingWhereClauses(account) },
+    include: { hotel: true, property: true, roomType: true, guest: true, feedbacks: true },
+    orderBy: { checkIn: "desc" },
+    take: 30
+  });
+  const now = new Date();
+  const rows = bookings
+    .map((b) => {
+      const paid = b.paymentStatus === PaymentStatus.SUCCEEDED;
+      const checkedOut = b.checkOut <= now;
+      const canReview = paid && checkedOut;
+      const hasReview = b.feedbacks.length > 0;
+      return `<tr>
+        <td>${escapeHtml(b.referenceCode || b.id)}</td>
+        <td>${escapeHtml(b.hotel.displayName)}</td>
+        <td>${escapeHtml(b.roomType.name)}</td>
+        <td>${formatDate(b.checkIn)} → ${formatDate(b.checkOut)}</td>
+        <td><span class="badge ${b.status === "CONFIRMED" || b.status === "CHECKED_IN" ? "ok" : "pending"}">${escapeHtml(b.status)}</span></td>
+        <td><span class="badge ${paid ? "ok" : "pending"}">${escapeHtml(b.paymentStatus)}</span></td>
+        <td>${canReview && !hasReview ? `<a class="inline-link" href="/guest/review/${encodeURIComponent(b.id)}">Leave review</a>` : hasReview ? "Review received" : "Review after paid checkout"}</td>
+      </tr>`;
+    })
+    .join("");
+  const content = `
+<h1>My Trips</h1>
+<p class="muted">Signed in as ${escapeHtml(account.fullName || account.email)}.</p>
+<form method="post" action="/guest/account/logout" style="display:inline"><button type="submit">Logout</button></form>
+<table>
+  <thead><tr><th>Reference</th><th>Hotel</th><th>Room</th><th>Stay</th><th>Status</th><th>Payment</th><th>Review</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="7">No trips found yet. Future website bookings will appear here.</td></tr>'}</tbody>
+</table>`;
+  res.type("html").send(guestLayout(content));
+});
+
+guestRouter.get("/review/:bookingId", async (req, res) => {
+  const account = await getTravellerAccount(req);
+  if (!account) {
+    redirectToTravellerLogin(res, `/guest/review/${encodeURIComponent(String(req.params.bookingId ?? ""))}`);
+    return;
+  }
+  const booking = await prisma.booking.findFirst({
+    where: {
+      id: String(req.params.bookingId ?? ""),
+      paymentStatus: PaymentStatus.SUCCEEDED,
+      checkOut: { lte: new Date() },
+      OR: travellerBookingWhereClauses(account)
+    },
+    include: { hotel: true, roomType: true, guest: true, feedbacks: true }
+  });
+  if (!booking) {
+    res.status(404).type("html").send(guestLayout("<h1>Review unavailable</h1><p class=\"badge alert\">Reviews open only after paid checkout.</p>"));
+    return;
+  }
+  const existing = booking.feedbacks[0];
+  const content = `
+<h1>Review your stay</h1>
+<p class="muted">${escapeHtml(booking.hotel.displayName)} · ${escapeHtml(booking.roomType.name)} · ${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)}</p>
+${existing ? '<p class="badge ok">Review already received. You can update it below.</p>' : ""}
+<form method="post" action="/guest/review/${encodeURIComponent(booking.id)}">
+  <label>Rating
+    <select name="rating" required>
+      ${[5, 4, 3, 2, 1].map((n) => `<option value="${n}" ${existing?.rating === n ? "selected" : ""}>${n} star${n === 1 ? "" : "s"}</option>`).join("")}
+    </select>
+  </label>
+  <label>Comment <textarea name="comment" maxlength="2000">${escapeHtml(existing?.comment ?? "")}</textarea></label>
+  <button type="submit">Submit review</button>
+</form>`;
+  res.type("html").send(guestLayout(content));
+});
+
+guestRouter.post("/review/:bookingId", async (req, res) => {
+  const account = await getTravellerAccount(req);
+  if (!account) {
+    redirectToTravellerLogin(res, `/guest/review/${encodeURIComponent(String(req.params.bookingId ?? ""))}`);
+    return;
+  }
+  const rating = Math.min(5, Math.max(1, parseIntSafe(req.body.rating, 5, 1, 5)));
+  const comment = String(req.body.comment ?? "").trim().slice(0, 2000) || null;
+  const booking = await prisma.booking.findFirst({
+    where: {
+      id: String(req.params.bookingId ?? ""),
+      paymentStatus: PaymentStatus.SUCCEEDED,
+      checkOut: { lte: new Date() },
+      OR: travellerBookingWhereClauses(account)
+    },
+    include: { guest: true }
+  });
+  if (!booking) {
+    res.status(403).type("html").send(guestLayout("<h1>Review unavailable</h1><p class=\"badge alert\">Reviews open only after paid checkout.</p>"));
+    return;
+  }
+  const existing = await prisma.guestFeedback.findFirst({ where: { hotelId: booking.hotelId, bookingId: booking.id } });
+  const data = {
+    hotelId: booking.hotelId,
+    bookingId: booking.id,
+    guestId: booking.guestId,
+    guestName: booking.guest.fullName ?? account.fullName ?? account.email,
+    rating,
+    comment,
+    status: GuestFeedbackStatus.COMPLETED,
+    isHappyGuest: rating >= 4,
+    isPromoter: rating >= 5,
+    isIssueCase: rating <= 2
+  };
+  if (existing) await prisma.guestFeedback.update({ where: { id: existing.id }, data });
+  else await prisma.guestFeedback.create({ data });
+  res.redirect("/guest/trips?review=1");
+});
 
 guestRouter.get("/", async (req, res) => {
   const bookingId = typeof req.query.bookingId === "string" ? req.query.bookingId.trim() : "";
@@ -690,7 +1004,7 @@ guestRouter.post("/book", async (req, res) => {
     guestId: guest.id,
     conversationId: conversation.id,
     currency: hotel.currency,
-    source: "MOBILE_BOOKING_FORM",
+    source: "CHATASTAY_WEBSITE",
     state: draftState
   });
 
@@ -707,8 +1021,20 @@ guestRouter.post("/book", async (req, res) => {
     children,
     preferredRoomTypeId: offer.roomTypeId,
     mealPlan,
-    source: ChannelProvider.WHATSAPP
+    source: ChannelProvider.CHATASTAY_MARKETPLACE
   });
+  const traveller = await getTravellerAccount(req);
+  if (traveller && (!traveller.guestId || traveller.guestId === guest.id)) {
+    await prisma.travellerAccount.update({
+      where: { id: traveller.id },
+      data: {
+        guestId: guest.id,
+        fullName: traveller.fullName ?? guest.fullName ?? guestName ?? undefined,
+        phoneE164: guest.phoneE164,
+        email: traveller.email
+      }
+    }).catch(() => undefined);
+  }
   if (token) {
     const session = await resolveCalendarSession(token).catch(() => null);
     if (session) await markCalendarSessionUsed(session.id);
