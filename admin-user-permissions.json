@@ -1,9 +1,174 @@
 {
   "demo.restaurant@pms.local": {
+    "ROOMS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "BOOKINGS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "REPORTS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "BILLING": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "CONVERSATIONS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "USERS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
     "OUTLET": {
       "VIEW": true,
       "EDIT": true,
       "CREATE": true,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "HOUSEKEEPING": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    }
+  },
+  "info@ashkhara.com": {
+    "ROOMS": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "BOOKINGS": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "REPORTS": {
+      "VIEW": true,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "BILLING": {
+      "VIEW": true,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "CONVERSATIONS": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "USERS": {
+      "VIEW": true,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "OUTLET": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "HOUSEKEEPING": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": true,
+      "MANAGE": true
+    }
+  },
+  "chef": {
+    "ROOMS": {
+      "VIEW": true,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "BOOKINGS": {
+      "VIEW": true,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "REPORTS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "BILLING": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "CONVERSATIONS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "USERS": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
+      "DELETE": false,
+      "MANAGE": false
+    },
+    "OUTLET": {
+      "VIEW": true,
+      "EDIT": true,
+      "CREATE": true,
+      "DELETE": true,
+      "MANAGE": true
+    },
+    "HOUSEKEEPING": {
+      "VIEW": false,
+      "EDIT": false,
+      "CREATE": false,
       "DELETE": false,
       "MANAGE": false
     }

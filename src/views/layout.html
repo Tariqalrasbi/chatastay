@@ -1388,8 +1388,12 @@
         };
         var loadPage = function (url) {
           var href = new URL(url, window.location.origin).toString();
-          if (pageCache.has(href)) return Promise.resolve(pageCache.get(href));
-          if (inFlightPages.has(href)) return inFlightPages.get(href);
+          if (pageCache.has(href)) {
+            return Promise.resolve(pageCache.get(href));
+          }
+          if (inFlightPages.has(href)) {
+            return inFlightPages.get(href);
+          }
           var req = window
             .fetch(href, {
               method: "GET",
@@ -1399,10 +1403,12 @@
             })
             .then(function (res) {
               if (!res.ok) throw new Error("Navigation fetch failed: " + res.status);
-              return res.text();
+              return res.text().then(function (html) {
+                return { html: html, status: res.status };
+              });
             })
-            .then(function (html) {
-              var doc = new DOMParser().parseFromString(html, "text/html");
+            .then(function (payload) {
+              var doc = new DOMParser().parseFromString(payload.html, "text/html");
               if (!doc.querySelector("main.content")) throw new Error("Missing admin content shell");
               pageCache.set(href, doc);
               return doc;
@@ -1503,7 +1509,6 @@
             prefetchLink(link);
           });
         }, 0);
-        });
 
         if (lang === "ar") {
           const dictionary = {
