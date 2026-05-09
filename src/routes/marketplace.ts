@@ -384,6 +384,53 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
   .plan-card.is-suggested .plan-suggested-callout{animation:none;transform:translateX(-50%) translateY(0) scale(1)}
   .pricing-float-cta{animation:none}
 }
+/* ===== Cursor hygiene: text containers use the default arrow; only true interactives use pointer/text. ===== */
+.pricing-hero,.pricing-hero *,.pricing-grid,.pricing-grid *,.compare-card,.compare-card *,.faq-card,.faq-card *,.cta-banner,.cta-banner *,.pricing-trust-strip,.pricing-trust-strip *,.pricing-sizer,.pricing-sizer *,.pricing-toggle,.pricing-toggle *,.pricing-currency,.pricing-currency *,.pricing-hero-corner,.pricing-hero-corner *{cursor:default}
+.pricing-hero a,.pricing-hero button,.plan-card a,.plan-card button,.compare-card a,.compare-card button,.faq-card a,.faq-card button,.faq-item summary,.cta-banner a,.cta-banner button,.pricing-currency button,.sizer-chips button,.pricing-toggle button,.pricing-float-cta,.stayli-launcher,.stayli-panel button{cursor:pointer}
+.stayli-input{cursor:text}
+/* ===== Stayli — pricing chat assistant ===== */
+.stayli-launcher{cursor:pointer}
+.stayli-launcher.is-stayli-open{transform:translateY(20px) scale(.92);opacity:0;pointer-events:none}
+.stayli-panel{position:fixed;right:20px;bottom:20px;z-index:65;width:360px;max-width:calc(100vw - 24px);height:540px;max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border-radius:24px;box-shadow:0 32px 80px -12px rgba(7,68,58,.45),0 0 0 1px rgba(220,232,227,.6);overflow:hidden;opacity:0;transform:translateY(20px) scale(.96);pointer-events:none;transition:opacity .3s cubic-bezier(.22,1,.36,1),transform .3s cubic-bezier(.22,1,.36,1)}
+.stayli-panel.is-open{opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
+.stayli-header{display:flex;align-items:center;gap:12px;padding:14px 16px;background:linear-gradient(135deg,#053b34 0%,#0c7a6e 50%,#128c7e 100%);color:#fff;flex-shrink:0}
+.stayli-avatar{width:38px;height:38px;border-radius:999px;background:linear-gradient(135deg,#25d366,#7df0ad);display:inline-flex;align-items:center;justify-content:center;font-weight:900;color:#053b18;font-size:16px;letter-spacing:-.02em;box-shadow:0 6px 14px -4px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.5);flex-shrink:0;cursor:default}
+.stayli-id{flex:1;min-width:0;cursor:default}
+.stayli-id .stayli-name{margin:0;font-weight:900;font-size:15px;letter-spacing:-.01em;line-height:1.1}
+.stayli-id .stayli-status{margin:2px 0 0;font-size:11.5px;opacity:.88;font-weight:600;display:flex;align-items:center;gap:6px}
+.stayli-dot{width:7px;height:7px;border-radius:999px;background:#7df0ad;display:inline-block;animation:stayli-pulse 1.6s ease-in-out infinite}
+@keyframes stayli-pulse{0%,100%{box-shadow:0 0 0 0 rgba(125,240,173,.65)}50%{box-shadow:0 0 0 5px rgba(125,240,173,0)}}
+.stayli-close{appearance:none;border:0;background:rgba(255,255,255,.14);color:#fff;width:30px;height:30px;border-radius:999px;font-size:22px;line-height:1;font-weight:600;display:inline-flex;align-items:center;justify-content:center;transition:background .15s ease,transform .15s ease;flex-shrink:0;cursor:pointer}
+.stayli-close:hover{background:rgba(255,255,255,.24);transform:rotate(90deg)}
+.stayli-body{flex:1;overflow-y:auto;padding:14px 14px 8px;background:linear-gradient(180deg,#f6fcf9 0%,#ecf7f1 100%);display:flex;flex-direction:column;gap:8px;cursor:default}
+.stayli-msg{max-width:85%;padding:10px 14px;border-radius:16px;font-size:13.5px;line-height:1.5;animation:stayli-msg-in .26s cubic-bezier(.22,1,.36,1) both;cursor:default;word-wrap:break-word;overflow-wrap:break-word}
+@keyframes stayli-msg-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.stayli-msg.bot{align-self:flex-start;background:#ffffff;color:var(--ink);border:1px solid rgba(220,232,227,.85);border-top-left-radius:6px;box-shadow:0 4px 10px -4px rgba(15,44,38,.1)}
+.stayli-msg.user{align-self:flex-end;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;border-top-right-radius:6px;box-shadow:0 8px 18px -8px rgba(37,211,102,.45)}
+.stayli-msg.bot.typing{display:inline-flex;align-items:center;gap:5px;padding:12px 14px;width:fit-content}
+.stayli-msg.bot.typing span{width:6px;height:6px;border-radius:999px;background:#94a3b8;animation:stayli-typing 1.2s ease-in-out infinite}
+.stayli-msg.bot.typing span:nth-child(2){animation-delay:.15s}
+.stayli-msg.bot.typing span:nth-child(3){animation-delay:.3s}
+@keyframes stayli-typing{0%,60%,100%{opacity:.3;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+.stayli-quick-replies{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px 4px;background:linear-gradient(180deg,rgba(236,247,241,.0) 0%,rgba(255,255,255,.85) 100%)}
+.stayli-quick-replies button{appearance:none;cursor:pointer;padding:6px 12px;font-size:11.5px;font-weight:800;border:1px solid rgba(37,211,102,.35);background:rgba(37,211,102,.08);color:var(--brand-2);border-radius:999px;transition:background .15s ease,transform .15s ease,border-color .15s ease;white-space:nowrap}
+.stayli-quick-replies button:hover{background:rgba(37,211,102,.18);border-color:rgba(37,211,102,.6);transform:translateY(-1px)}
+.stayli-input-form{display:flex;gap:6px;padding:10px 12px 12px;border-top:1px solid rgba(220,232,227,.6);background:#ffffff;flex-shrink:0}
+.stayli-input{flex:1;border:1px solid rgba(220,232,227,.85);border-radius:999px;padding:9px 14px;font-size:13.5px;outline:0;font-family:inherit;color:var(--ink);transition:border-color .15s ease,box-shadow .15s ease;cursor:text}
+.stayli-input:focus{border-color:#25d366;box-shadow:0 0 0 3px rgba(37,211,102,.2)}
+.stayli-send{appearance:none;border:0;width:38px;height:38px;border-radius:999px;background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;font-size:16px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;transition:transform .15s ease,box-shadow .15s ease;flex-shrink:0;cursor:pointer}
+.stayli-send:hover{transform:translateY(-1px) translateX(1px);box-shadow:0 8px 18px -6px rgba(37,211,102,.55)}
+.stayli-send:active{transform:translateY(0)}
+@media (max-width:560px){
+  .stayli-panel{right:12px;bottom:12px;width:calc(100vw - 24px);height:calc(100dvh - 100px);max-height:calc(100dvh - 100px);border-radius:20px}
+  .stayli-quick-replies button{font-size:11px;padding:5px 10px}
+}
+@media (prefers-reduced-motion:reduce){
+  .stayli-panel{transition:opacity .15s ease;transform:none}
+  .stayli-msg{animation:none}
+  .stayli-dot{animation:none}
+  .stayli-msg.bot.typing span{animation:none;opacity:.5}
+}
 `;
 
 function renderShell(opts: {
@@ -1187,12 +1234,29 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
       </div>
     </section>
 
-    <a class="pricing-float-cta" href="https://wa.me/?text=${encodeURIComponent(
-      "Hi ChatAstay, I have a pricing question."
-    )}" target="_blank" rel="noopener" aria-label="Talk to ChatAstay on WhatsApp">
+    <button type="button" class="pricing-float-cta stayli-launcher" aria-label="Open Stayli, the pricing assistant" aria-expanded="false" aria-controls="stayli-panel">
       <span class="float-cta-bubble" aria-hidden="true"></span>
-      <span class="float-cta-text">Pricing question? <strong>Chat with us</strong></span>
-    </a>
+      <span class="float-cta-text">Pricing question? <strong>Chat with Stayli</strong></span>
+    </button>
+
+    <aside id="stayli-panel" class="stayli-panel" role="dialog" aria-modal="false" aria-label="Stayli pricing assistant" aria-hidden="true">
+      <header class="stayli-header">
+        <div class="stayli-avatar" aria-hidden="true">S</div>
+        <div class="stayli-id">
+          <p class="stayli-name">Stayli</p>
+          <p class="stayli-status"><span class="stayli-dot" aria-hidden="true"></span> Online &middot; Pricing assistant</p>
+        </div>
+        <button type="button" class="stayli-close" aria-label="Close pricing chat">&times;</button>
+      </header>
+      <div class="stayli-body" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <div class="stayli-quick-replies" aria-label="Quick replies"></div>
+      <form class="stayli-input-form" autocomplete="off">
+        <input type="text" class="stayli-input" name="q" placeholder="Ask about pricing&hellip;" aria-label="Type your pricing question" maxlength="240" />
+        <button type="submit" class="stayli-send" aria-label="Send message">
+          <span aria-hidden="true">&#10148;</span>
+        </button>
+      </form>
+    </aside>
   `;
 
   // FX rates are inlined into the script so we don't need a network call.
@@ -1392,6 +1456,175 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         });
       }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
       Array.prototype.forEach.call(targets, function(el){ io.observe(el); });
+    })();
+
+    // ===== Stayli — ChatAstay's pricing-only assistant =====
+    // Pure client-side: keyword-based knowledge graph, no LLM, no network.
+    // If a question is unrelated to pricing, Stayli politely deflects.
+    (function(){
+      var launcher = document.querySelector('.stayli-launcher');
+      var panel = document.getElementById('stayli-panel');
+      if (!launcher || !panel) return;
+      var bodyEl = panel.querySelector('.stayli-body');
+      var quickWrap = panel.querySelector('.stayli-quick-replies');
+      var form = panel.querySelector('.stayli-input-form');
+      var input = panel.querySelector('.stayli-input');
+      var closeBtn = panel.querySelector('.stayli-close');
+
+      var GREETING = "Hi! I'm Stayli, your ChatAstay pricing assistant. Ask me about plans, trials, billing, currencies, or anything else price-related.";
+      var THANKS_REPLY = "You're welcome! Anything else about pricing?";
+      var FALLBACK = "I only answer pricing questions. Try asking about plans, trials, billing, currencies, upgrades, or payments — I've got you covered there!";
+
+      var GREETINGS = ['hi', 'hello', 'hey', 'salam', 'marhaba', 'howdy', 'good morning', 'good evening', 'good afternoon', 'as-salamu alaykum'];
+      var THANKS = ['thanks', 'thank you', 'shukran', 'cheers', 'appreciate', 'thx'];
+
+      // Knowledge graph. Order matters: the first topic whose keywords appear
+      // in the user's question wins.
+      var TOPICS = [
+        { keywords: ['starter'],
+          answer: "Starter is 19 OMR / month — perfect for guesthouses and boutique hotels with up to 30 rooms. Includes the basic PMS (rack, reservations, check-in/out), the WhatsApp booking assistant, room/rate management, guest profiles, and email support." },
+        { keywords: ['growth'],
+          answer: "Growth is 49 OMR / month and our most popular plan — built for hotels with 30 to 80 rooms. Adds the Restaurant/Café module, housekeeping SLA board, in-stay WhatsApp service requests, the reports center, and guest review collection on top of Starter." },
+        { keywords: ['pro', 'premium'],
+          answer: "Pro is 99 OMR / month — for serious operators with 80+ rooms. Everything in Growth plus advanced PMS ops (folio adjustments/voids/refunds), multi-property readiness, staff roles & audit trail, advanced analytics, AI automation, and priority WhatsApp support." },
+        { keywords: ['enterprise', 'chain', 'sso', 'sla', 'integration'],
+          answer: "Enterprise is custom-priced for hotel chains and large operators. Includes everything in Pro plus multi-property management, custom integrations, dedicated onboarding, advanced permissions (SSO-ready), and SLA-backed support with a named CSM. Email sales@chatastay.com for a tailored quote." },
+        { keywords: ['compare', 'difference', 'vs', 'between', 'which plan'],
+          answer: "Quick comparison: Starter (19 OMR) covers basic PMS + WhatsApp; Growth (49 OMR) adds restaurant + housekeeping + reports; Pro (99 OMR) adds advanced ops, multi-property, and AI automation; Enterprise is custom. Use the chip selector at the top of the page to find the right fit for your size." },
+        { keywords: ['trial', 'free', 'risk', 'try'],
+          answer: "Every paid plan starts with a 14-day free trial — no credit card required. You can sign up, connect your WhatsApp number, onboard your team, and only pay if you decide to continue." },
+        { keywords: ['demo', 'show me'],
+          answer: "Happy to give you a guided demo — click 'Request Demo' on the page or message us via the WhatsApp button. We usually book a 30-minute walkthrough within a day." },
+        { keywords: ['cancel', 'unsubscribe', 'quit subscription'],
+          answer: "You can cancel anytime — no contracts, no exit fees. Your account stays active through the end of the current billing period." },
+        { keywords: ['upgrade', 'downgrade', 'switch plan', 'change plan'],
+          answer: "Upgrade or downgrade anytime from your hotel admin. Upgrades are immediate and prorated; downgrades take effect at the end of the current billing cycle." },
+        { keywords: ['refund', 'money back', 'get my money'],
+          answer: "We don't offer refunds because the 14-day free trial gives you a fully risk-free evaluation period. You can also cancel anytime to stop future billing." },
+        { keywords: ['discount', 'deal', 'save 20', 'save money', 'cheaper', 'annual', 'yearly', 'pay yearly'],
+          answer: "Annual billing saves 20% — that's roughly 2.4 months free per year. Toggle Monthly/Annual in the hero to see the annual price for any plan." },
+        { keywords: ['payment', 'pay with', 'card', 'invoice', 'stripe', 'thawani', 'cash', 'billing method'],
+          answer: "We accept cash, card, Stripe, and Thawani out of the box. Invoices are issued automatically when a folio is fully settled. Outstanding balances surface on your front-desk dashboard." },
+        { keywords: ['currency', 'omr', 'usd', 'aed', 'sar', 'rial', 'dollar', 'dirham', 'riyal'],
+          answer: "Use the currency switcher in the top-right corner of the hero to view prices in OMR, USD, AED, or SAR. Conversions are approximate; actual billing is in OMR." },
+        { keywords: ['whatsapp', 'business api', 'cloud api'],
+          answer: "ChatAstay is WhatsApp-first. Connect your WhatsApp Cloud API number once and the booking assistant, in-stay menus, and review requests work for every booking — direct, OTA, or marketplace." },
+        { keywords: ['migrate', 'migration', 'import data', 'switch from', 'move from'],
+          answer: "Growth, Pro, and Enterprise plans include guided data import — rooms, rates, guests, future bookings. Our team handles the heavy lifting so you switch without losing reservations." },
+        { keywords: ['support', 'help me with pricing', 'contact sales', 'talk to sales'],
+          answer: "For sales, email sales@chatastay.com. Pro and Enterprise plans include priority WhatsApp support; Enterprise comes with SLA-backed support and a named customer success manager." },
+        { keywords: ['onboarding', 'guided setup', 'how long to go live', 'training session'],
+          answer: "Most teams are live the same day. Front desk, housekeeping, and restaurant staff each get a focused workspace with only the tabs they need. Pro and Enterprise plans include guided onboarding sessions." },
+        { keywords: ['how many rooms', 'rooms do i', 'rooms do we', 'hotel size', 'my hotel has', 'we have rooms', 'right plan for'],
+          answer: "Use the chip selector in the hero ('How many rooms do you have?') and the page will highlight the right plan for your size — Starter for ≤30, Growth for 30-80, Pro for 80+, Enterprise for chains." },
+        { keywords: ['price', 'cost', 'how much', 'pricing', 'rate plan', 'fees', 'expensive', 'cheap'],
+          answer: "Plans start at 19 OMR/month for Starter, 49 OMR/month for Growth (most popular), 99 OMR/month for Pro, and Enterprise is custom-priced. Annual billing saves 20%." }
+      ];
+
+      var QUICK_REPLIES = [
+        { label: 'How much?',     q: 'how much do plans cost' },
+        { label: 'Free trial',    q: 'tell me about the free trial' },
+        { label: 'Compare plans', q: 'whats the difference between plans' },
+        { label: 'Switch plans?', q: 'can i upgrade or downgrade' },
+        { label: 'Payments',      q: 'what payment methods do you support' },
+        { label: 'Cancel?',       q: 'can i cancel anytime' }
+      ];
+
+      function escapeText(s){ return String(s == null ? '' : s); }
+
+      function appendMessage(text, who){
+        var el = document.createElement('div');
+        el.className = 'stayli-msg ' + (who === 'user' ? 'user' : 'bot');
+        el.textContent = escapeText(text);
+        bodyEl.appendChild(el);
+        bodyEl.scrollTop = bodyEl.scrollHeight;
+        return el;
+      }
+
+      function appendTyping(){
+        var el = document.createElement('div');
+        el.className = 'stayli-msg bot typing';
+        el.setAttribute('data-typing', '1');
+        el.innerHTML = '<span></span><span></span><span></span>';
+        bodyEl.appendChild(el);
+        bodyEl.scrollTop = bodyEl.scrollHeight;
+        return el;
+      }
+
+      function answerFor(q){
+        var t = (q || '').toLowerCase().trim();
+        if (!t) return null;
+        for (var i = 0; i < GREETINGS.length; i++) {
+          if (t === GREETINGS[i] || t.indexOf(GREETINGS[i] + ' ') === 0 || t.indexOf(GREETINGS[i] + ',') === 0 || t.indexOf(GREETINGS[i] + '!') === 0) {
+            return GREETING;
+          }
+        }
+        for (var j = 0; j < THANKS.length; j++) {
+          if (t.indexOf(THANKS[j]) >= 0) return THANKS_REPLY;
+        }
+        for (var k = 0; k < TOPICS.length; k++) {
+          var topic = TOPICS[k];
+          for (var m = 0; m < topic.keywords.length; m++) {
+            if (t.indexOf(topic.keywords[m]) >= 0) return topic.answer;
+          }
+        }
+        return FALLBACK;
+      }
+
+      function ask(text){
+        if (!text || !text.trim()) return;
+        appendMessage(text, 'user');
+        var typingEl = appendTyping();
+        var delay = 380 + Math.min(700, text.length * 12);
+        setTimeout(function(){
+          if (typingEl && typingEl.parentNode) typingEl.parentNode.removeChild(typingEl);
+          appendMessage(answerFor(text), 'bot');
+        }, delay);
+      }
+
+      function openPanel(){
+        panel.classList.add('is-open');
+        panel.setAttribute('aria-hidden', 'false');
+        launcher.classList.add('is-stayli-open');
+        launcher.setAttribute('aria-expanded', 'true');
+        if (!bodyEl.dataset.greeted) {
+          appendMessage(GREETING, 'bot');
+          bodyEl.dataset.greeted = '1';
+        }
+        setTimeout(function(){ if (input) input.focus(); }, 280);
+      }
+
+      function closePanel(){
+        panel.classList.remove('is-open');
+        panel.setAttribute('aria-hidden', 'true');
+        launcher.classList.remove('is-stayli-open');
+        launcher.setAttribute('aria-expanded', 'false');
+        try { launcher.focus(); } catch(e){}
+      }
+
+      // Wire interactions.
+      launcher.addEventListener('click', openPanel);
+      if (closeBtn) closeBtn.addEventListener('click', closePanel);
+      document.addEventListener('keydown', function(e){
+        if (e.key === 'Escape' && panel.classList.contains('is-open')) closePanel();
+      });
+      if (form) {
+        form.addEventListener('submit', function(e){
+          e.preventDefault();
+          var text = (input && input.value) || '';
+          if (input) input.value = '';
+          ask(text);
+        });
+      }
+
+      // Render quick-reply chips.
+      QUICK_REPLIES.forEach(function(qr){
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = qr.label;
+        btn.addEventListener('click', function(){ ask(qr.q); });
+        quickWrap.appendChild(btn);
+      });
     })();
   `;
 
