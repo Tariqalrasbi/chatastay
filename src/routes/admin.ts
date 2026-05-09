@@ -125,6 +125,7 @@ import { DEFAULT_FB_MENU_2026, appendMissingFbMenuItems } from "../core/defaultF
 import { manualCheckInFitsRoomType } from "../core/roomOccupancy";
 import {
   renderCommandCenterDashboard,
+  type CommandCenterActionRow,
   type CommandCenterArrivalRow,
   type CommandCenterDashboardVm,
   type CommandCenterDepartureRow,
@@ -1689,7 +1690,8 @@ function renderLayout(
     links: [
       { href: "/admin/rooms", label: "Room types &amp; units" },
       { href: "/admin/offers", label: "Pricing &amp; offers" },
-      { href: "/admin/inventory", label: "Availability" }
+      { href: "/admin/inventory", label: "Availability" },
+      { href: "/admin/channel-control", label: "Channel control" }
     ]
   };
   const housekeepingTabs: AdminSection = {
@@ -1710,6 +1712,7 @@ function renderLayout(
         attrs: "data-admin-conv-link"
       },
       { href: "/admin/whatsapp/templates", label: "Templates" },
+      { href: "/admin/guest-guidebook", label: "Guest guidebook" },
       { href: "/admin/conversations/group-messages", label: "Guest messages (broadcast)" },
       { href: "/admin/whatsapp/failed-messages", label: "Failed messages" }
     ]
@@ -1741,6 +1744,7 @@ function renderLayout(
       { href: "/admin/management-kpi", label: "Revenue &amp; occupancy (KPI)" },
       { href: "/admin/daily-digest", label: "Daily digest" },
       { href: "/admin/feedback-dashboard", label: "Guest feedback" },
+      { href: "/admin/payment-reconciliation", label: "Payment reconciliation" },
       { href: "/admin/ai-analytics", label: "AI analytics" },
       { href: "/admin/booking-funnel", label: "Booking funnel" },
       { href: "/admin/routing-health", label: "Routing health" }
@@ -2510,7 +2514,12 @@ function renderFeedbackDashboardPage(hotelDisplayName: string, data: FeedbackDas
           <span class="when">${c.ageHours <= 1 ? "just now" : c.ageHours < 24 ? `${c.ageHours}h ago` : `${Math.round(c.ageHours / 24)}d ago`}</span>
         </div>
         <div class="body">${escapeHtml(c.comment ?? "(no comment)")}${c.followUpRequested ? "<br><em>Guest asked for the manager to call back.</em>" : ""}</div>
-        <div class="actions"><a href="/admin/bookings/${escapeHtml(c.bookingId)}">Open booking →</a></div>
+        <div class="actions" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+          <a href="/admin/bookings/${escapeHtml(c.bookingId)}">Open booking →</a>
+          <form method="post" action="/admin/feedback-dashboard/${escapeHtml(c.feedbackId)}/contacted" style="margin:0"><button type="submit" class="btn-link" style="padding:5px 9px;font-size:12px">Mark contacted</button></form>
+          <form method="post" action="/admin/feedback-dashboard/${escapeHtml(c.feedbackId)}/send-recovery" style="margin:0"><button type="submit" class="btn-link" style="padding:5px 9px;font-size:12px">Send recovery WhatsApp</button></form>
+          <form method="post" action="/admin/feedback-dashboard/${escapeHtml(c.feedbackId)}/resolve" style="margin:0"><button type="submit" class="btn-link primary" style="padding:5px 9px;font-size:12px">Mark resolved</button></form>
+        </div>
       </li>`
         )
         .join("")}</ul>`
@@ -2527,7 +2536,14 @@ function renderFeedbackDashboardPage(hotelDisplayName: string, data: FeedbackDas
           <span class="when">${escapeHtml(c.createdAt.toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</span>
         </div>
         <div class="body">${escapeHtml(c.comment)}</div>
-        <div class="actions"><a href="/admin/bookings/${escapeHtml(c.bookingId)}">Open booking →</a></div>
+        <div class="actions" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+          <a href="/admin/bookings/${escapeHtml(c.bookingId)}">Open booking →</a>
+          ${
+            c.rating >= 4
+              ? `<form method="post" action="/admin/feedback-dashboard/${escapeHtml(c.feedbackId)}/send-public-review" style="margin:0"><button type="submit" class="btn-link" style="padding:5px 9px;font-size:12px">Ask for public review</button></form>`
+              : ""
+          }
+        </div>
       </li>`
         )
         .join("")}</ul>`
@@ -2538,6 +2554,10 @@ function renderFeedbackDashboardPage(hotelDisplayName: string, data: FeedbackDas
   <h2>Guest Feedback</h2>
   <p>How guests rated their stay at ${escapeHtml(hotelDisplayName)} — last ${windowDays} days. Use this to spot complaints to follow up on, see what guests love, and track quality trends week-over-week.</p>
 </div>
+<section class="fb-card" style="margin-bottom:14px">
+  <h3 style="margin-top:0">Review recovery workflow</h3>
+  <p class="muted">Low ratings become manager follow-up cases. Contact the guest privately first, resolve the issue, and only ask happy guests for a public review.</p>
+</section>
 <div class="fb-kpis">
   <div class="fb-kpi ${kpis.averageRating >= 4 ? "ok" : kpis.averageRating <= 3 && kpis.totalResponses ? "warn" : ""}"><h4>Average rating</h4><div class="v">${avg}<small>/ 5</small></div><div class="sub">${kpis.totalResponses} ${kpis.totalResponses === 1 ? "response" : "responses"}</div></div>
   <div class="fb-kpi ${kpis.lowRatings > 0 ? "alert" : "ok"}"><h4>Low scores</h4><div class="v">${kpis.lowRatings}</div><div class="sub">1–2 stars</div></div>
@@ -2609,6 +2629,19 @@ const commandCenterExtraStyles = `<style>
 .cc-badge-info { background:#e0f2fe; color:#075985; }
 .cc-badge-muted { background:#f1f5f9; color:#64748b; }
 .cc-empty { margin:0; padding:12px 4px; color:#64748b; font-size:13px; line-height:1.5; }
+.cc-action-center { margin-bottom:14px; }
+.cc-action-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:10px; }
+.cc-action { border:1px solid #e2e8f0; border-radius:14px; padding:12px 14px; display:flex; justify-content:space-between; gap:10px; background:#f8fafc; min-height:92px; }
+.cc-action strong { display:block; color:#0f172a; font-size:14px; margin-bottom:4px; }
+.cc-action p { margin:0; color:#64748b; font-size:12.5px; line-height:1.4; }
+.cc-action.ok { background:#f0fdf4; border-color:#bbf7d0; }
+.cc-action.warn { background:#fffbeb; border-color:#fde68a; }
+.cc-action.alert { background:#fff1f2; border-color:#fecdd3; }
+.cc-action.info { background:#f0f9ff; border-color:#bae6fd; }
+.cc-action-side { display:flex; flex-direction:column; align-items:flex-end; justify-content:space-between; gap:8px; min-width:92px; text-align:right; }
+.cc-action-status { border-radius:999px; padding:2px 8px; font-size:10.5px; font-weight:900; text-transform:uppercase; letter-spacing:.04em; background:#fff; color:#334155; border:1px solid rgba(15,23,42,.08); }
+.cc-action-side a { font-size:12px; font-weight:900; color:#075e54; text-decoration:none; }
+.cc-action-side a:hover { text-decoration:underline; }
 .cc-stack { display:flex; flex-direction:column; gap:8px; }
 .cc-rowline { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:13px; border-bottom:1px dashed #e2e8f0; padding-bottom:8px; }
 .cc-rowline:last-child { border-bottom:0; padding-bottom:0; }
@@ -2639,6 +2672,33 @@ const commandCenterExtraStyles = `<style>
 function renderPage(pageFile: string, authenticated: boolean): string {
   const content = readView(pageFile);
   return renderLayout(content, authenticated);
+}
+
+function buildGuestGuidebookMessage(params: {
+  hotelName: string;
+  guestName?: string | null;
+  config: PartnerSetupConfig;
+}): string {
+  const kb = [
+    params.config.amenitiesSummary,
+    params.config.aiKnowledgeBaseEn,
+    params.config.aiKnowledgeBase
+  ]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    .join("\n");
+  const introName = params.guestName?.trim() ? ` ${params.guestName.trim()}` : "";
+  return [
+    `Welcome${introName} to ${params.hotelName}. Here is your quick guest guide:`,
+    "",
+    `Wi-Fi / hotel info: ${kb || "Ask reception on WhatsApp and we will help right away."}`,
+    `Breakfast / restaurant: ${params.config.amenitiesSummary || "Ask reception for today's hours and options."}`,
+    "Checkout: Please confirm your checkout time with reception if you need late checkout.",
+    "Emergency / assistance: Reply to this WhatsApp chat and the hotel team will help.",
+    params.config.googleReviewLink ? `After your stay, happy guests can review us here: ${params.config.googleReviewLink}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function getBackForwardCacheGuardScript(): string {
@@ -3609,6 +3669,36 @@ function parseHousekeepingShiftInput(input: unknown): HousekeepingShiftCode {
 const HK_SUPERVISOR_STALLED_MINUTES = 90;
 /** Unclaimed tasks with next arrival inside this window appear as "due soon". */
 const HK_SUPERVISOR_DUE_SOON_MS = 4 * 60 * 60 * 1000;
+
+function deriveHousekeepingSla(params: {
+  createdAt: Date;
+  startedAt: Date | null;
+  status: HousekeepingTaskStatus;
+  assignedToUserId?: string | null;
+  nextArrivalAt: Date | null;
+  now?: Date;
+}): { label: string; tone: "ok" | "pending" | "alert"; targetReadyAt: Date; detail: string } {
+  const now = params.now ?? new Date();
+  const baseTarget = new Date((params.startedAt ?? params.createdAt).getTime() + 90 * 60 * 1000);
+  const arrivalTarget = params.nextArrivalAt ? new Date(params.nextArrivalAt.getTime() - 60 * 60 * 1000) : null;
+  const targetReadyAt = arrivalTarget && arrivalTarget < baseTarget ? arrivalTarget : baseTarget;
+  if (params.nextArrivalAt && params.nextArrivalAt <= now) {
+    return { label: "Blocking arrival", tone: "alert", targetReadyAt, detail: "Guest arrival time has arrived or passed." };
+  }
+  if (targetReadyAt <= now) {
+    return { label: "Late", tone: "alert", targetReadyAt, detail: "Past target ready time." };
+  }
+  const msLeft = targetReadyAt.getTime() - now.getTime();
+  if (!params.assignedToUserId || msLeft <= 45 * 60 * 1000) {
+    return {
+      label: "Due soon",
+      tone: "pending",
+      targetReadyAt,
+      detail: !params.assignedToUserId ? "Needs cleaner assignment." : "Less than 45 minutes to target."
+    };
+  }
+  return { label: "On track", tone: "ok", targetReadyAt, detail: "Assigned with time before target." };
+}
 
 type HkPortalListFilters = {
   priority: "ALL" | HousekeepingPriorityCode;
@@ -5772,6 +5862,115 @@ adminRouter.get("/feedback-dashboard", requirePermission("REPORTS", "VIEW"), asy
   res.type("html").send(renderLayout(renderFeedbackDashboardPage(hotel.displayName, data), true));
 });
 
+async function loadFeedbackForAction(feedbackId: string) {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) return null;
+  const feedback = await prisma.guestFeedback.findFirst({
+    where: { id: feedbackId, hotelId: hotel.id },
+    include: { booking: { include: { guest: true } }, guest: true }
+  });
+  if (!feedback) return null;
+  return { hotel, feedback };
+}
+
+adminRouter.post("/feedback-dashboard/:feedbackId/contacted", requirePermission("REPORTS", "EDIT"), async (req, res) => {
+  const ctx = await loadFeedbackForAction(String(req.params.feedbackId ?? ""));
+  if (ctx) {
+    await prisma.guestFeedback.update({
+      where: { id: ctx.feedback.id },
+      data: {
+        managerFollowUpRequestedAt: ctx.feedback.managerFollowUpRequestedAt ?? new Date(),
+        lowRatingAlertedAt: ctx.feedback.lowRatingAlertedAt ?? new Date()
+      }
+    });
+    await logAudit({
+      hotelId: ctx.hotel.id,
+      action: "FEEDBACK_RECOVERY_CONTACTED",
+      entityType: "GuestFeedback",
+      entityId: ctx.feedback.id,
+      metadata: { bookingId: ctx.feedback.bookingId, rating: ctx.feedback.rating }
+    });
+  }
+  res.redirect("/admin/feedback-dashboard");
+});
+
+adminRouter.post("/feedback-dashboard/:feedbackId/resolve", requirePermission("REPORTS", "EDIT"), async (req, res) => {
+  const ctx = await loadFeedbackForAction(String(req.params.feedbackId ?? ""));
+  if (ctx) {
+    await prisma.guestFeedback.update({
+      where: { id: ctx.feedback.id },
+      data: { managerFollowUpClosedAt: new Date(), status: GuestFeedbackStatus.COMPLETED }
+    });
+    await logAudit({
+      hotelId: ctx.hotel.id,
+      action: "FEEDBACK_RECOVERY_RESOLVED",
+      entityType: "GuestFeedback",
+      entityId: ctx.feedback.id,
+      metadata: { bookingId: ctx.feedback.bookingId, rating: ctx.feedback.rating }
+    });
+  }
+  res.redirect("/admin/feedback-dashboard");
+});
+
+adminRouter.post("/feedback-dashboard/:feedbackId/send-recovery", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
+  const ctx = await loadFeedbackForAction(String(req.params.feedbackId ?? ""));
+  if (ctx) {
+    const guest = ctx.feedback.guest ?? ctx.feedback.booking.guest;
+    const phone = guest.phoneE164.replace(/\D/g, "");
+    if (phone) {
+      const config = loadPartnerSetupConfig(ctx.hotel.id);
+      await sendWhatsAppText({
+        to: phone,
+        phoneNumberId: config.whatsappPhoneNumberId || undefined,
+        body: `${ctx.hotel.displayName}: Thank you for your feedback. We are sorry your stay was not perfect. A manager will review this personally and follow up with you.`
+      });
+      await prisma.guestFeedback.update({
+        where: { id: ctx.feedback.id },
+        data: { managerFollowUpRequestedAt: ctx.feedback.managerFollowUpRequestedAt ?? new Date(), lowRatingAlertedAt: ctx.feedback.lowRatingAlertedAt ?? new Date() }
+      });
+      await logAudit({
+        hotelId: ctx.hotel.id,
+        action: "FEEDBACK_RECOVERY_WHATSAPP_SENT",
+        entityType: "GuestFeedback",
+        entityId: ctx.feedback.id,
+        metadata: { bookingId: ctx.feedback.bookingId, rating: ctx.feedback.rating }
+      });
+    }
+  }
+  res.redirect("/admin/feedback-dashboard");
+});
+
+adminRouter.post("/feedback-dashboard/:feedbackId/send-public-review", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
+  const ctx = await loadFeedbackForAction(String(req.params.feedbackId ?? ""));
+  if (ctx) {
+    const config = loadPartnerSetupConfig(ctx.hotel.id);
+    const guest = ctx.feedback.guest ?? ctx.feedback.booking.guest;
+    const phone = guest.phoneE164.replace(/\D/g, "");
+    if (phone && config.googleReviewLink) {
+      await sendWhatsAppText({
+        to: phone,
+        phoneNumberId: config.whatsappPhoneNumberId || undefined,
+        body: `${ctx.hotel.displayName}: Thank you for your kind feedback. If you have a moment, please share your experience publicly here: ${config.googleReviewLink}`
+      });
+      await prisma.guestFeedback.update({
+        where: { id: ctx.feedback.id },
+        data: { publicReviewClickedAt: ctx.feedback.publicReviewClickedAt ?? new Date(), isHappyGuest: true, isPromoter: ctx.feedback.rating >= 5 }
+      });
+      await logAudit({
+        hotelId: ctx.hotel.id,
+        action: "FEEDBACK_PUBLIC_REVIEW_REQUEST_SENT",
+        entityType: "GuestFeedback",
+        entityId: ctx.feedback.id,
+        metadata: { bookingId: ctx.feedback.bookingId, rating: ctx.feedback.rating }
+      });
+    }
+  }
+  res.redirect("/admin/feedback-dashboard");
+});
+
 adminRouter.get("/audit-trail", requirePermission("USERS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
   if (!hotel) {
@@ -7876,6 +8075,91 @@ async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCente
     );
   }
 
+  const dailyActions: CommandCenterActionRow[] = [];
+  const addAction = (row: CommandCenterActionRow) => dailyActions.push(row);
+  if (show.bookings && unassignedArrivals > 0) {
+    addAction({
+      label: "Assign rooms for arrivals",
+      detail: `${unassignedArrivals} arrival${unassignedArrivals === 1 ? "" : "s"} still need a room before check-in.`,
+      statusLabel: "Needs room",
+      tone: "alert",
+      href: roomBoardHref,
+      actionLabel: "Open room rack"
+    });
+  }
+  const unpaidDeparturesToday = departures.filter((b) => b.paymentStatus !== PaymentStatus.SUCCEEDED).length;
+  if (show.bookings && unpaidDeparturesToday > 0) {
+    addAction({
+      label: "Collect balances before checkout",
+      detail: `${unpaidDeparturesToday} departure${unpaidDeparturesToday === 1 ? "" : "s"} today are not fully paid.`,
+      statusLabel: "Needs payment",
+      tone: "warn",
+      href: `/admin/front-desk/check-out?date=${encodeURIComponent(dateLabel)}`,
+      actionLabel: "Open check-out"
+    });
+  }
+  if (show.rooms && roomView && roomView.statusCounts.CLEANING > 0) {
+    addAction({
+      label: "Clear dirty rooms",
+      detail: `${roomView.statusCounts.CLEANING} room${roomView.statusCounts.CLEANING === 1 ? "" : "s"} are dirty / cleaning and may block arrivals.`,
+      statusLabel: "Room not ready",
+      tone: roomView.statusCounts.CLEANING >= 5 ? "alert" : "warn",
+      href: "/admin/housekeeping",
+      actionLabel: "Open housekeeping"
+    });
+  }
+  if (show.rooms && roomView && roomView.statusCounts.MAINTENANCE > 0) {
+    addAction({
+      label: "Check maintenance impact",
+      detail: `${roomView.statusCounts.MAINTENANCE} room${roomView.statusCounts.MAINTENANCE === 1 ? "" : "s"} are out of order.`,
+      statusLabel: "Maintenance",
+      tone: "warn",
+      href: "/admin/maintenance",
+      actionLabel: "Open impact view"
+    });
+  }
+  if (show.comms && failedNotifs > 0) {
+    addAction({
+      label: "Fix failed guest messages",
+      detail: `${failedNotifs} notification${failedNotifs === 1 ? "" : "s"} failed in the last 7 days.`,
+      statusLabel: "Message failed",
+      tone: "alert",
+      href: "/admin/whatsapp/failed-messages",
+      actionLabel: "Open failed messages"
+    });
+  }
+  const vipArrivals = arrivals.filter((b) => b.guest?.isVip).length;
+  if (show.bookings && vipArrivals > 0) {
+    addAction({
+      label: "Prepare VIP arrivals",
+      detail: `${vipArrivals} VIP arrival${vipArrivals === 1 ? "" : "s"} today. Check room readiness and notes.`,
+      statusLabel: "VIP",
+      tone: "info",
+      href: `/admin/front-desk/check-in?date=${encodeURIComponent(dateLabel)}`,
+      actionLabel: "Open arrivals"
+    });
+  }
+  if (show.fb && pendingOutletCount > 0) {
+    addAction({
+      label: "Move outlet tickets",
+      detail: `${pendingOutletCount} restaurant / cafe ticket${pendingOutletCount === 1 ? "" : "s"} still active.`,
+      statusLabel: "Kitchen queue",
+      tone: "warn",
+      href: "/admin/outlet-dashboard",
+      actionLabel: "Open KOT"
+    });
+  }
+  if (feedbackCases.length > 0) {
+    addAction({
+      label: "Recover guest complaints",
+      detail: `${feedbackCases.length} low-score or manager follow-up case${feedbackCases.length === 1 ? "" : "s"} need attention.`,
+      statusLabel: "Needs manager",
+      tone: "alert",
+      href: "/admin/feedback-dashboard",
+      actionLabel: "Open recovery"
+    });
+  }
+
   const roomSnapshot = roomView
     ? {
         total: roomView.totalRooms,
@@ -7907,6 +8191,7 @@ async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCente
       unpaidBookings: unpaidBookingsCount,
       pendingPaymentIntents: pendingPayIntents
     },
+    dailyActions,
     alertItemsHtml
   };
 }
@@ -8439,7 +8724,14 @@ adminRouter.get("/hk", requireAuth, requireHousekeepingPortal, async (req, res) 
       hkShift,
       hkPriority: ev.level,
       hkReason: ev.reason,
-      nextArrivalAt: hint?.checkIn ?? null
+      nextArrivalAt: hint?.checkIn ?? null,
+      hkSla: deriveHousekeepingSla({
+        createdAt: t.createdAt,
+        startedAt: t.startedAt,
+        status: t.status,
+        assignedToUserId: t.assignedToUserId,
+        nextArrivalAt: hint?.checkIn ?? null
+      })
     };
   });
   const hkFiltered = hkDecorated.filter((t) => {
@@ -8505,6 +8797,9 @@ ${hkChip("Night", { mine: hkListFilters.mine, priority: hkListFilters.priority, 
           : t.assignedToUserId
             ? '<div class="muted" style="font-size:12px;margin-top:4px">Claimed — not started</div>'
             : "";
+      const slaMeta = `<div style="margin-top:6px"><span class="badge ${t.hkSla.tone}">${escapeHtml(t.hkSla.label)}</span><div class="muted" style="font-size:11px;margin-top:3px">Ready target ${escapeHtml(formatDateTime(t.hkSla.targetReadyAt))}</div>${
+        t.nextArrivalAt ? `<div class="muted" style="font-size:11px">Arrival ${escapeHtml(formatDateTime(t.nextArrivalAt))}</div>` : ""
+      }</div>`;
       let actions = "";
       if (t.status === HousekeepingTaskStatus.PENDING && !t.assignedToUserId) {
         actions = `<form method="post" action="/admin/hk/task/${encodeURIComponent(t.id)}/assign" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0">${hkListHidden}${shiftSelect()}<button type="submit" style="padding:6px 12px;border-radius:8px;border:0;background:#128c7e;color:#fff;font-weight:700;cursor:pointer">Claim</button></form>`;
@@ -8520,7 +8815,7 @@ ${hkChip("Night", { mine: hkListFilters.mine, priority: hkListFilters.priority, 
       } else if (t.assignedToUserId && t.assignedToUserId !== session.staffId) {
         actions = '<span class="muted">In use by another housekeeper</span>';
       }
-      return `<tr><td>${roomLabel}</td><td>${priCell}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${modeHint}${suggestLine}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
+      return `<tr><td>${roomLabel}${slaMeta}</td><td>${priCell}</td><td>${escapeHtml(t.status)}</td><td>${assignee}${modeHint}${suggestLine}${claimedMeta}</td><td style="white-space:nowrap">${actions}</td></tr>`;
     })
     .join("");
   const hkCrit = hkDecorated.filter((t) => t.hkPriority === "CRITICAL").length;
@@ -13198,6 +13493,50 @@ adminRouter.get("/whatsapp/templates", requirePermission("CONVERSATIONS", "VIEW"
   res.type("html").send(renderLayout(content, true));
 });
 
+adminRouter.get("/guest-guidebook", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Guest guidebook</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const config = loadPartnerSetupConfig(hotel.id);
+  const guideBody = buildGuestGuidebookMessage({ hotelName: hotel.displayName, config });
+  const sections = [
+    ["Wi-Fi & hotel info", config.aiKnowledgeBaseEn || config.aiKnowledgeBase || "Use Property setup → AI knowledge base to add Wi-Fi, parking, pool, gym, and house rules."],
+    ["Breakfast & restaurant", config.amenitiesSummary || "Add breakfast times, restaurant hours, and room-service notes in Property setup."],
+    ["Checkout & assistance", "Guests can reply to the WhatsApp conversation for late checkout, maintenance, housekeeping, or front-desk help."],
+    ["Public review link", config.googleReviewLink || "No public review link configured yet."]
+  ]
+    .map(
+      ([title, body]) => `<article style="background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px">
+        <h3 style="margin:0 0 6px">${escapeHtml(title)}</h3>
+        <p class="muted" style="white-space:pre-wrap;margin:0;font-size:13px;line-height:1.5">${escapeHtml(body)}</p>
+      </article>`
+    )
+    .join("");
+  const content = `
+<div class="pms-hero">
+  <h1>Guest guidebook</h1>
+  <p>A WhatsApp-ready guest manual: Wi-Fi, breakfast, checkout, house rules, emergency help, and review link. Keep the source text in Property setup so AI answers and guidebook copy stay aligned.</p>
+</div>
+<div class="actions">
+  <a class="btn-link primary" href="/admin/setup">Edit guidebook source</a>
+  <a class="btn-link" href="/admin/conversations">Open WhatsApp Center</a>
+</div>
+<div class="grid-2" style="align-items:start;margin-top:14px">
+  <section style="display:grid;gap:12px">${sections}</section>
+  <section style="background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px">
+    <h3 style="margin-top:0">WhatsApp preview</h3>
+    <pre style="white-space:pre-wrap;margin:0;background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:12px;font-size:13px;line-height:1.5">${escapeHtml(guideBody)}</pre>
+    <p class="muted" style="font-size:12px">Open any booking detail and click <strong>Send guest guidebook</strong> to send this to the guest.</p>
+  </section>
+</div>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
 adminRouter.get("/whatsapp/failed-messages", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
@@ -15438,6 +15777,56 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
     rangeEndExclusive,
     roomTypes: hotel.roomTypes
   });
+  const [feedbackAgg, outstandingBookings] = await Promise.all([
+    prisma.guestFeedback.aggregate({
+      where: { hotelId: hotel.id, createdAt: { gte: rangeStart, lt: rangeEndExclusive } },
+      _avg: { rating: true },
+      _count: { _all: true }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        paymentStatus: { not: PaymentStatus.SUCCEEDED }
+      },
+      select: { totalAmount: true }
+    })
+  ]);
+  const cancellationRate =
+    kpi.bookingsTotal > 0 ? ((kpi.bookingsCancelled + kpi.bookingsNoShow) / kpi.bookingsTotal) * 100 : 0;
+  const whatsappConversion =
+    kpi.conversationsTotal > 0 ? (kpi.conversationsWithBooking / kpi.conversationsTotal) * 100 : 0;
+  const restaurantRevenue = kpi.fbRevenue + kpi.folioFnbGuestChargesNet + kpi.folioFnbDirectChargesNet;
+  const outstandingAmount = outstandingBookings.reduce((sum, b) => sum + b.totalAmount, 0);
+  const topSource = kpi.bookingSources[0];
+  const ownerCards = [
+    {
+      title: "Occupancy",
+      value: `${kpi.occupancyRatePct.toFixed(1)}%`,
+      sub: "How much of the available room inventory was used."
+    },
+    { title: "ADR", value: formatMoney(kpi.adr, hotel.currency), sub: "Average room revenue per booked night." },
+    { title: "RevPAR", value: formatMoney(kpi.revpar, hotel.currency), sub: "Revenue per available room night." },
+    {
+      title: "Top booking source",
+      value: topSource ? topSource.label : "—",
+      sub: topSource ? `${topSource.count} booking${topSource.count === 1 ? "" : "s"} in this range.` : "No source data yet."
+    },
+    { title: "Cancellation / no-show", value: `${cancellationRate.toFixed(1)}%`, sub: "Bookings lost or not used in this range." },
+    {
+      title: "Guest rating",
+      value: feedbackAgg._avg.rating ? `${feedbackAgg._avg.rating.toFixed(2)}/5` : "—",
+      sub: `${feedbackAgg._count._all} feedback response${feedbackAgg._count._all === 1 ? "" : "s"} in range.`
+    },
+    { title: "WhatsApp conversion", value: `${whatsappConversion.toFixed(1)}%`, sub: "New conversations that produced at least one booking." },
+    { title: "Restaurant revenue", value: formatMoney(restaurantRevenue, hotel.currency), sub: "Posted F&B orders plus F&B folio charges." },
+    { title: "Outstanding balance", value: formatMoney(outstandingAmount, hotel.currency), sub: `${outstandingBookings.length} active booking${outstandingBookings.length === 1 ? "" : "s"} not fully paid.` }
+  ];
+  const ownerCardsHtml = ownerCards
+    .map(
+      (c) => `<article class="stat"><h3>${escapeHtml(c.title)}</h3><p>${escapeHtml(c.value)}</p><p class="muted" style="font-size:12px;margin:0">${escapeHtml(c.sub)}</p></article>`
+    )
+    .join("");
 
   const srcRows = kpi.bookingSources
     .map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td></tr>`)
@@ -15472,6 +15861,12 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
   <label>To <input type="date" name="end" value="${escapeHtml(formatDateForInput(customEnd))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
   <button type="submit" style="padding:9px 14px;border:0;border-radius:8px;background:#075e54;color:#fff;font-weight:700">Apply</button>
 </form>
+
+<section style="margin:0 0 18px">
+  <h3 style="margin:0 0 8px">Owner performance snapshot</h3>
+  <p class="muted" style="font-size:13px;margin:0 0 12px">Plain-language cards for the numbers owners usually ask about first: occupancy, rate, revenue efficiency, demand sources, ratings, WhatsApp performance, restaurant revenue, and unpaid money.</p>
+  <div class="grid-4">${ownerCardsHtml}</div>
+</section>
 
 <div class="grid-4">
   <article class="stat"><h3>Occupancy (range)</h3><p>${kpi.occupancyRatePct.toFixed(1)}%</p><p class="muted" style="font-size:12px;margin:0">Booked nights / capacity nights</p></article>
@@ -15600,6 +15995,248 @@ adminRouter.get("/management-kpi", requirePermission("REPORTS", "VIEW"), async (
 </section>
 `;
 
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/channel-control", requirePermission("ROOMS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Channel control</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const selectedDate = parseDateInput(req.query.date, startOfDay(new Date()));
+  const dateEnd = addDays(selectedDate, 1);
+  const next30 = addDays(selectedDate, 30);
+  const propWhere = isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {};
+
+  const [roomTypes, bookings, connections] = await Promise.all([
+    prisma.roomType.findMany({
+      where: { hotelId: hotel.id, isActive: true, ...propWhere },
+      orderBy: { name: "asc" },
+      include: {
+        inventory: { where: { date: selectedDate }, take: 1 },
+        roomUnits: { where: { isActive: true }, select: { id: true, notes: true } }
+      }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        ...propWhere,
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN, BookingStatus.PENDING] },
+        checkIn: { lt: next30 },
+        checkOut: { gt: selectedDate }
+      },
+      select: { id: true, source: true, roomTypeId: true, checkIn: true, checkOut: true, totalAmount: true, currency: true }
+    }),
+    prisma.integrationConnection.findMany({ where: { hotelId: hotel.id } })
+  ]);
+
+  const connectionByProvider = new Map(connections.map((c) => [c.provider, c]));
+  const bookingsTodayByRoomType = new Map<string, number>();
+  const sourceCounts = new Map<ChannelProvider, number>();
+  for (const b of bookings) {
+    sourceCounts.set(b.source, (sourceCounts.get(b.source) ?? 0) + 1);
+    if (b.checkIn < dateEnd && b.checkOut > selectedDate) {
+      bookingsTodayByRoomType.set(b.roomTypeId, (bookingsTodayByRoomType.get(b.roomTypeId) ?? 0) + 1);
+    }
+  }
+
+  const roomRows = roomTypes
+    .map((rt) => {
+      const inv = rt.inventory[0];
+      const total = inv?.total ?? rt.totalInventory;
+      const reserved = inv?.reserved ?? bookingsTodayByRoomType.get(rt.id) ?? 0;
+      const closedOut = inv?.closedOut ?? false;
+      const maintenance = rt.roomUnits.filter((u) => parseManualRoomStatusFromNotes(u.notes) === "MAINTENANCE").length;
+      const cleaning = rt.roomUnits.filter((u) => parseManualRoomStatusFromNotes(u.notes) === "CLEANING").length;
+      const available = Math.max(0, total - reserved - maintenance - cleaning);
+      const risk =
+        closedOut ? "Stop sell" : available <= 0 ? "Sold out / risk" : available <= 2 ? "Low stock" : "Open";
+      const badge =
+        closedOut || available <= 0
+          ? "alert"
+          : available <= 2
+            ? "pending"
+            : "ok";
+      return `<tr>
+        <td><strong>${escapeHtml(rt.name)}</strong><div class="muted" style="font-size:12px">Base ${formatMoney(rt.baseNightlyRate, hotel.currency)}</div></td>
+        <td>${total}</td>
+        <td>${reserved}</td>
+        <td>${maintenance}</td>
+        <td>${cleaning}</td>
+        <td><strong>${available}</strong></td>
+        <td><span class="badge ${badge}">${escapeHtml(risk)}</span></td>
+      </tr>`;
+    })
+    .join("");
+
+  const channelCard = (label: string, provider: ChannelProvider | null, source: ChannelProvider | null, note: string) => {
+    const conn = provider ? connectionByProvider.get(provider) : null;
+    const count = source ? sourceCounts.get(source) ?? 0 : 0;
+    const connected = Boolean(conn && conn.status !== "disconnected");
+    const status = provider ? (connected ? conn?.status ?? "connected" : "Not connected yet") : "Native";
+    const tone = provider ? (connected ? "ok" : "pending") : "ok";
+    return `<article class="chan-card ${tone}">
+      <h3>${escapeHtml(label)}</h3>
+      <div class="chan-number">${count}</div>
+      <p>${escapeHtml(note)}</p>
+      <span class="badge ${tone === "ok" ? "ok" : "pending"}">${escapeHtml(status)}</span>
+      ${conn?.lastSyncedAt ? `<div class="muted" style="font-size:12px;margin-top:8px">Last sync ${formatDateTime(conn.lastSyncedAt)}</div>` : ""}
+    </article>`;
+  };
+
+  const content = `
+<style>
+.chan-hero { padding:18px 20px; border-radius:18px; background:linear-gradient(135deg,#0f766e,#0f172a); color:#fff; margin-bottom:16px; }
+.chan-hero h2 { margin:0 0 6px; font-size:22px; }
+.chan-hero p { margin:0; opacity:.92; max-width:900px; line-height:1.5; }
+.chan-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; margin:16px 0; }
+.chan-card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:14px 16px; box-shadow:0 10px 26px rgba(15,23,42,.05); }
+.chan-card.ok { border-color:#bbf7d0; }
+.chan-card.pending { border-color:#fde68a; }
+.chan-card h3 { margin:0; font-size:14px; color:#0f172a; }
+.chan-number { margin:8px 0 4px; font-size:30px; font-weight:900; color:#064e46; line-height:1; }
+.chan-card p { margin:0 0 10px; color:#64748b; font-size:12.5px; line-height:1.45; }
+</style>
+<div class="chan-hero">
+  <h2>Channel control</h2>
+  <p>${escapeHtml(hotel.displayName)} — a practical channel manager-lite view. Native channels are active now; OTA cards are prepared for future Booking.com / Airbnb / Expedia integrations and show risk until connected.</p>
+</div>
+<form method="get" action="/admin/channel-control" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:12px">
+  <label>Date <input type="date" name="date" value="${escapeHtml(formatDateForInput(selectedDate))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
+  <button type="submit" class="btn-link primary">Refresh</button>
+  <a class="btn-link" href="/admin/inventory?start=${escapeHtml(formatDateForInput(selectedDate))}&days=14">Open availability calendar</a>
+</form>
+<div class="chan-grid">
+  ${channelCard("Website", null, ChannelProvider.DIRECT, "Direct web and booking-engine reservations.")}
+  ${channelCard("WhatsApp", null, ChannelProvider.WHATSAPP, "Native ChatAstay WhatsApp bookings and assisted conversions.")}
+  ${channelCard("Manual / front desk", null, ChannelProvider.PHONE, "Desk, phone, walk-in, and staff-created reservations.")}
+  ${channelCard("Booking.com", ChannelProvider.BOOKING_COM, ChannelProvider.BOOKING_COM, "Placeholder until real OTA sync is connected.")}
+  ${channelCard("Airbnb", ChannelProvider.AIRBNB, ChannelProvider.AIRBNB, "Placeholder until real OTA sync is connected.")}
+  ${channelCard("Expedia", ChannelProvider.EXPEDIA, ChannelProvider.EXPEDIA, "Placeholder until real OTA sync is connected.")}
+</div>
+<section style="background:#fff;border:1px solid var(--border);border-radius:16px;padding:16px;box-shadow:0 10px 26px rgba(15,23,42,.05)">
+  <h3 style="margin-top:0">Inventory risk for ${escapeHtml(formatDateForInput(selectedDate))}</h3>
+  <p class="muted" style="font-size:13px">Available = inventory total minus reservations, maintenance, and cleaning. Low stock means staff should avoid manual overbooking and watch OTA placeholders closely.</p>
+  <div style="overflow:auto">
+    <table>
+      <thead><tr><th>Room type</th><th>Total</th><th>Reserved</th><th>Maintenance</th><th>Cleaning</th><th>Left</th><th>Risk</th></tr></thead>
+      <tbody>${roomRows || '<tr><td colspan="7" class="muted">No active room types.</td></tr>'}</tbody>
+    </table>
+  </div>
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.get("/payment-reconciliation", requirePermission("REPORTS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true, currency: true }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Payment reconciliation</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const day = parseDateInput(req.query.date, startOfDay(new Date()));
+  const dayEnd = endOfDay(day);
+  const snapshot = await computeShiftSnapshot({ hotelId: hotel.id, currency: hotel.currency, shiftStart: day, shiftEnd: dayEnd });
+  const [folioRows, paymentIntents, outstandingBookings] = await Promise.all([
+    prisma.folioTransaction.findMany({
+      where: { hotelId: hotel.id, chargeDate: { gte: day, lte: dayEnd } },
+      orderBy: { chargeDate: "desc" },
+      take: 120,
+      include: { booking: { include: { guest: true } } }
+    }),
+    prisma.paymentIntent.findMany({
+      where: { hotelId: hotel.id, createdAt: { gte: day, lte: dayEnd } },
+      orderBy: { createdAt: "desc" },
+      include: { booking: { include: { guest: true } } }
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        paymentStatus: { not: PaymentStatus.SUCCEEDED }
+      },
+      orderBy: { checkOut: "asc" },
+      take: 30,
+      select: {
+        id: true,
+        referenceCode: true,
+        totalAmount: true,
+        currency: true,
+        paymentStatus: true,
+        guest: true,
+        roomUnit: true
+      }
+    })
+  ]);
+  const refunds = folioRows.filter((r) => r.transactionType === FolioTransactionType.REFUND && !r.isVoided);
+  const voided = folioRows.filter((r) => r.isVoided || r.voidedAt);
+  const pendingOnline = paymentIntents.filter((p) => p.status === PaymentStatus.PENDING || p.status === PaymentStatus.REQUIRES_ACTION);
+  const failedOnline = paymentIntents.filter((p) => p.status === PaymentStatus.FAILED);
+  const onlinePaid = paymentIntents.filter((p) => p.status === PaymentStatus.SUCCEEDED).reduce((sum, p) => sum + p.amount, 0);
+  const bucketRows = snapshot.paymentBuckets
+    .map((b) => `<tr><td>${escapeHtml(b.label)}</td><td>${b.count}</td><td>${formatMoney(b.amount, hotel.currency)}</td></tr>`)
+    .join("");
+  const outstandingRows = outstandingBookings
+    .map(
+      (b) => `<tr>
+        <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(displayBookingReference(b))}</a></td>
+        <td>${escapeHtml(b.guest.fullName ?? b.guest.phoneE164)}</td>
+        <td>${escapeHtml(b.roomUnit?.name ?? "Unassigned")}</td>
+        <td>${escapeHtml(b.paymentStatus)}</td>
+        <td>${formatMoney(b.totalAmount, b.currency)}</td>
+      </tr>`
+    )
+    .join("");
+  const exceptionRows = [...refunds, ...voided]
+    .slice(0, 40)
+    .map(
+      (r) => `<tr>
+        <td>${formatDateTime(r.chargeDate)}</td>
+        <td>${escapeHtml(r.transactionType)}${r.isVoided || r.voidedAt ? ' <span class="badge alert">VOIDED</span>' : ""}</td>
+        <td>${escapeHtml(r.booking?.guest?.fullName ?? r.booking?.guest?.phoneE164 ?? "Walk-in / no booking")}</td>
+        <td>${formatMoney(r.grossAmount, r.currency)}</td>
+        <td>${escapeHtml(r.voidReason ?? r.notes ?? "—")}</td>
+      </tr>`
+    )
+    .join("");
+  const content = `
+<div class="pms-hero">
+  <h1>Payment reconciliation</h1>
+  <p>${escapeHtml(hotel.displayName)} — cashier view for payments, pending links, refunds, voids, and unpaid stays. Use it before shift close and manager handover.</p>
+</div>
+<form method="get" action="/admin/payment-reconciliation" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:14px">
+  <label>Date <input type="date" name="date" value="${escapeHtml(formatDateForInput(day))}" style="padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
+  <button type="submit" class="btn-link primary">Refresh</button>
+  <a class="btn-link" href="/admin/shift-close">Shift close</a>
+  <a class="btn-link" href="/admin/shifts">Shift history</a>
+</form>
+<div class="grid-4">
+  <article class="stat"><h3>Folio payments</h3><p>${formatMoney(snapshot.totalPaymentsRecorded, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">${snapshot.transactionCount} folio lines</p></article>
+  <article class="stat"><h3>Cash received</h3><p>${formatMoney(snapshot.cashReceived, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">Expected cashier cash input</p></article>
+  <article class="stat"><h3>Online paid today</h3><p>${formatMoney(onlinePaid, hotel.currency)}</p><p class="muted" style="font-size:12px;margin:0">Succeeded payment intents</p></article>
+  <article class="stat"><h3>Pending / failed links</h3><p>${pendingOnline.length} / ${failedOnline.length}</p><p class="muted" style="font-size:12px;margin:0">Guest payment links</p></article>
+</div>
+<div class="grid-2" style="margin-top:16px;align-items:start">
+  <section style="background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px">
+    <h3 style="margin-top:0">Payments by method</h3>
+    <table><thead><tr><th>Method</th><th>Lines</th><th>Amount</th></tr></thead><tbody>${bucketRows || '<tr><td colspan="3">No folio payments today.</td></tr>'}</tbody></table>
+  </section>
+  <section style="background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px">
+    <h3 style="margin-top:0">Outstanding bookings</h3>
+    <table><thead><tr><th>Booking</th><th>Guest</th><th>Room</th><th>Status</th><th>Total</th></tr></thead><tbody>${outstandingRows || '<tr><td colspan="5">No unpaid active bookings.</td></tr>'}</tbody></table>
+  </section>
+</div>
+<section style="margin-top:16px;background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px">
+  <h3 style="margin-top:0">Refunds and voided payments / charges</h3>
+  <table><thead><tr><th>When</th><th>Type</th><th>Guest</th><th>Amount</th><th>Reason / note</th></tr></thead><tbody>${exceptionRows || '<tr><td colspan="5">No refunds or voids today.</td></tr>'}</tbody></table>
+</section>`;
   res.type("html").send(renderLayout(content, true));
 });
 
@@ -17348,6 +17985,12 @@ const maintenanceStyles = `<style>
 @keyframes maint-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,.45); } 50% { box-shadow:0 0 0 6px rgba(239,68,68,0); } }
 .maint-note { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; color:#1f2937; font-size:13.5px; line-height:1.5; white-space:pre-wrap; min-height:36px; }
 .maint-note.empty { color:#94a3b8; font-style:italic; }
+.maint-impact { margin-top:10px; border:1px solid #e2e8f0; border-radius:12px; padding:10px 12px; background:#fff; }
+.maint-impact h4 { margin:0 0 7px; font-size:12px; color:#475569; letter-spacing:.05em; text-transform:uppercase; font-weight:900; }
+.maint-impact-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.maint-impact-grid div { background:#f8fafc; border-radius:10px; padding:8px; }
+.maint-impact-grid strong { display:block; font-size:17px; color:#0f172a; }
+.maint-impact-grid span { font-size:11px; color:#64748b; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
 .maint-card .actions { margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 .maint-card .actions form { margin:0; }
 .maint-btn { padding:9px 14px; border:0; border-radius:10px; font-weight:800; font-size:13px; cursor:pointer; transition:transform 0.12s ease, box-shadow 0.12s ease; }
@@ -17379,7 +18022,7 @@ adminRouter.get(
   async (req, res) => {
     const hotel = await prisma.hotel.findFirst({
       where: { slug: activeHotelSlug() },
-      select: { id: true, displayName: true }
+      select: { id: true, displayName: true, currency: true }
     });
     if (!hotel) {
       res.type("html").send(renderLayout("<h2>Maintenance</h2><p>No hotel data.</p>", true));
@@ -17409,6 +18052,44 @@ adminRouter.get(
     const maintenanceUnits = units.filter((u) => parseManualRoomStatusFromNotes(u.notes) === "MAINTENANCE");
     const maintenanceTasks = tasks.filter((t) => /maintenance|repair|fix|broken|issue|fault|urgent/i.test(t.notes ?? ""));
     const urgentCount = maintenanceUnits.filter((u) => parseMaintenanceUrgentFromNotes(u.notes)).length;
+    const maintenanceUnitIds = maintenanceUnits.map((u) => u.id);
+    const maintenanceRoomTypeIds = Array.from(new Set(maintenanceUnits.map((u) => u.roomTypeId)));
+    const impactWindowEnd = addDays(new Date(), 60);
+    const [futureImpactedBookings, alternativeUnits] = await Promise.all([
+      maintenanceUnitIds.length
+        ? prisma.booking.findMany({
+            where: {
+              hotelId: hotel.id,
+              roomUnitId: { in: maintenanceUnitIds },
+              status: { in: [BookingStatus.CONFIRMED, BookingStatus.PENDING, BookingStatus.CHECKED_IN] },
+              checkOut: { gt: new Date() },
+              checkIn: { lt: impactWindowEnd }
+            },
+            orderBy: { checkIn: "asc" },
+            include: { guest: { select: { fullName: true, phoneE164: true } }, roomType: { select: { name: true } } }
+          })
+        : Promise.resolve([]),
+      maintenanceRoomTypeIds.length
+        ? prisma.roomUnit.findMany({
+            where: { hotelId: hotel.id, roomTypeId: { in: maintenanceRoomTypeIds }, isActive: true },
+            select: { id: true, roomTypeId: true, notes: true }
+          })
+        : Promise.resolve([])
+    ]);
+    const impactedByUnit = new Map<string, typeof futureImpactedBookings>();
+    for (const b of futureImpactedBookings) {
+      if (!b.roomUnitId) continue;
+      const rows = impactedByUnit.get(b.roomUnitId) ?? [];
+      rows.push(b);
+      impactedByUnit.set(b.roomUnitId, rows);
+    }
+    const alternativesByRoomType = new Map<string, number>();
+    for (const u of alternativeUnits) {
+      const status = parseManualRoomStatusFromNotes(u.notes);
+      if (status === "MAINTENANCE" || status === "CLEANING" || status === "OCCUPIED") continue;
+      alternativesByRoomType.set(u.roomTypeId, (alternativesByRoomType.get(u.roomTypeId) ?? 0) + 1);
+    }
+    const totalRevenueRisk = futureImpactedBookings.reduce((sum, b) => sum + b.totalAmount, 0);
 
     // Flash messages from POST redirects
     const flashRaw = typeof req.query.ok === "string" ? req.query.ok : "";
@@ -17437,6 +18118,24 @@ adminRouter.get(
               <input type="hidden" name="urgent" value="true" />
               <button type="submit" class="maint-btn maint-btn-urgent">🚨 Flag urgent</button>
             </form>`;
+        const impacted = impactedByUnit.get(u.id) ?? [];
+        const nextBooking = impacted[0];
+        const altCount = alternativesByRoomType.get(u.roomTypeId) ?? 0;
+        const revenueRisk = impacted.reduce((sum, b) => sum + b.totalAmount, 0);
+        const impactHtml = `<div class="maint-impact">
+          <h4>Booking impact</h4>
+          <div class="maint-impact-grid">
+            <div><strong>${impacted.length}</strong><span>Future stays</span></div>
+            <div><strong>${formatMoney(revenueRisk, hotel.currency)}</strong><span>Revenue risk</span></div>
+            <div><strong>${nextBooking ? escapeHtml(formatDateForInput(nextBooking.checkIn)) : "—"}</strong><span>Next arrival</span></div>
+            <div><strong>${altCount}</strong><span>Same-type alternatives</span></div>
+          </div>
+          ${
+            nextBooking
+              ? `<p class="muted" style="font-size:12px;margin:8px 0 0">Next affected guest: <strong>${escapeHtml(nextBooking.guest.fullName ?? nextBooking.guest.phoneE164)}</strong> · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(nextBooking.id)}">Open booking</a></p>`
+              : `<p class="muted" style="font-size:12px;margin:8px 0 0">No assigned future stay is currently blocked by this room.</p>`
+          }
+        </div>`;
         return `<article class="maint-card ${isUrgent ? "urgent" : ""}" data-unit-id="${escapeHtml(u.id)}">
           <div class="head">
             <div>
@@ -17449,6 +18148,7 @@ adminRouter.get(
             </div>
           </div>
           ${noteHtml}
+          ${impactHtml}
           <div class="actions">
             <form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/mark-fixed">
               <button type="submit" class="maint-btn maint-btn-fix">✅ Mark fixed</button>
@@ -17481,6 +18181,7 @@ ${flashHtml}
 <div class="maint-strip">
   <div class="maint-kpi"><h4>Rooms in maintenance</h4><div class="v ${maintenanceUnits.length ? "warn" : "ok"}">${maintenanceUnits.length}</div><div class="sub">Currently out of service</div></div>
   <div class="maint-kpi"><h4>Urgent</h4><div class="v ${urgentCount ? "alert" : "ok"}">${urgentCount}</div><div class="sub">Flagged as priority</div></div>
+  <div class="maint-kpi"><h4>Affected bookings</h4><div class="v ${futureImpactedBookings.length ? "alert" : "ok"}">${futureImpactedBookings.length}</div><div class="sub">${formatMoney(totalRevenueRisk, hotel.currency)} at risk</div></div>
   <div class="maint-kpi"><h4>Open repair notes</h4><div class="v ${maintenanceTasks.length ? "warn" : "ok"}">${maintenanceTasks.length}</div><div class="sub">From the cleaning team</div></div>
 </div>
 <h3 style="margin:0 0 10px;font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:0.06em;font-weight:800">Rooms marked maintenance</h3>
@@ -17752,13 +18453,21 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
       hasArrivalToday
     });
     const elapsed = t.startedAt ? housekeepingDurationMinutes(t.startedAt, new Date()) : null;
+    const sla = deriveHousekeepingSla({
+      createdAt: t.createdAt,
+      startedAt: t.startedAt,
+      status: t.status,
+      assignedToUserId: t.assignedToUserId,
+      nextArrivalAt: arrivalHint?.checkIn ?? null
+    });
     return {
       ...t,
       hkShift: shift,
       hkPriority: ev.level,
       hkReason: ev.reason,
       nextArrivalAt: arrivalHint?.checkIn ?? null,
-      elapsedMinutes: elapsed
+      elapsedMinutes: elapsed,
+      hkSla: sla
     };
   });
 
@@ -17915,12 +18624,16 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
           </form>`
         : "";
     const priorityBadgeColor = t.hkPriority === "CRITICAL" ? "#b91c1c" : t.hkPriority === "HIGH" ? "#dc2626" : t.hkPriority === "MEDIUM" ? "#ca8a04" : "#475569";
+    const slaCell = `<span class="badge ${t.hkSla.tone}">${escapeHtml(t.hkSla.label)}</span><div class="muted" style="font-size:11px;margin-top:4px">Target ${escapeHtml(formatDateTime(t.hkSla.targetReadyAt))}</div><div class="muted" style="font-size:10px;margin-top:2px">${escapeHtml(t.hkSla.detail)}</div>${
+      t.nextArrivalAt ? `<div class="muted" style="font-size:10px;margin-top:2px">Next arrival ${escapeHtml(formatDateTime(t.nextArrivalAt))}</div>` : ""
+    }`;
     return `<tr>
       <td>${escapeHtml(roomLabel)}</td>
       <td>${escapeHtml(t.status)}</td>
       <td>${escapeHtml(t.source)}</td>
       <td>${assignee}${modeLine}${adminLine}${suggestLine}${claimedAt}<div style="margin-top:4px;font-size:11px;color:#475569">Elapsed: ${escapeHtml(formatDurationMinutes(t.elapsedMinutes))}</div></td>
       <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:${priorityBadgeColor};color:#fff">${t.hkPriority}</span><div class="muted" style="font-size:10px;margin-top:4px;line-height:1.35">${escapeHtml(t.hkReason)}</div></td>
+      <td>${slaCell}</td>
       <td><span class="badge pending">${t.hkShift}</span></td>
       <td>${ref}</td>
       <td style="white-space:nowrap">${claimBtn}${startBtn}${doneBtn}${maintenanceBtn}${reassignSelect}</td>
@@ -18016,6 +18729,8 @@ adminRouter.get("/housekeeping", requirePermissionAny([{ module: "HOUSEKEEPING",
     if (arrT > nowT + HK_SUPERVISOR_DUE_SOON_MS) return false;
     return true;
   }).length;
+  const slaLateCount = openTaskDecorated.filter((t) => t.hkSla.label === "Late" || t.hkSla.label === "Blocking arrival").length;
+  const slaDueSoonCount = openTaskDecorated.filter((t) => t.hkSla.label === "Due soon").length;
   const workloadRows = cleanerWorkloads
     .slice(0, 12)
     .map((w) => `<tr><td>${escapeHtml(w.name)}</td><td>${w.active}</td></tr>`)
@@ -18103,6 +18818,8 @@ ${alertsHtml}
   <article class="stat"><h3>In progress</h3><p>${inProgressCount}</p></article>
   <article class="stat"><h3>Unclaimed critical</h3><p>${unclaimedCritical}</p></article>
   <article class="stat"><h3>Unclaimed high</h3><p>${unclaimedHigh}</p></article>
+  <article class="stat"><h3>SLA late / blocking</h3><p>${slaLateCount}</p></article>
+  <article class="stat"><h3>SLA due soon</h3><p>${slaDueSoonCount}</p></article>
   <article class="stat"><h3>Completed (${formatDateForInput(statsDate)})</h3><p>${completedForStats.length}</p></article>
   <article class="stat"><h3>Avg clean time</h3><p>${escapeHtml(formatDurationMinutes(completedAvg))}</p></article>
 </section>
@@ -18181,8 +18898,8 @@ ${alertsHtml}
   <h3>Open tasks</h3>
   <div style="overflow:auto">
   <table class="data-table" style="min-width:720px">
-    <thead><tr><th>Room</th><th>Status</th><th>Source</th><th>Assigned</th><th>Priority</th><th>Shift</th><th>Booking ref</th><th></th></tr></thead>
-    <tbody>${sortedOpenTasks.length ? sortedOpenTasks.map(rowHtml).join("") : '<tr><td colspan="8" class="muted">No open housekeeping tasks in this view.</td></tr>'}</tbody>
+    <thead><tr><th>Room</th><th>Status</th><th>Source</th><th>Assigned</th><th>Priority</th><th>SLA</th><th>Shift</th><th>Booking ref</th><th></th></tr></thead>
+    <tbody>${sortedOpenTasks.length ? sortedOpenTasks.map(rowHtml).join("") : '<tr><td colspan="9" class="muted">No open housekeeping tasks in this view.</td></tr>'}</tbody>
   </table>
   </div>
 </section>
@@ -19083,6 +19800,9 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
   const invoiceSentNotice = req.query.invoiceSent ? '<p class="badge ok">Invoice PDF sent to guest.</p>' : "";
   const quotationSentNotice = req.query.quotationSent ? '<p class="badge ok">Quotation PDF sent to guest.</p>' : "";
   const receiptSentNotice = req.query.receiptSent ? '<p class="badge ok">Receipt PDF sent to guest.</p>' : "";
+  const guideSentNotice = req.query.guideSent ? '<p class="badge ok">Guest guidebook sent on WhatsApp.</p>' : "";
+  const guideErrorNotice =
+    typeof req.query.guideError === "string" ? `<p class="badge alert">${escapeHtml(req.query.guideError)}</p>` : "";
   const invoiceErrorNotice =
     typeof req.query.invoiceError === "string" ? `<p class="badge alert">${escapeHtml(req.query.invoiceError)}</p>` : "";
   const roomChangedNotice = req.query.roomChanged
@@ -19099,7 +19819,7 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
     booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.PENDING;
   const canAddLinkedRoom =
     booking.status !== BookingStatus.CANCELLED && booking.status !== BookingStatus.NO_SHOW;
-  const [selectedUnitCode, latestInvoiceDispatch, fbFolio, fbOrders] = await Promise.all([
+  const [selectedUnitCode, latestInvoiceDispatch, fbFolio, fbOrders, bookingMessages, failedGuestNotifications] = await Promise.all([
     getBookingUnitCode(booking.id),
     getLatestInvoiceDispatch(booking.id),
     getFbFolioForBooking(booking.id),
@@ -19107,6 +19827,23 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
       where: { bookingId: booking.id, status: FbOrderStatus.POSTED },
       orderBy: { createdAt: "desc" },
       include: { lines: true }
+    }),
+    booking.conversationId
+      ? prisma.message.findMany({
+          where: { hotelId: hotel.id, conversationId: booking.conversationId },
+          orderBy: { createdAt: "desc" },
+          take: 50
+        })
+      : Promise.resolve([]),
+    prisma.notification.findMany({
+      where: {
+        hotelId: hotel.id,
+        guestId: booking.guestId,
+        status: NotificationStatus.FAILED,
+        createdAt: { gte: addDays(new Date(), -30) }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 8
     })
   ]);
   const folioGrandTotal = Number((booking.totalAmount + fbFolio.subtotal).toFixed(2));
@@ -19147,6 +19884,90 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
     </tr>`
     )
     .join("");
+
+  const journeySteps = [
+    {
+      label: "Pre-arrival reminder",
+      sentAt: booking.guestJourneyPreArrival24hSentAt ?? booking.preArrivalReminderSentAt,
+      dueAt: addDays(booking.checkIn, -1),
+      detail: "Confirms arrival details before the guest reaches the hotel."
+    },
+    {
+      label: "Check-in day message",
+      sentAt: booking.guestJourneyCheckinDaySentAt,
+      dueAt: booking.checkIn,
+      detail: "Same-day arrival reminder and front-desk instructions."
+    },
+    {
+      label: "In-stay welcome / services",
+      sentAt: booking.guestJourneyInStayWelcomeSentAt,
+      dueAt: booking.checkIn,
+      detail: "Welcome message with service options for guests in-house."
+    },
+    {
+      label: "Post-checkout thank you",
+      sentAt: booking.guestJourneyPostCheckoutThankYouSentAt,
+      dueAt: booking.checkOut,
+      detail: "Friendly departure follow-up after checkout."
+    },
+    {
+      label: "Review request",
+      sentAt: booking.guestJourneyReviewRequestSentAt,
+      dueAt: addDays(booking.checkOut, 1),
+      detail: "Private feedback request before public review growth."
+    },
+    {
+      label: "Review reminder",
+      sentAt: booking.guestJourneyReviewReminderSentAt,
+      dueAt: addDays(booking.checkOut, 3),
+      detail: "Only useful when no feedback has been received."
+    },
+    {
+      label: "Repeat guest promo",
+      sentAt: booking.guestJourneyRepeatPromoSentAt,
+      dueAt: addDays(booking.checkOut, 21),
+      detail: "Future-stay nudge after the guest has left."
+    }
+  ];
+  const nowForTimeline = new Date();
+  const journeyRows = journeySteps
+    .map((s) => {
+      const state = s.sentAt ? "Sent" : s.dueAt > nowForTimeline ? "Scheduled" : "Due / pending";
+      const badge = s.sentAt ? "ok" : s.dueAt > nowForTimeline ? "pending" : "alert";
+      const when = s.sentAt ? formatDateTime(s.sentAt) : `Due ${formatDateTime(s.dueAt)}`;
+      return `<tr><td><strong>${escapeHtml(s.label)}</strong><div class="muted" style="font-size:12px">${escapeHtml(s.detail)}</div></td><td><span class="badge ${badge}">${escapeHtml(state)}</span></td><td>${escapeHtml(when)}</td></tr>`;
+    })
+    .join("");
+  const latestOutboundRows = bookingMessages
+    .filter((m) => m.direction === MessageDirection.OUTBOUND)
+    .slice(0, 8)
+    .map((m) => `<li><strong>${escapeHtml(m.aiIntent ? (aiIntentDisplayLabel(String(m.aiIntent)) ?? "Outbound WhatsApp") : "Outbound WhatsApp")}</strong> — ${escapeHtml(m.body.slice(0, 140))}<span class="muted" style="display:block;font-size:12px">${formatDateTime(m.createdAt)}</span></li>`)
+    .join("");
+  const failedRows = failedGuestNotifications
+    .map((n) => `<li><strong>${escapeHtml(n.title ?? n.type)}</strong> — ${escapeHtml(n.body.slice(0, 160))}<span class="muted" style="display:block;font-size:12px">${formatDateTime(n.createdAt)}</span></li>`)
+    .join("");
+  const messageTimelineHtml = `<section style="margin-top:14px">
+  <h3>Auto message timeline</h3>
+  <p class="muted">What the guest journey automation has sent, what is due next, and whether any recent guest messages failed.</p>
+  <div class="grid-2" style="align-items:start">
+    <div style="overflow:auto">
+      <table>
+        <thead><tr><th>Journey step</th><th>Status</th><th>When</th></tr></thead>
+        <tbody>${journeyRows}</tbody>
+      </table>
+    </div>
+    <div style="display:grid;gap:12px">
+      <div style="border:1px solid var(--border);border-radius:12px;padding:12px;background:#fff">
+        <h4 style="margin:0 0 8px">Recent outbound WhatsApp</h4>
+        <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5">${latestOutboundRows || '<li class="muted">No outbound messages logged for this conversation yet.</li>'}</ul>
+      </div>
+      <div style="border:1px solid ${failedRows ? "#fecaca" : "var(--border)"};border-radius:12px;padding:12px;background:${failedRows ? "#fff5f5" : "#fff"}">
+        <h4 style="margin:0 0 8px">Failed guest messages</h4>
+        <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5">${failedRows || '<li class="muted">No failed guest messages in the last 30 days.</li>'}</ul>
+      </div>
+    </div>
+  </div>
+</section>`;
 
   let groupSectionHtml = "";
   if (booking.bookingGroupId) {
@@ -19208,7 +20029,9 @@ ${paymentLinkNotice}
 ${invoiceSentNotice}
 ${quotationSentNotice}
 ${receiptSentNotice}
+${guideSentNotice}
 ${invoiceErrorNotice}
+${guideErrorNotice}
 ${roomChangedNotice}
 ${linkedAddedNotice}
 ${roomChangeErrBanner}
@@ -19321,6 +20144,10 @@ ${groupSectionHtml}
           canSendReceipt ? "" : "disabled"
         }>Send receipt PDF</button>
       </form>
+      <form method="post" action="/admin/bookings/${encodeURIComponent(booking.id)}/send-guidebook" style="display:grid; gap:6px">
+        <p class="muted" style="margin:0;font-size:12px">Guest guidebook — Wi-Fi, breakfast, checkout, and hotel help via WhatsApp.</p>
+        <button type="submit" style="padding:9px 12px; border:0; border-radius:8px; background:#22c55e; color:#052e16; font-weight:800">Send guest guidebook</button>
+      </form>
     </div>
   </section>
 </div>
@@ -19332,6 +20159,7 @@ ${groupSectionHtml}
     <tbody>${fbOrderRows || '<tr><td colspan="5">No F&amp;B charges on this folio yet.</td></tr>'}</tbody>
   </table>
 </section>
+${messageTimelineHtml}
 <section style="margin-top:14px">
   <h3>Payment Intent History</h3>
   <table>
@@ -19341,6 +20169,50 @@ ${groupSectionHtml}
 </section>`;
 
   res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/bookings/:id/send-guidebook", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true }
+  });
+  const bookingId = String(req.params.id ?? "");
+  const back = `/admin/bookings/${encodeURIComponent(bookingId)}`;
+  if (!hotel) {
+    res.redirect(`${back}?guideError=${encodeURIComponent("Hotel not found.")}`);
+    return;
+  }
+  const booking = await prisma.booking.findFirst({
+    where: { id: bookingId, hotelId: hotel.id },
+    include: { guest: true }
+  });
+  if (!booking) {
+    res.redirect(`${back}?guideError=${encodeURIComponent("Booking not found.")}`);
+    return;
+  }
+  const phone = booking.guest.phoneE164.replace(/\D/g, "");
+  if (!phone) {
+    res.redirect(`${back}?guideError=${encodeURIComponent("Guest has no WhatsApp phone number.")}`);
+    return;
+  }
+  const config = loadPartnerSetupConfig(hotel.id);
+  try {
+    await sendWhatsAppText({
+      to: phone,
+      body: buildGuestGuidebookMessage({ hotelName: hotel.displayName, guestName: booking.guest.fullName, config }),
+      phoneNumberId: config.whatsappPhoneNumberId || undefined
+    });
+    await logAudit({
+      hotelId: hotel.id,
+      action: "GUEST_GUIDEBOOK_SENT",
+      entityType: "Booking",
+      entityId: booking.id,
+      metadata: { guestId: booking.guestId }
+    });
+    res.redirect(`${back}?guideSent=1`);
+  } catch (err) {
+    res.redirect(`${back}?guideError=${encodeURIComponent(err instanceof Error ? err.message : "Could not send guidebook.")}`);
+  }
 });
 
 adminRouter.post("/reports-center/guest-broadcast", requirePermission("REPORTS", "EDIT"), async (req, res) => {

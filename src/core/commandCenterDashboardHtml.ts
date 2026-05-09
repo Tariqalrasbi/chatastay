@@ -60,6 +60,15 @@ export type CommandCenterServiceRow = {
   actionLabel: string;
 };
 
+export type CommandCenterActionRow = {
+  label: string;
+  detail: string;
+  statusLabel: string;
+  tone: "ok" | "warn" | "alert" | "info";
+  href: string;
+  actionLabel: string;
+};
+
 export type CommandCenterDashboardVm = {
   hotelDisplayName: string;
   currency: string;
@@ -87,6 +96,7 @@ export type CommandCenterDashboardVm = {
     unpaidBookings: number;
     pendingPaymentIntents: number;
   };
+  dailyActions: CommandCenterActionRow[];
   /** Pre-escaped safe HTML fragments for <li> content */
   alertItemsHtml: string[];
 };
@@ -116,6 +126,34 @@ export function renderCommandCenterDashboard(htmlStyles: string, vm: CommandCent
           .map((h) => `<li>${h}</li>`)
           .join("")}</ul></div>`
       : "";
+
+  const dailyActionRows = vm.dailyActions
+    .map(
+      (a) => `<article class="cc-action ${esc(a.tone)}">
+        <div>
+          <strong>${esc(a.label)}</strong>
+          <p>${esc(a.detail)}</p>
+        </div>
+        <div class="cc-action-side">
+          <span class="cc-action-status">${esc(a.statusLabel)}</span>
+          <a href="${esc(a.href)}">${esc(a.actionLabel)} →</a>
+        </div>
+      </article>`
+    )
+    .join("");
+
+  const dailyActionsCard = `<section class="cc-card cc-action-center" aria-labelledby="cc-daily-actions">
+  <div class="cc-card-head">
+    <div>
+      <h2 id="cc-daily-actions">Daily Action Center</h2>
+      <p class="cc-empty" style="padding:3px 0 0;margin:0">The most important work for this shift, translated into plain operational next steps.</p>
+    </div>
+    <div class="cc-actions"><a href="/admin/handover-sheet">Handover sheet →</a></div>
+  </div>
+  <div class="cc-action-grid">
+    ${dailyActionRows || `<article class="cc-action ok"><div><strong>All clear</strong><p>No priority operational blockers were found for this shift.</p></div><div class="cc-action-side"><span class="cc-action-status">Ready</span><a href="/admin/alert-center">Alerts →</a></div></article>`}
+  </div>
+</section>`;
 
   const roomCard =
     vm.show.rooms && vm.roomSnapshot
@@ -279,6 +317,7 @@ export function renderCommandCenterDashboard(htmlStyles: string, vm: CommandCent
     <span>Currency <code>${esc(vm.currency)}</code></span>
   </div>
   ${alertStrip}
+  <div class="cc-grid-main">${dailyActionsCard}</div>
   ${roomCard ? `<div class="cc-grid-main">${roomCard}</div>` : ""}
   ${bookingsColumn}
   <div class="cc-grid-wide">
