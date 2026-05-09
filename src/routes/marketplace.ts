@@ -323,17 +323,27 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 @keyframes plan-suggest-pulse{0%{outline-color:rgba(37,211,102,0)}40%{outline-color:rgba(37,211,102,.7)}100%{outline-color:rgba(37,211,102,.55)}}
 .plan-card .plan-price{transition:transform .22s cubic-bezier(.25,1,.5,1),opacity .22s ease}
 .plan-card .plan-price.is-flipping{transform:translateY(-6px) scale(.96);opacity:.0}
-.pricing-controls{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:14px 18px;margin-top:24px}
-.pricing-currency{display:inline-flex;gap:4px;padding:4px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);border-radius:999px}
-.pricing-currency button{appearance:none;border:0;background:transparent;color:#ecfdf5;padding:6px 12px;font-size:12.5px;font-weight:800;letter-spacing:.04em;cursor:pointer;border-radius:999px;transition:background .18s ease,color .18s ease,box-shadow .18s ease}
+/* Floating "Best for your size" callout that pops above a matched plan card. */
+.plan-card .plan-suggested-callout{position:absolute;left:50%;top:-46px;transform:translateX(-50%) translateY(8px) scale(.92);display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:14px;background:linear-gradient(135deg,#053b18 0%,#0c7a6e 60%,#128c7e 100%);color:#fff;font-size:12.5px;font-weight:900;letter-spacing:.02em;box-shadow:0 18px 44px -10px rgba(7,68,58,.5),inset 0 1px 0 rgba(255,255,255,.16);white-space:nowrap;opacity:0;pointer-events:none;z-index:10;transition:opacity .35s cubic-bezier(.22,1,.36,1),transform .35s cubic-bezier(.22,1,.36,1)}
+.plan-card .plan-suggested-callout::after{content:"";position:absolute;left:50%;bottom:-6px;width:14px;height:14px;background:linear-gradient(135deg,#0c7a6e,#128c7e);transform:translateX(-50%) rotate(45deg);border-radius:2px;box-shadow:6px 6px 12px -4px rgba(7,68,58,.35)}
+.plan-card .plan-suggested-callout .callout-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:999px;background:#25d366;color:#053b18;font-size:11px;font-weight:900}
+.plan-card.is-suggested .plan-suggested-callout{opacity:1;transform:translateX(-50%) translateY(0) scale(1);animation:callout-bob 2.6s ease-in-out 1.2s infinite}
+.plan-card.recommended .plan-suggested-callout{top:-58px}
+@keyframes callout-bob{0%,100%{transform:translateX(-50%) translateY(0) scale(1)}50%{transform:translateX(-50%) translateY(-3px) scale(1.02)}}
+/* Currency switcher anchored to the top-right corner of the pricing hero. */
+.pricing-hero-corner{position:absolute;top:18px;right:18px;display:inline-flex;flex-direction:column;align-items:flex-end;gap:6px;z-index:4}
+.pricing-hero-corner .corner-label{font-size:10.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:rgba(220,252,231,.78)}
+.pricing-currency{display:inline-flex;gap:2px;padding:4px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.26);border-radius:999px;backdrop-filter:saturate(160%) blur(8px);box-shadow:0 10px 24px -10px rgba(0,0,0,.2)}
+.pricing-currency button{appearance:none;border:0;background:transparent;color:#ecfdf5;padding:5px 11px;font-size:11.5px;font-weight:800;letter-spacing:.06em;cursor:pointer;border-radius:999px;transition:background .18s ease,color .18s ease,box-shadow .18s ease}
 .pricing-currency button.is-active{background:#ffffff;color:#053b18;box-shadow:0 6px 18px -6px rgba(0,0,0,.18)}
 .pricing-currency button:hover:not(.is-active){background:rgba(255,255,255,.12)}
-.pricing-sizer{position:relative;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:18px;padding:10px 14px 10px 16px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);border-radius:999px;color:#ecfdf5;font-size:13.5px;font-weight:700}
-.pricing-sizer .sizer-label{opacity:.92}
-.pricing-sizer select{appearance:none;-webkit-appearance:none;background:#ffffff;color:#053b18;border:0;border-radius:999px;padding:7px 32px 7px 14px;font-size:13.5px;font-weight:800;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,#053b18 50%),linear-gradient(135deg,#053b18 50%,transparent 50%);background-position:calc(100% - 16px) 12px,calc(100% - 11px) 12px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
-.pricing-sizer select:focus{outline:0;box-shadow:0 0 0 4px rgba(37,211,102,.32)}
-.pricing-sizer .sizer-hint{display:inline-flex;align-items:center;gap:6px;color:#dcfce7;font-size:12.5px;font-weight:800}
-.pricing-sizer .sizer-hint:not(:empty)::before{content:"\\2192";color:#7df0ad;font-weight:900}
+/* Room-count sizer redesign — chip pills instead of a dropdown. */
+.pricing-sizer{position:relative;display:flex;flex-direction:column;gap:10px;margin-top:22px;padding:16px 18px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:22px;backdrop-filter:saturate(140%) blur(6px);max-width:640px}
+.pricing-sizer .sizer-label{font-size:12.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:rgba(220,252,231,.82)}
+.sizer-chips{display:flex;flex-wrap:wrap;gap:6px}
+.sizer-chips button{appearance:none;cursor:pointer;border:1px solid rgba(255,255,255,.26);background:rgba(255,255,255,.08);color:#ecfdf5;padding:8px 14px;font-size:13px;font-weight:800;letter-spacing:.01em;border-radius:999px;transition:transform .18s cubic-bezier(.25,1,.5,1),background .18s ease,color .18s ease,border-color .18s ease,box-shadow .18s ease}
+.sizer-chips button:hover{background:rgba(255,255,255,.18);border-color:rgba(255,255,255,.4);transform:translateY(-1px)}
+.sizer-chips button.is-active{background:linear-gradient(135deg,#ffffff,#dcfce7);color:#053b18;border-color:transparent;box-shadow:0 12px 28px -10px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.6)}
 .pricing-trust-strip{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px 22px;padding:14px 22px;margin:-22px 0 26px;border-radius:999px;background:linear-gradient(180deg,rgba(255,255,255,.92) 0%,rgba(247,253,250,.92) 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 12px 30px -16px rgba(15,44,38,.1);font-size:13px;color:var(--muted);font-weight:600}
 .pricing-trust-strip span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .pricing-trust-strip span::before{content:"\\2713";color:#25d366;font-weight:900}
@@ -354,9 +364,14 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .pricing-float-cta .float-cta-text strong{display:block;font-size:13px;font-weight:900;letter-spacing:.01em}
 @keyframes float-cta-in{from{opacity:0;transform:translateY(20px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}}
 @media (max-width:560px){
-  .pricing-controls{gap:10px}
-  .pricing-currency button{padding:6px 10px;font-size:12px}
-  .pricing-sizer{font-size:12.5px;padding:8px 12px;width:100%;justify-content:flex-start}
+  .pricing-hero-corner{position:static;align-items:flex-start;flex-direction:row;justify-content:space-between;width:100%;margin-bottom:14px;gap:10px}
+  .pricing-hero-corner .corner-label{display:none}
+  .pricing-currency button{padding:5px 9px;font-size:11px}
+  .pricing-sizer{padding:14px;border-radius:18px}
+  .sizer-chips{gap:6px}
+  .sizer-chips button{padding:7px 11px;font-size:12.5px}
+  .plan-card .plan-suggested-callout{top:-40px;font-size:11.5px;padding:7px 12px}
+  .plan-card.recommended .plan-suggested-callout{top:-50px}
   .pricing-trust-strip{margin-top:-12px;font-size:12px;padding:12px 16px;gap:8px 14px;border-radius:18px}
   .pricing-float-cta{right:14px;bottom:14px;padding:10px 14px 10px 12px;font-size:13px}
   .pricing-float-cta .float-cta-text strong{font-size:12px}
@@ -366,6 +381,7 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 @media (prefers-reduced-motion:reduce){
   .plan-card.is-suggested{animation:none}
   .plan-card .plan-price.is-flipping{transform:none}
+  .plan-card.is-suggested .plan-suggested-callout{animation:none;transform:translateX(-50%) translateY(0) scale(1)}
   .pricing-float-cta{animation:none}
 }
 `;
@@ -965,6 +981,10 @@ function renderPricingPlanCard(plan: PricingPlan): string {
     ? `<p class="plan-after-trial">Custom pricing &middot; tailored to your portfolio</p>`
     : `<p class="plan-after-trial">14-day free trial &middot; cancel anytime</p>`;
   return `<article class="${classes.join(" ")}" data-plan="${escapeHtml(plan.id)}" data-size-floor="${plan.sizeFloor}">
+    <aside class="plan-suggested-callout" role="status" aria-live="polite" aria-hidden="true">
+      <span class="callout-icon" aria-hidden="true">&#10003;</span>
+      <span class="callout-text">Best for your hotel size</span>
+    </aside>
     <p class="plan-name">${escapeHtml(plan.name)}</p>
     <p class="plan-tag">${escapeHtml(plan.tagline)}</p>
     <p class="plan-best-for"><span aria-hidden="true">&#9678;</span>${escapeHtml(plan.bestFor)}</p>
@@ -1045,19 +1065,19 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
       `<button type="button" data-currency="${c.code}" class="${i === 0 ? "is-active" : ""}" aria-pressed="${i === 0 ? "true" : "false"}">${c.code}</button>`
   ).join("");
 
-  // Sizer options: friendly labels mapped to a numeric room count the JS reads
-  // off the option's data-rooms attribute.
-  const sizerOptionsHtml = [
-    { rooms: 0, label: "Pick a size" },
-    { rooms: 12, label: "Up to 20 rooms" },
-    { rooms: 30, label: "21 – 50 rooms" },
-    { rooms: 80, label: "51 – 120 rooms" },
-    { rooms: 200, label: "120+ rooms" },
-    { rooms: 999, label: "Multi-property / chain" }
+  // Sizer chips: friendly labels with a numeric "rooms" value the JS reads off
+  // each chip's data-rooms attribute. Replaces the old dropdown for a more
+  // elegant pill-based picker that matches the page aesthetic.
+  const sizerChipsHtml = [
+    { rooms: 12, label: "Up to 20" },
+    { rooms: 30, label: "21 – 50" },
+    { rooms: 80, label: "51 – 120" },
+    { rooms: 200, label: "120+" },
+    { rooms: 999, label: "Multi-property" }
   ]
     .map(
-      (o, i) =>
-        `<option value="${o.rooms}"${i === 0 ? ' disabled selected' : ""}>${escapeHtml(o.label)}</option>`
+      (o) =>
+        `<button type="button" data-rooms="${o.rooms}" aria-pressed="false">${escapeHtml(o.label)}</button>`
     )
     .join("");
 
@@ -1103,6 +1123,12 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
 
   const body = `
     <section class="pricing-hero">
+      <div class="pricing-hero-corner" aria-label="Display currency selector">
+        <span class="corner-label">Show prices in</span>
+        <div class="pricing-currency" role="tablist" aria-label="Display currency">
+          ${currencyButtonsHtml}
+        </div>
+      </div>
       <span class="eyebrow">Pricing</span>
       <h1>Plans that grow with your hotel</h1>
       <p>Built for WhatsApp-first hotel operations. From a single boutique to a multi-property chain — pick the plan that fits today and upgrade in a click.</p>
@@ -1112,20 +1138,16 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         <span class="trust-pill">Cancel anytime</span>
         <span class="trust-pill">Setup in under a day</span>
       </div>
-      <div class="pricing-controls">
-        <div class="pricing-toggle" role="tablist" aria-label="Billing cadence">
-          <button type="button" role="tab" data-cadence="monthly" class="is-active" aria-pressed="true" aria-selected="true" tabindex="0">Monthly</button>
-          <button type="button" role="tab" data-cadence="annual" aria-pressed="false" aria-selected="false" tabindex="-1">Annual <span class="save-flag">Save 20%</span></button>
-        </div>
-        <div class="pricing-currency" role="tablist" aria-label="Display currency">
-          ${currencyButtonsHtml}
+      <div class="pricing-toggle" role="tablist" aria-label="Billing cadence">
+        <button type="button" role="tab" data-cadence="monthly" class="is-active" aria-pressed="true" aria-selected="true" tabindex="0">Monthly</button>
+        <button type="button" role="tab" data-cadence="annual" aria-pressed="false" aria-selected="false" tabindex="-1">Annual <span class="save-flag">Save 20%</span></button>
+      </div>
+      <div class="pricing-sizer">
+        <span class="sizer-label">How many rooms do you have?</span>
+        <div class="sizer-chips" role="tablist" aria-label="Hotel size">
+          ${sizerChipsHtml}
         </div>
       </div>
-      <label class="pricing-sizer">
-        <span class="sizer-label">How many rooms do you have?</span>
-        <select aria-label="Number of rooms">${sizerOptionsHtml}</select>
-        <span class="sizer-hint" aria-live="polite"></span>
-      </label>
     </section>
 
     <div class="pricing-trust-strip pricing-reveal" role="list">
@@ -1317,29 +1339,38 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
       setCadence(state.cadence, false);
       setCurrency(state.currency, false);
 
-      // Room-count sizer: highlight the highest-tier plan whose sizeFloor
-      // <= rooms (so 5 rooms → Starter, 50 → Growth, 90 → Pro, 250 → Enterprise).
-      var sizer = document.querySelector('.pricing-sizer select');
-      var sizerHint = document.querySelector('.pricing-sizer .sizer-hint');
-      if (sizer) {
-        sizer.addEventListener('change', function(){
-          var rooms = parseInt(sizer.value, 10) || 0;
-          if (rooms <= 0) return;
-          var cards = Array.prototype.slice.call(document.querySelectorAll('.plan-card'));
-          var match = null;
-          cards.forEach(function(card){
-            var floor = parseInt(card.getAttribute('data-size-floor') || '0', 10);
-            if (rooms >= floor) match = card;
-            card.classList.remove('is-suggested');
-          });
-          if (match) {
-            match.classList.add('is-suggested');
-            var name = (match.querySelector('.plan-name') || {}).textContent || '';
-            if (sizerHint) sizerHint.textContent = 'Recommended: ' + name + ' plan';
-            if (!prefersReduced && match.scrollIntoView) {
-              match.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Room-count sizer (chip selector). Highlights the highest-tier plan
+      // whose sizeFloor <= rooms (so 5 rooms → Starter, 50 → Growth, 90 →
+      // Pro, 250 → Enterprise) and pops a callout above the matched card.
+      var sizerChips = Array.prototype.slice.call(document.querySelectorAll('.sizer-chips button'));
+      if (sizerChips.length) {
+        sizerChips.forEach(function(chip){
+          chip.addEventListener('click', function(){
+            var rooms = parseInt(chip.getAttribute('data-rooms') || '0', 10);
+            sizerChips.forEach(function(c){
+              var isActive = c === chip;
+              c.classList.toggle('is-active', isActive);
+              c.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+            if (rooms <= 0) return;
+            var cards = Array.prototype.slice.call(document.querySelectorAll('.plan-card'));
+            var match = null;
+            cards.forEach(function(card){
+              var floor = parseInt(card.getAttribute('data-size-floor') || '0', 10);
+              if (rooms >= floor) match = card;
+              card.classList.remove('is-suggested');
+              var co = card.querySelector('.plan-suggested-callout');
+              if (co) co.setAttribute('aria-hidden', 'true');
+            });
+            if (match) {
+              match.classList.add('is-suggested');
+              var co = match.querySelector('.plan-suggested-callout');
+              if (co) co.setAttribute('aria-hidden', 'false');
+              if (!prefersReduced && match.scrollIntoView) {
+                match.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
             }
-          }
+          });
         });
       }
     })();
