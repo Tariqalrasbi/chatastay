@@ -408,6 +408,27 @@ async function ensurePlanForOnboarding(planCodeRaw: string) {
   });
 }
 
+function parseOnboardingList(raw: unknown): string[] {
+  return String(raw ?? "")
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 40);
+}
+
+function normalizeOnboardingUrl(raw: unknown): string {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  try {
+    const candidate = text.startsWith("@") ? `https://instagram.com/${text.slice(1)}` : text;
+    const url = new URL(candidate.startsWith("http://") || candidate.startsWith("https://") ? candidate : `https://${candidate}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.toString().slice(0, 500);
+  } catch {
+    return "";
+  }
+}
+
 async function uniquePropertyCode(hotelId: string, baseName: string): Promise<string> {
   const base = (slugifyName(baseName).replace(/-/g, "_") || "property").toUpperCase().slice(0, 10);
   for (let i = 0; i < 100; i++) {
@@ -4675,27 +4696,44 @@ adminRouter.get("/onboard", async (req, res) => {
   const content = `
 <style>
   .onboard-shell{display:grid;gap:18px}
-  .onboard-hero{position:relative;overflow:hidden;border-radius:24px;padding:28px;background:linear-gradient(135deg,#064e46,#128c7e 60%,#25d366 135%);color:#fff;box-shadow:0 18px 50px rgba(15,44,38,.16)}
-  .onboard-hero h1{margin:0 0 8px;font-size:clamp(28px,4vw,42px);letter-spacing:-.04em}
-  .onboard-hero p{margin:0;max-width:760px;opacity:.94}
+  .onboard-hero{position:relative;overflow:hidden;border-radius:28px;padding:34px;background:linear-gradient(135deg,#053b34,#0c7a6e 56%,#25d366 145%);color:#fff;box-shadow:0 26px 70px -18px rgba(7,68,58,.38)}
+  .onboard-hero::before{content:"";position:absolute;right:-80px;top:-80px;width:260px;height:260px;border-radius:999px;background:rgba(255,255,255,.12)}
+  .onboard-hero::after{content:"";position:absolute;right:76px;bottom:26px;width:88px;height:58px;border-radius:24px 24px 24px 8px;background:rgba(255,255,255,.13);box-shadow:-70px -26px 0 -20px rgba(255,255,255,.18),-34px 42px 0 -26px rgba(255,255,255,.16)}
+  .onboard-hero>*{position:relative;z-index:1}
+  .onboard-hero h1{margin:0 0 10px;font-size:clamp(30px,4.8vw,52px);letter-spacing:-.055em;line-height:1.02}
+  .onboard-hero p{margin:0;max-width:780px;opacity:.94;font-size:16px;line-height:1.65}
   .onboard-progress{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:18px}
-  .onboard-progress span{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.22);padding:9px 10px;border-radius:999px;font-size:12px;font-weight:800;text-align:center}
-  .onboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;align-items:start}
-  .onboard-card{background:#fff;border:1px solid #dce8e3;border-radius:20px;padding:18px;box-shadow:0 12px 34px rgba(15,44,38,.08)}
-  .onboard-card h3{margin:0 0 8px}
+  .onboard-progress span{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.22);padding:9px 10px;border-radius:999px;font-size:12px;font-weight:900;text-align:center;backdrop-filter:blur(8px)}
+  .onboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
+  .onboard-card{background:linear-gradient(180deg,#fff 0%,#f8fffb 100%);border:1px solid rgba(220,232,227,.92);border-radius:22px;padding:20px;box-shadow:0 16px 44px -18px rgba(15,44,38,.18)}
+  .onboard-card h3{margin:0 0 8px;letter-spacing:-.02em}
+  .onboard-card .hint{margin:-2px 0 14px;color:#64736f;font-size:13px;line-height:1.55}
   .onboard-card label{display:grid;gap:6px;font-weight:800;color:#0b1f1c}
-  .onboard-card input,.onboard-card textarea,.onboard-card select{width:100%;padding:11px 12px;border:1px solid #d8dee6;border-radius:12px;font:inherit}
+  .onboard-card input,.onboard-card textarea,.onboard-card select{width:100%;padding:12px 13px;border:1px solid #d8dee6;border-radius:13px;font:inherit;background:#fff;transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}
+  .onboard-card input:focus,.onboard-card textarea:focus,.onboard-card select:focus{outline:0;border-color:#25d366;box-shadow:0 0 0 4px rgba(37,211,102,.16)}
   .onboard-card textarea{resize:vertical}
   .onboard-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .onboard-step-title{display:flex;align-items:center;gap:10px}
+  .onboard-step-title span{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:11px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:900}
   .onboard-plans{display:grid;gap:10px}
-  .onboard-plan{display:grid;gap:3px;text-decoration:none;color:#0b1f1c;border:1px solid #dce8e3;border-radius:16px;padding:12px;background:#f8fafc}
+  .onboard-plan{display:grid;gap:3px;text-decoration:none;color:#0b1f1c;border:1px solid #dce8e3;border-radius:16px;padding:13px;background:#f8fafc;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}
+  .onboard-plan:hover{transform:translateY(-1px);box-shadow:0 12px 28px -18px rgba(15,44,38,.28)}
   .onboard-plan.active{border-color:#25d366;background:#ecfff5;box-shadow:0 0 0 3px rgba(37,211,102,.16)}
   .onboard-plan span{color:#64736f;font-size:12px}
   .onboard-modules{list-style:none;margin:0;padding:0;display:grid;gap:8px}
   .onboard-modules li{padding:8px 10px;border-radius:12px;font-size:13px;font-weight:800}
   .onboard-modules .ok{background:#dcfce7;color:#166534}
   .onboard-modules .locked{background:#fff7ed;color:#9a3412}
-  .onboard-submit{border:0;border-radius:14px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:900;padding:13px 18px;cursor:pointer}
+  .onboard-submit{border:0;border-radius:16px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:950;padding:15px 20px;cursor:pointer;box-shadow:0 16px 32px -16px rgba(37,211,102,.65);transition:transform .16s ease,box-shadow .16s ease}
+  .onboard-submit:hover{transform:translateY(-1px);box-shadow:0 20px 42px -18px rgba(37,211,102,.75)}
+  .onboard-submit:disabled{cursor:wait;opacity:.72;transform:none}
+  .onboard-side{position:sticky;top:18px}
+  .onboard-mini{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}
+  .onboard-mini div{padding:10px;border-radius:14px;background:#f8fafc;border:1px solid #e5edf0;text-align:center}
+  .onboard-mini strong{display:block;color:#064e46;font-size:18px}
+  .onboard-mini span{font-size:11px;color:#64736f;font-weight:800}
+  .onboard-security{margin-top:12px;padding:12px;border-radius:16px;background:#f8fafc;border:1px dashed #b7d7cd;color:#64736f;font-size:12.5px;line-height:1.55}
+  .onboard-login-note{display:flex;gap:10px;align-items:flex-start;margin-top:12px;padding:12px;border-radius:16px;background:#ecfff5;color:#064e46;font-weight:800;font-size:13px}
   @media(max-width:880px){.onboard-grid{grid-template-columns:1fr}}
 </style>
 <div class="onboard-shell">
@@ -4711,7 +4749,8 @@ ${errHtml}
   <input type="hidden" name="leadId" value="${escapeHtml(lead?.id ?? leadId)}" />
   <input type="hidden" name="planCode" value="${escapeHtml(planCode)}" />
   <section class="onboard-card">
-    <h3>1. Subscription & property</h3>
+    <h3 class="onboard-step-title"><span>1</span> Subscription &amp; property</h3>
+    <p class="hint">This creates the hotel tenant and the first active property inside it.</p>
     <div class="onboard-two">
       <label>Hotel / property name
         <input name="propertyName" required placeholder="Example Beach Resort" value="${propertyNameVal}" />
@@ -4728,13 +4767,14 @@ ${errHtml}
     </div>
   </section>
   <section class="onboard-card">
-    <h3>2. Branding & public website</h3>
+    <h3 class="onboard-step-title"><span>2</span> Branding &amp; public website</h3>
+    <p class="hint">These details power the public hotel page and the first WhatsApp introduction.</p>
     <div class="onboard-two">
       <label>Website / Instagram
-        <input name="websiteUrl" placeholder="https:// or @hotel" />
+        <input name="websiteUrl" inputmode="url" placeholder="https:// or @hotel" />
       </label>
       <label>Cover image URL
-        <input name="coverImageUrl" placeholder="https://..." />
+        <input name="coverImageUrl" inputmode="url" placeholder="https://..." />
       </label>
     </div>
     <label>Property description
@@ -4745,7 +4785,8 @@ ${errHtml}
     </label>
   </section>
   <section class="onboard-card">
-    <h3>3. Rooms & rates</h3>
+    <h3 class="onboard-step-title"><span>3</span> Rooms &amp; rates</h3>
+    <p class="hint">Start with one main room type. Owners can add the rest after login if the plan limit allows it.</p>
     <div class="onboard-two">
       <label>Main room type name
         <input name="roomTypeName" value="Standard Room" />
@@ -4762,7 +4803,8 @@ ${errHtml}
     </div>
   </section>
   <section class="onboard-card">
-    <h3>4. Policies</h3>
+    <h3 class="onboard-step-title"><span>4</span> Policies</h3>
+    <p class="hint">These become guest-facing policy cards and WhatsApp answers, not internal notes.</p>
     <label>Cancellation / no-show policy
       <textarea name="cancellationPolicy" rows="3" placeholder="Example: Free cancellation until 48 hours before arrival..."></textarea>
     </label>
@@ -4774,14 +4816,15 @@ ${errHtml}
     </label>
   </section>
   <section class="onboard-card">
-    <h3>5. WhatsApp assistant knowledge bank</h3>
+    <h3 class="onboard-step-title"><span>5</span> WhatsApp assistant knowledge bank</h3>
     <p class="muted">This is what the guest assistant will use for FAQs, directions, policies, services, restaurant info, and preferred responses.</p>
     <label>Knowledge bank
       <textarea name="knowledgeBank" rows="8" placeholder="Add FAQs and answers. Example:&#10;Do you have airport pickup? | Yes, airport pickup is available with advance notice.&#10;Do you allow pets? | Pets are not allowed except service animals."></textarea>
     </label>
   </section>
   <section class="onboard-card">
-    <h3>6. Owner login</h3>
+    <h3 class="onboard-step-title"><span>6</span> Owner login</h3>
+    <p class="hint">This owner account is scoped only to the new hotel workspace.</p>
     <div class="onboard-two">
       <label>Owner full name
         <input name="ownerName" required placeholder="Property Owner" value="${ownerNameVal}" />
@@ -4799,16 +4842,33 @@ ${errHtml}
   </section>
   <button class="onboard-submit" type="submit">Create my hotel workspace</button>
 </form>
-<aside class="onboard-card">
+<aside class="onboard-card onboard-side">
   <h3 style="margin-top:0">${escapeHtml(planFeatures.label)} plan preview</h3>
   <div class="onboard-plans">${planCards}</div>
+  <div class="onboard-mini">
+    <div><strong>${planFeatures.maxProperties}</strong><span>properties</span></div>
+    <div><strong>${planFeatures.maxRoomUnits}</strong><span>rooms</span></div>
+    <div><strong>${planFeatures.maxStaffUsers}</strong><span>staff</span></div>
+  </div>
   <h4>What your workspace will include</h4>
   <ul class="onboard-modules">${moduleList}</ul>
-  <p class="muted">Limits: ${planFeatures.maxProperties} propert${planFeatures.maxProperties === 1 ? "y" : "ies"}, ${planFeatures.maxRoomUnits} rooms, ${planFeatures.maxStaffUsers} staff users, ${planFeatures.maxMonthlyConversations.toLocaleString()} monthly conversations.</p>
-  <p class="muted">After setup, we send you to the hotel login with your new hotel selected.</p>
+  <div class="onboard-login-note"><span>→</span><span>After setup, we send you to the hotel login with your new hotel already selected.</span></div>
+  <div class="onboard-security">Guest-facing pages and WhatsApp answers are created from this hotel&apos;s own data only. Other hotels cannot see or edit it.</div>
 </aside>
 </div>
 <p class="muted" style="margin-top:12px">${session ? '<a class="inline-link" href="/admin/profile">Back to profile</a>' : '<a href="/admin/login">Back to login</a>'}</p>
+<script>
+(() => {
+  const form = document.querySelector('form[action="/admin/onboard"]');
+  if (!form) return;
+  const button = form.querySelector(".onboard-submit");
+  form.addEventListener("submit", () => {
+    if (!(button instanceof HTMLButtonElement)) return;
+    button.disabled = true;
+    button.textContent = "Creating your hotel workspace...";
+  });
+})();
+</script>
 </div>`;
   res.type("html").send(renderLayout(content, Boolean(session)));
 });
@@ -4826,32 +4886,42 @@ adminRouter.post("/onboard", async (req, res) => {
   const password = String(req.body.password ?? "");
   const requestedPlanCode = String(req.body.planCode ?? "growth").trim().toLowerCase();
   const planCode = ["starter", "growth", "pro"].includes(requestedPlanCode) ? requestedPlanCode : "growth";
-  const addressLine1 = String(req.body.addressLine1 ?? "").trim() || null;
-  const publicDescription = String(req.body.publicDescription ?? "").trim() || `${propertyName} in ${city}.`;
-  const coverImageUrl = String(req.body.coverImageUrl ?? "").trim() || null;
-  const websiteUrl = String(req.body.websiteUrl ?? "").trim();
-  const amenitiesJson = JSON.stringify(
-    String(req.body.amenities ?? "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean)
-  );
+  const addressLine1 = String(req.body.addressLine1 ?? "").trim().slice(0, 300) || null;
+  const publicDescription = String(req.body.publicDescription ?? "").trim().slice(0, 1800) || `${propertyName} in ${city}.`;
+  const coverImageUrl = normalizeOnboardingUrl(req.body.coverImageUrl) || null;
+  const websiteUrl = normalizeOnboardingUrl(req.body.websiteUrl);
+  const amenities = parseOnboardingList(req.body.amenities);
+  const amenitiesJson = JSON.stringify(amenities);
   const roomTypeName = String(req.body.roomTypeName ?? "Standard Room").trim() || "Standard Room";
   const baseNightlyRateRaw = Number(req.body.baseNightlyRate);
   const baseNightlyRate = Number.isFinite(baseNightlyRateRaw) ? Math.max(0, baseNightlyRateRaw) : 35;
-  const currency = String(req.body.currency ?? "OMR").trim().toUpperCase().slice(0, 8) || "OMR";
-  const cancellationPolicy = String(req.body.cancellationPolicy ?? "").trim();
-  const checkInPolicy = String(req.body.checkInPolicy ?? "").trim();
-  const paymentPolicy = String(req.body.paymentPolicy ?? "").trim();
-  const knowledgeBank = String(req.body.knowledgeBank ?? "").trim();
+  const currencyRaw = String(req.body.currency ?? "OMR").trim().toUpperCase();
+  const currency = /^[A-Z]{3}$/.test(currencyRaw) ? currencyRaw : "OMR";
+  const cancellationPolicy = String(req.body.cancellationPolicy ?? "").trim().slice(0, 1600);
+  const checkInPolicy = String(req.body.checkInPolicy ?? "").trim().slice(0, 1600);
+  const paymentPolicy = String(req.body.paymentPolicy ?? "").trim().slice(0, 1600);
+  const knowledgeBank = String(req.body.knowledgeBank ?? "").trim().slice(0, 12000);
   const unitsRaw = parseInt(String(req.body.units ?? "12"), 10);
   const units = Number.isFinite(unitsRaw) ? Math.max(1, Math.min(500, unitsRaw)) : 12;
   const defaultLanguage = String(req.body.defaultLanguage ?? "en") === "ar" ? "ar" : "en";
-  const whatsappPhone = String(req.body.whatsappPhone ?? "").trim();
+  const whatsappPhone = String(req.body.whatsappPhone ?? "").trim().slice(0, 40);
   const leadId = String(req.body.leadId ?? "").trim();
 
-  if (!propertyName || !city || !email || !ownerName || password.length < 8) {
+  const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  if (!propertyName || !city || !emailLooksValid || !ownerName || password.length < 8) {
     res.redirect(`/admin/onboard?plan=${encodeURIComponent(planCode)}&error=Please+complete+all+required+fields`);
+    return;
+  }
+  if (knowledgeBank.length < 20) {
+    res.redirect(
+      `/admin/onboard?plan=${encodeURIComponent(planCode)}&error=${encodeURIComponent("Please add a short WhatsApp knowledge bank so guests get property-specific answers.")}`
+    );
+    return;
+  }
+  if (units > getPlanFeatures(planCode).maxRoomUnits) {
+    res.redirect(
+      `/admin/onboard?plan=${encodeURIComponent(planCode)}&error=${encodeURIComponent(`The ${getPlanFeatures(planCode).label} plan supports up to ${getPlanFeatures(planCode).maxRoomUnits} rooms during onboarding.`)}`
+    );
     return;
   }
 
@@ -5019,14 +5089,6 @@ adminRouter.post("/onboard", async (req, res) => {
       return { hotelId: newHotel.id, hotelSlug: newHotel.slug, propertyId: property.id };
     });
 
-    const cfg = loadPartnerSetupConfig(created.hotelId);
-    cfg.hotelDescription = publicDescription;
-    cfg.amenitiesSummary = String(req.body.amenities ?? "").trim();
-    cfg.aiKnowledgeBase = knowledgeBank;
-    cfg.aiKnowledgeBaseEn = defaultLanguage === "en" ? knowledgeBank : cfg.aiKnowledgeBaseEn;
-    cfg.aiKnowledgeBaseAr = defaultLanguage === "ar" ? knowledgeBank : cfg.aiKnowledgeBaseAr;
-    cfg.aiEnabled = features.aiConcierge;
-    savePartnerSetupConfig(cfg, created.hotelId);
     res.redirect(`/admin/login?onboard=1&hotel=${encodeURIComponent(created.hotelSlug)}`);
     return;
   }
