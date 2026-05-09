@@ -436,6 +436,104 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
   .stayli-msg.bot.typing span{animation:none;opacity:.5}
   .stayli-avatar .stayli-eye{animation:none}
 }
+/* ===== Marketplace home additive sections (how-it-works, destinations, value props, sample chat, partner CTA, footer, hero motif, designed card cover) ===== */
+.home-reveal{opacity:0;transform:translateY(28px);transition:opacity .65s cubic-bezier(.22,1,.36,1),transform .65s cubic-bezier(.22,1,.36,1);will-change:opacity,transform}
+.home-reveal.is-visible{opacity:1;transform:translateY(0)}
+.home-section-eyebrow{display:inline-block;font-size:11.5px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;color:var(--brand-2);background:linear-gradient(135deg,#dcfce7,#ecfff5);padding:6px 12px;border-radius:999px;margin:0 0 10px;border:1px solid #c7f5d6}
+.home-section-title{margin:0 0 6px;font-size:clamp(22px,3vw,30px);letter-spacing:-.025em;color:var(--ink)}
+.home-section-lead{margin:0 0 18px;color:var(--muted);font-size:15.5px;max-width:640px;line-height:1.6}
+/* Hero floating chat-bubble motif (C2) */
+.hero-bubbles{position:absolute;inset:0;pointer-events:none;z-index:0;overflow:hidden;border-radius:inherit}
+.hero-bubbles svg{position:absolute;color:rgba(255,255,255,.16);filter:drop-shadow(0 6px 18px rgba(0,0,0,.18))}
+.hero-bubbles .b1{top:18%;right:8%;width:64px;height:64px;animation:hero-bub 5.6s ease-in-out infinite}
+.hero-bubbles .b2{top:48%;right:22%;width:42px;height:42px;animation:hero-bub 5.6s ease-in-out .8s infinite}
+.hero-bubbles .b3{top:9%;right:30%;width:30px;height:30px;animation:hero-bub 5.6s ease-in-out 1.6s infinite}
+@keyframes hero-bub{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-6px) rotate(4deg)}}
+.hero h1,.hero p,.hero .search-form{position:relative;z-index:2}
+@media (max-width:760px){.hero-bubbles{display:none}}
+/* Popular destinations chip row (A2) */
+.destinations-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:18px 0 22px;padding:14px 18px;background:linear-gradient(180deg,rgba(255,255,255,.92) 0%,rgba(247,253,250,.92) 100%);border:1px solid rgba(220,232,227,.85);border-radius:999px;box-shadow:0 14px 30px -16px rgba(15,44,38,.1)}
+.destinations-row .destinations-label{font-size:11.5px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;color:var(--brand-2);margin-right:4px}
+.destinations-row a{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-weight:800;font-size:13px;color:var(--ink);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.22);padding:7px 13px;border-radius:999px;transition:transform .18s cubic-bezier(.25,1,.5,1),background .18s ease,box-shadow .18s ease,color .18s ease}
+.destinations-row a:hover{background:linear-gradient(135deg,#dcfce7,#7df0ad);color:#053b18;transform:translateY(-1px);box-shadow:0 10px 22px -8px rgba(37,211,102,.5)}
+.destinations-row a::before{content:"";display:inline-block;width:6px;height:6px;border-radius:999px;background:#25d366;box-shadow:0 0 0 2px rgba(37,211,102,.18)}
+@media (max-width:560px){.destinations-row{border-radius:22px;padding:12px 14px;gap:8px}.destinations-row a{font-size:12.5px;padding:6px 11px}}
+/* How it works strip (A1) */
+.how-it-works{margin:32px 0 28px}
+.how-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:6px}
+.how-card{position:relative;padding:24px 22px 22px;border-radius:22px;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 14px 36px -16px rgba(15,44,38,.14),inset 0 1px 0 rgba(255,255,255,.85);transition:transform .26s cubic-bezier(.25,1,.5,1),box-shadow .26s cubic-bezier(.25,1,.5,1)}
+.how-card:hover{transform:translateY(-4px);box-shadow:0 24px 56px -16px rgba(7,68,58,.22)}
+.how-card .how-icon{width:46px;height:46px;border-radius:14px;display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#25d366,#7df0ad);color:#053b18;box-shadow:0 10px 22px -6px rgba(37,211,102,.35),inset 0 1px 0 rgba(255,255,255,.5);margin-bottom:14px}
+.how-card .how-icon svg{width:24px;height:24px}
+.how-card .how-step{position:absolute;top:18px;right:18px;font-size:11.5px;font-weight:900;letter-spacing:.08em;color:rgba(7,68,58,.36);text-transform:uppercase}
+.how-card h3{margin:0 0 6px;font-size:17px;letter-spacing:-.02em}
+.how-card p{margin:0;color:var(--muted);font-size:14px;line-height:1.6}
+/* Why ChatAstay value props (A3) */
+.value-props-home{margin:36px 0 28px}
+.vp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:6px}
+.vp-card{padding:22px 22px 20px;border-radius:22px;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 14px 36px -16px rgba(15,44,38,.14);transition:transform .26s cubic-bezier(.25,1,.5,1),box-shadow .26s cubic-bezier(.25,1,.5,1)}
+.vp-card:hover{transform:translateY(-4px);box-shadow:0 24px 56px -16px rgba(7,68,58,.2)}
+.vp-card .vp-icon{width:42px;height:42px;border-radius:13px;display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#dcfce7,#7df0ad);color:#053b18;margin-bottom:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.6)}
+.vp-card .vp-icon svg{width:20px;height:20px}
+.vp-card h3{margin:0 0 5px;font-size:15.5px;letter-spacing:-.02em}
+.vp-card p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.55}
+/* Sample WhatsApp conversation showcase (A4) */
+.sample-chat-section{display:grid;grid-template-columns:1fr 1fr;gap:32px;align-items:center;margin:36px 0 28px;padding:34px;border-radius:28px;background:linear-gradient(135deg,#ecfff5 0%,#f7fdfa 60%,#ffffff 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 24px 60px -20px rgba(15,44,38,.14)}
+.sample-chat-copy h2{margin:6px 0 10px}
+.sample-chat-copy .home-section-lead{margin-bottom:16px}
+.sample-chat-thread{position:relative;background:#0c7a6e;background-image:radial-gradient(rgba(255,255,255,.06) 1.2px,transparent 1.2px);background-size:14px 14px;padding:18px 14px;border-radius:22px;display:flex;flex-direction:column;gap:8px;min-height:340px;box-shadow:0 22px 50px -20px rgba(7,68,58,.4),inset 0 1px 0 rgba(255,255,255,.12)}
+.chat-bubble{max-width:78%;padding:9px 12px;border-radius:14px;font-size:13.5px;line-height:1.45;animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both;box-shadow:0 4px 10px -3px rgba(0,0,0,.15)}
+.chat-bubble small{display:block;font-size:10.5px;font-weight:700;color:rgba(0,0,0,.45);margin-top:4px;text-align:right}
+.chat-bubble.in{align-self:flex-start;background:#fff;color:#0b1f1c;border-top-left-radius:6px}
+.chat-bubble.out{align-self:flex-end;background:#dcf8c6;color:#0b1f1c;border-top-right-radius:6px}
+.chat-bubble.d2{animation-delay:.55s}
+.chat-bubble.d3{animation-delay:1.1s}
+.chat-bubble.d4{animation-delay:1.65s}
+.chat-bubble.d5{animation-delay:2.2s}
+@media (max-width:760px){.sample-chat-section{grid-template-columns:minmax(0,1fr);gap:22px;padding:24px}.sample-chat-thread{min-height:0;padding:16px 12px}}
+/* Recent reviews (B1) */
+.reviews-section{margin:32px 0 28px}
+.reviews-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:6px}
+.review-card{padding:20px 20px 18px;border-radius:20px;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 14px 36px -16px rgba(15,44,38,.12);display:flex;flex-direction:column;gap:8px}
+.review-stars{color:#f59e0b;font-size:14px;letter-spacing:.04em;font-weight:900}
+.review-comment{margin:0;color:var(--ink);font-size:14px;line-height:1.55;font-style:italic;flex:1}
+.review-meta{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--muted);font-weight:600;border-top:1px solid rgba(220,232,227,.6);padding-top:8px;margin-top:4px}
+.review-meta strong{color:var(--brand-2);font-size:13px;letter-spacing:-.01em}
+/* Partner CTA (B2) */
+.partner-cta{display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap;margin:36px 0 28px;padding:32px 30px;border-radius:28px;background:linear-gradient(135deg,#053b34 0%,#0c7a6e 50%,#128c7e 100%);color:#fff;box-shadow:0 32px 80px -22px rgba(7,68,58,.36);position:relative;overflow:hidden}
+.partner-cta::after{content:"";position:absolute;right:-80px;top:-80px;width:240px;height:240px;border-radius:999px;background:rgba(255,255,255,.1);pointer-events:none}
+.partner-cta>*{position:relative;z-index:1}
+.partner-cta .home-section-eyebrow{background:rgba(255,255,255,.18);color:#dcfce7;border-color:rgba(255,255,255,.25)}
+.partner-cta h2{margin:6px 0 6px;color:#fff;font-size:24px;letter-spacing:-.02em}
+.partner-cta p{margin:0;font-size:14.5px;opacity:.93;max-width:560px;line-height:1.55}
+.partner-actions{display:flex;flex-wrap:wrap;gap:10px}
+.partner-cta .btn-ghost{background:rgba(255,255,255,.16);color:#fff;border:1px solid rgba(255,255,255,.32);box-shadow:none}
+.partner-cta .btn-ghost:hover{background:rgba(255,255,255,.24);filter:none}
+/* Footer (A5) */
+.home-footer{margin-top:38px;padding:36px 28px 24px;border-radius:28px;background:linear-gradient(180deg,rgba(255,255,255,.96) 0%,rgba(247,253,250,.96) 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 -8px 24px -16px rgba(15,44,38,.1)}
+.home-footer .footer-top{display:grid;grid-template-columns:1.4fr repeat(3,1fr);gap:28px;align-items:flex-start}
+.home-footer .footer-brand .footer-logo{display:inline-flex;align-items:center;gap:10px;font-weight:900;font-size:20px;color:var(--brand);letter-spacing:-.04em;text-decoration:none}
+.home-footer .footer-brand .footer-logo::before{content:"";width:30px;height:30px;border-radius:10px;background:linear-gradient(135deg,#25d366,#b9f7d3);box-shadow:0 8px 18px rgba(37,211,102,.24)}
+.home-footer .footer-brand p{margin:14px 0 0;font-size:13.5px;color:var(--muted);max-width:280px;line-height:1.6}
+.home-footer .footer-col h4{margin:0 0 10px;font-size:11.5px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:var(--brand-2)}
+.home-footer .footer-col ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.home-footer .footer-col a{text-decoration:none;color:var(--ink);font-size:13.5px;font-weight:600;transition:color .15s ease}
+.home-footer .footer-col a:hover{color:var(--brand)}
+.home-footer .footer-bottom{margin-top:28px;padding-top:18px;border-top:1px solid rgba(220,232,227,.7);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;font-size:12.5px;color:var(--muted)}
+.home-footer .footer-bottom strong{color:var(--ink)}
+@media (max-width:760px){.home-footer .footer-top{grid-template-columns:1fr 1fr;gap:22px}.home-footer .footer-brand{grid-column:1 / -1}}
+@media (max-width:480px){.home-footer .footer-top{grid-template-columns:1fr}}
+/* Designed empty hotel-card cover (C1) */
+.hotel-card .cover-placeholder{background-color:#dcfce7;background-image:radial-gradient(rgba(7,68,58,.13) 1.6px,transparent 1.6px),linear-gradient(135deg,#dcfce7 0%,#7df0ad 100%);background-size:14px 14px,100% 100%;background-position:0 0,0 0;color:#053b18;position:relative;overflow:hidden}
+.hotel-card .cover-placeholder::after{content:"";position:absolute;right:-30px;top:-30px;width:120px;height:120px;border-radius:999px;background:rgba(255,255,255,.4);filter:blur(2px);pointer-events:none}
+.hotel-card .cover-placeholder .cover-initials{position:relative;z-index:1;font-size:34px;font-weight:900;letter-spacing:-.04em;text-shadow:0 2px 0 rgba(255,255,255,.5),0 8px 24px rgba(7,68,58,.18)}
+.hotel-card .cover-placeholder .cover-chip{position:absolute;left:14px;bottom:14px;z-index:1;display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;letter-spacing:.04em;color:#053b18;background:rgba(255,255,255,.92);border:1px solid rgba(255,255,255,.95);padding:5px 10px;border-radius:999px;backdrop-filter:blur(4px);box-shadow:0 6px 14px -6px rgba(7,68,58,.25)}
+.hotel-card .cover-placeholder .cover-chip svg{width:11px;height:11px}
+@media (prefers-reduced-motion:reduce){
+  .home-reveal{opacity:1;transform:none;transition:none}
+  .hero-bubbles svg{animation:none}
+  .chat-bubble{animation:none}
+}
 `;
 
 function renderShell(opts: {
@@ -495,10 +593,22 @@ function renderHotelCard(opts: {
   priceLabel: string;
   ctaHref: string;
 }): string {
-  const coverStyle = opts.cover ? `background-image:url(${JSON.stringify(opts.cover).slice(1, -1)})` : "";
   const initials = opts.displayName.split(/\s+/).map((s) => s[0] ?? "").slice(0, 2).join("").toUpperCase();
+  let coverHtml: string;
+  if (opts.cover) {
+    const coverStyle = `background-image:url(${JSON.stringify(opts.cover).slice(1, -1)})`;
+    coverHtml = `<div class="cover" style="${coverStyle}"></div>`;
+  } else {
+    // Designed placeholder — soft mint-to-emerald gradient with a dotted
+    // pattern, large initials, and a city chip pinned in the corner so
+    // covers feel intentional rather than empty.
+    const cityChip = opts.city
+      ? `<span class="cover-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-7.5-7-12a7 7 0 1114 0c0 4.5-7 12-7 12z"/><circle cx="12" cy="9" r="2.2"/></svg>${escapeHtml(opts.city)}</span>`
+      : "";
+    coverHtml = `<div class="cover cover-placeholder"><span class="cover-initials">${escapeHtml(initials)}</span>${cityChip}</div>`;
+  }
   return `<article class="hotel-card">
-    <div class="cover" style="${coverStyle}">${opts.cover ? "" : escapeHtml(initials)}</div>
+    ${coverHtml}
     <div class="body">
       <h3>${escapeHtml(opts.displayName)}</h3>
       <div class="muted" style="font-size:13px">${escapeHtml(opts.city ?? "")} ${opts.starRating ? `· <span class="badge">${opts.starRating.toFixed(1)} ★</span>` : ""}</div>
@@ -563,9 +673,60 @@ marketplaceRouter.get("/", async (req: Request, res: Response) => {
     )
     .join("");
 
+  // B1 — recent guest reviews. Scope to active hotels and (when the gate is
+  // configured) marketplace-eligible plans, so we never surface reviews from
+  // hotels that aren't visible on the marketplace itself. We only show
+  // reviews with rating >= 4 and a non-empty comment.
+  const recentReviews = await prisma.guestFeedback.findMany({
+    where: {
+      rating: { gte: 4 },
+      comment: { not: null },
+      hotel: {
+        isActive: true,
+        ...(gateOpen ? { subscriptionPlanCode: { in: marketplaceCodes } } : {})
+      }
+    },
+    select: {
+      id: true,
+      rating: true,
+      comment: true,
+      guestName: true,
+      createdAt: true,
+      hotel: { select: { displayName: true, slug: true, city: true } }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 6
+  });
+  const reviewsHtml = recentReviews
+    .filter((r) => r.comment && r.comment.trim().length >= 12)
+    .slice(0, 4)
+    .map((r) => {
+      const stars = "\u2605".repeat(Math.max(1, Math.min(5, r.rating))) + "\u2606".repeat(Math.max(0, 5 - r.rating));
+      const guest = r.guestName ? r.guestName.split(/\s+/)[0] : "Guest";
+      const dt = r.createdAt.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+      return `<article class="review-card">
+        <span class="review-stars" aria-label="${r.rating} out of 5 stars">${stars}</span>
+        <p class="review-comment">&ldquo;${escapeHtml(r.comment ?? "")}&rdquo;</p>
+        <div class="review-meta"><span>${escapeHtml(guest)} &middot; ${escapeHtml(dt)}</span><strong>${escapeHtml(r.hotel.displayName)}</strong></div>
+      </article>`;
+    })
+    .join("");
+
+  // A2 — popular Oman destinations. Even when only one hotel is listed,
+  // these chips fill horizontal space and become evergreen browse paths.
+  const destinations = ["Muscat", "Sur", "Salalah", "Nizwa", "Sohar", "Khasab", "Ashkhara"];
+  const destinationsHtml = destinations
+    .map((c) => `<a href="/search?city=${encodeURIComponent(c)}">${escapeHtml(c)}</a>`)
+    .join("");
+
   const body = `
     <section class="hero">
-      <h1>Find your next stay — book on WhatsApp</h1>
+      <div class="hero-bubbles" aria-hidden="true">
+        <svg class="b1" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5a3 3 0 013-3h12a3 3 0 013 3v8a3 3 0 01-3 3H8l-5 4V5z"/></svg>
+        <svg class="b2" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5a3 3 0 013-3h12a3 3 0 013 3v8a3 3 0 01-3 3H8l-5 4V5z"/></svg>
+        <svg class="b3" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5a3 3 0 013-3h12a3 3 0 013 3v8a3 3 0 01-3 3H8l-5 4V5z"/></svg>
+      </div>
+      <h1>Find your next stay &mdash; book on WhatsApp</h1>
       <p>ChatAstay-powered hotels offer instant booking with a real human handoff if you need it.</p>
       ${renderSearchForm({
         city: "",
@@ -575,13 +736,176 @@ marketplaceRouter.get("/", async (req: Request, res: Response) => {
         rooms: 1
       })}
     </section>
+
+    <nav class="destinations-row" aria-label="Popular destinations">
+      <span class="destinations-label">Popular destinations</span>
+      ${destinationsHtml}
+    </nav>
+
+    <section class="how-it-works home-reveal" aria-label="How it works">
+      <p class="home-section-eyebrow">How it works</p>
+      <h2 class="home-section-title">Three taps from search to confirmed</h2>
+      <p class="home-section-lead">No new app, no logins. Search a real ChatAstay hotel, tap to chat on WhatsApp, get confirmed in seconds.</p>
+      <div class="how-grid">
+        <article class="how-card">
+          <span class="how-step">Step 1</span>
+          <div class="how-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><line x1="20" y1="20" x2="16" y2="16"/></svg></div>
+          <h3>Search</h3>
+          <p>Pick your dates, guests and city. We show only ChatAstay-ready hotels with real-time availability.</p>
+        </article>
+        <article class="how-card">
+          <span class="how-step">Step 2</span>
+          <div class="how-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5z"/><circle cx="9" cy="11" r="1" fill="currentColor"/><circle cx="13" cy="11" r="1" fill="currentColor"/><circle cx="17" cy="11" r="1" fill="currentColor"/></svg></div>
+          <h3>Tap to chat</h3>
+          <p>Click &ldquo;Book on WhatsApp&rdquo;. The hotel&apos;s assistant picks up instantly with your details ready.</p>
+        </article>
+        <article class="how-card">
+          <span class="how-step">Step 3</span>
+          <div class="how-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 6-7"/></svg></div>
+          <h3>Confirmed</h3>
+          <p>Booked in seconds, with a real human on standby for any change, request, or local tip you need.</p>
+        </article>
+      </div>
+    </section>
+
     <h2 style="margin:20px 0 12px;font-size:20px">Featured hotels</h2>
     ${featured.length === 0
       ? `<div class="card empty"><p>No hotels are listed on the marketplace yet.${gateOpen ? "" : ' <span class="muted">(Tip: enable <a href="/owner/plans">Plan.supportsMarketplace</a> to feature a hotel here.)</span>'}</p></div>`
       : `<div class="grid">${featuredHtml}</div>`}
+
+    <section class="value-props-home home-reveal" aria-label="Why book on ChatAstay">
+      <p class="home-section-eyebrow">Why ChatAstay</p>
+      <h2 class="home-section-title">A fairer way to book a hotel</h2>
+      <p class="home-section-lead">Direct from the hotel, no third-party markups, no impersonation, no app to install. Just WhatsApp.</p>
+      <div class="vp-grid">
+        <article class="vp-card">
+          <div class="vp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5z"/><path d="M8 11h8M8 8h8"/></svg></div>
+          <h3>Instant WhatsApp confirmations</h3>
+          <p>The hotel&apos;s assistant replies the moment you tap &ldquo;Book&rdquo; &mdash; no email back-and-forth.</p>
+        </article>
+        <article class="vp-card">
+          <div class="vp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5"/><path d="M16 12.5l3 2-3 2"/></svg></div>
+          <h3>Real hotel staff, real handoff</h3>
+          <p>Need a sea-view, late check-in, or airport pickup? You&apos;re talking to the actual front desk.</p>
+        </article>
+        <article class="vp-card">
+          <div class="vp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.5l-9 9-9-9V3h9.5z"/><circle cx="8.5" cy="7.5" r="1.5" fill="currentColor"/></svg></div>
+          <h3>No hidden marketplace fees</h3>
+          <p>You pay the hotel&apos;s direct rate. ChatAstay never adds a service fee on top of your booking.</p>
+        </article>
+        <article class="vp-card">
+          <div class="vp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M21 4v4h-4"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/><path d="M3 20v-4h4"/></svg></div>
+          <h3>Cancel or change through chat</h3>
+          <p>Plans changed? Send a WhatsApp message. No portals, no holds, no &ldquo;please reply within 48h&rdquo;.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="sample-chat-section home-reveal" aria-label="Sample WhatsApp conversation">
+      <div class="sample-chat-copy">
+        <p class="home-section-eyebrow">See it in action</p>
+        <h2 class="home-section-title">Like texting a friend who happens to run the hotel</h2>
+        <p class="home-section-lead">Every ChatAstay hotel can answer in WhatsApp the moment you tap &ldquo;Book&rdquo;. Here&apos;s what an actual conversation looks like.</p>
+        <a class="btn btn-whatsapp" href="/search">Try a real search</a>
+      </div>
+      <div class="sample-chat-thread" aria-hidden="true">
+        <div class="chat-bubble in">Hi! I&apos;m looking for a sea-view room for 2 nights starting Friday.<small>10:24</small></div>
+        <div class="chat-bubble out d2">Hi Sara &mdash; we have a Deluxe Sea View at 38 OMR/night. Breakfast included for 2. Want me to hold it?<small>10:24</small></div>
+        <div class="chat-bubble in d3">Yes please. Late check-in around 11pm, is that ok?<small>10:25</small></div>
+        <div class="chat-bubble out d4">All set. Late check-in noted, our night manager will meet you. Confirmation coming on WhatsApp now.<small>10:25</small></div>
+        <div class="chat-bubble in d5">Amazing &mdash; thank you!<small>10:26</small></div>
+      </div>
+    </section>
+
+    ${reviewsHtml
+      ? `<section class="reviews-section home-reveal" aria-label="Recent guest reviews">
+          <p class="home-section-eyebrow">Real guest reviews</p>
+          <h2 class="home-section-title">Recent stays, in their own words</h2>
+          <p class="home-section-lead">Honest feedback collected directly via WhatsApp after each stay &mdash; no edits, no incentives.</p>
+          <div class="reviews-grid">${reviewsHtml}</div>
+        </section>`
+      : ""}
+
+    <section class="partner-cta home-reveal">
+      <div>
+        <p class="home-section-eyebrow">Hotelier?</p>
+        <h2>List your property on ChatAstay</h2>
+        <p>WhatsApp-first PMS, marketplace exposure, 14-day free trial. Most teams are live the same day.</p>
+      </div>
+      <div class="partner-actions">
+        <a class="btn btn-whatsapp" href="/admin/onboard">Become a partner</a>
+        <a class="btn btn-ghost" href="/pricing">View pricing</a>
+      </div>
+    </section>
+
+    <footer class="home-footer home-reveal">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <a href="/" class="footer-logo">ChatAstay</a>
+          <p>The WhatsApp-first hotel marketplace and PMS. Discover, book, and stay &mdash; all in the chat you already use.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Marketplace</h4>
+          <ul>
+            <li><a href="/">Featured hotels</a></li>
+            <li><a href="/search">Search hotels</a></li>
+            <li><a href="/search?city=Muscat">Muscat</a></li>
+            <li><a href="/search?city=Salalah">Salalah</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>For hotels</h4>
+          <ul>
+            <li><a href="/admin/onboard">Become a partner</a></li>
+            <li><a href="/pricing">Pricing</a></li>
+            <li><a href="/admin/login">Hotel extranet</a></li>
+            <li><a href="mailto:sales@chatastay.com">Contact sales</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Company</h4>
+          <ul>
+            <li><a href="/pricing">About ChatAstay</a></li>
+            <li><a href="/guest/account">Traveller account</a></li>
+            <li><a href="mailto:hello@chatastay.com">Contact</a></li>
+            <li><a href="mailto:support@chatastay.com">Support</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>&copy; ${new Date().getFullYear()} <strong>ChatAstay</strong>. Built for WhatsApp-first hotel operations.</span>
+        <span>Made with care in the Sultanate of Oman.</span>
+      </div>
+    </footer>
   `;
 
-  res.type("html").send(renderShell({ title: "ChatAstay marketplace", body }));
+  // C3 — scroll-reveal observer for the new home sections. Reuses the same
+  // pattern as the pricing page; degrades gracefully without IO support and
+  // disables itself for prefers-reduced-motion users.
+  const inlineScript = `
+    (function(){
+      var targets = document.querySelectorAll('.home-reveal');
+      if (!targets.length) return;
+      var prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (prefersReduced || typeof IntersectionObserver === 'undefined') {
+        Array.prototype.forEach.call(targets, function(el){ el.classList.add('is-visible'); });
+        return;
+      }
+      var io = new IntersectionObserver(function(entries){
+        entries.forEach(function(entry){
+          if (entry.isIntersecting) { entry.target.classList.add('is-visible'); io.unobserve(entry.target); }
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+      Array.prototype.forEach.call(targets, function(el){ io.observe(el); });
+    })();
+  `;
+
+  res.type("html").send(
+    renderShell({
+      title: "ChatAstay marketplace",
+      body: body + `<script>${inlineScript}</script>`
+    })
+  );
 });
 
 // =============================================================================
