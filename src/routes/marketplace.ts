@@ -231,8 +231,8 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .pricing-toggle button.is-active{background:#ffffff;color:#053b18;box-shadow:0 8px 22px -6px rgba(0,0,0,.18)}
 .pricing-toggle .save-flag{margin-left:8px;background:#dcfce7;color:#166534;font-size:11px;font-weight:800;border-radius:999px;padding:3px 8px;letter-spacing:.04em;text-transform:uppercase}
 .pricing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-bottom:34px;align-items:stretch}
-.plan-card{position:relative;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);border-radius:24px;padding:26px 24px 24px;display:flex;flex-direction:column;gap:14px;box-shadow:0 18px 48px -16px rgba(15,44,38,.16),inset 0 1px 0 rgba(255,255,255,.85);animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both;transition:transform .22s cubic-bezier(.25,1,.5,1),box-shadow .22s cubic-bezier(.25,1,.5,1),border-color .22s cubic-bezier(.25,1,.5,1)}
-.plan-card:hover{transform:translateY(-6px);box-shadow:0 32px 80px -20px rgba(7,68,58,.22);border-color:#cbe5da}
+.plan-card{position:relative;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);border-radius:24px;padding:26px 24px 24px;display:flex;flex-direction:column;gap:14px;box-shadow:0 18px 48px -16px rgba(15,44,38,.16),inset 0 1px 0 rgba(255,255,255,.85);animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both;transform-origin:center;will-change:transform;transition:transform .26s cubic-bezier(.25,1,.5,1),box-shadow .26s cubic-bezier(.25,1,.5,1),border-color .26s cubic-bezier(.25,1,.5,1)}
+.plan-card:hover{transform:translateY(-8px) scale(1.035);box-shadow:0 36px 90px -20px rgba(7,68,58,.26);border-color:#cbe5da;z-index:2}
 .plan-card:nth-child(2){animation-delay:.05s}
 .plan-card:nth-child(3){animation-delay:.1s}
 .plan-card:nth-child(4){animation-delay:.15s}
@@ -251,7 +251,7 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .plan-card .plan-cta .secondary-cta{display:inline-flex;justify-content:center;font-size:13px;font-weight:700;color:var(--brand-2);text-decoration:none;padding:6px 0}
 .plan-card .plan-cta .secondary-cta:hover{text-decoration:underline}
 .plan-card.recommended{border-color:transparent;background:linear-gradient(180deg,#ffffff 0%,#f0fdf6 100%);box-shadow:0 32px 80px -20px rgba(37,211,102,.32),inset 0 1px 0 rgba(255,255,255,.95);outline:2px solid rgba(37,211,102,.45);outline-offset:0;animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both,plan-glow 3.4s ease-in-out infinite alternate;animation-delay:.05s,.4s}
-.plan-card.recommended:hover{transform:translateY(-8px);box-shadow:0 38px 90px -16px rgba(37,211,102,.42)}
+.plan-card.recommended:hover{transform:translateY(-12px) scale(1.045);box-shadow:0 44px 100px -16px rgba(37,211,102,.5);z-index:3}
 .plan-card.recommended .plan-name{color:var(--brand)}
 .plan-card.recommended::before{content:"Most popular";position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#25d366 0%,#7df0ad 100%);color:#053b18;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;padding:6px 14px;border-radius:999px;box-shadow:0 12px 26px -6px rgba(37,211,102,.5);white-space:nowrap}
 @keyframes plan-glow{from{box-shadow:0 32px 80px -20px rgba(37,211,102,.28),inset 0 1px 0 rgba(255,255,255,.95)}to{box-shadow:0 36px 90px -18px rgba(37,211,102,.5),inset 0 1px 0 rgba(255,255,255,.95)}}
@@ -262,7 +262,7 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .plan-card.enterprise .plan-price small{color:rgba(220,252,231,.72)}
 .plan-card.enterprise ul li{color:rgba(255,255,255,.9)}
 .plan-card.enterprise ul li::before{background:linear-gradient(135deg,#7df0ad,#25d366)}
-.plan-card.enterprise:hover{transform:translateY(-6px);box-shadow:0 36px 90px -18px rgba(7,68,58,.6)}
+.plan-card.enterprise:hover{transform:translateY(-8px) scale(1.035);box-shadow:0 40px 100px -18px rgba(7,68,58,.65);z-index:2}
 .compare-card{padding:26px 22px;animation:wa-fade-up .42s ease-out both;animation-delay:.18s}
 .compare-card h2{margin:0 0 6px;font-size:22px;letter-spacing:-.025em}
 .compare-card .lead{margin:0 0 16px;color:var(--muted);font-size:15px}
@@ -293,8 +293,24 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .cta-banner .btn{padding:12px 18px}
 .cta-banner .btn-ghost{background:rgba(255,255,255,.16);color:#ffffff;border:1px solid rgba(255,255,255,.32);box-shadow:none}
 .cta-banner .btn-ghost:hover{background:rgba(255,255,255,.24);filter:none}
-@media (max-width:560px){.pricing-hero{padding:36px 22px;border-radius:24px}.pricing-hero h1{font-size:32px}.pricing-hero p{font-size:15px}.pricing-grid{grid-template-columns:minmax(0,1fr);gap:14px}.plan-card{padding:22px 20px}.plan-card.recommended::before{font-size:10px;padding:5px 10px}.cta-banner{padding:26px 20px;border-radius:22px}.compare-card,.faq-card{padding:22px 18px}}
-@media (prefers-reduced-motion:reduce){.plan-card,.compare-card,.faq-card{animation:none}.plan-card.recommended{animation:none}}
+@media (max-width:560px){.pricing-hero{padding:36px 22px;border-radius:24px}.pricing-hero h1{font-size:32px}.pricing-hero p{font-size:15px}.pricing-grid{grid-template-columns:minmax(0,1fr);gap:14px}.plan-card{padding:22px 20px}.plan-card.recommended::before{font-size:10px;padding:5px 10px}.plan-card:hover,.plan-card.recommended:hover,.plan-card.enterprise:hover{transform:translateY(-4px) scale(1.02)}.cta-banner{padding:26px 20px;border-radius:22px}.compare-card,.faq-card{padding:22px 18px}}
+@media (prefers-reduced-motion:reduce){.plan-card,.compare-card,.faq-card{animation:none}.plan-card.recommended{animation:none}.plan-card:hover,.plan-card.recommended:hover,.plan-card.enterprise:hover{transform:none}}
+/* ===== Nav: clearer hierarchy, Pricing promoted ===== */
+.nav .nav-link{position:relative;text-decoration:none;font-weight:800;font-size:14px;color:#1f2937;padding:8px 14px;border-radius:999px;transition:color .18s ease,background .18s ease,transform .18s ease}
+.nav .nav-link:hover{color:var(--brand);background:rgba(37,211,102,.08);transform:translateY(-1px)}
+.nav .nav-link::after{content:"";position:absolute;left:50%;bottom:3px;width:0;height:2px;background:linear-gradient(90deg,#25d366,#128c7e);transform:translateX(-50%);transition:width .22s cubic-bezier(.25,1,.5,1);border-radius:2px}
+.nav .nav-link:hover::after{width:60%}
+.nav .nav-link-pricing{font-weight:900;color:var(--brand);background:linear-gradient(135deg,rgba(37,211,102,.1),rgba(125,240,173,.18));border:1px solid rgba(37,211,102,.22);box-shadow:0 6px 14px -6px rgba(37,211,102,.28)}
+.nav .nav-link-pricing::before{content:"";display:inline-block;width:7px;height:7px;border-radius:999px;background:#25d366;margin-right:6px;vertical-align:middle;box-shadow:0 0 0 0 rgba(37,211,102,.6);animation:pricing-dot 2.4s ease-in-out infinite}
+.nav .nav-link-pricing:hover{color:#053b18;background:linear-gradient(135deg,#dcfce7,#7df0ad);border-color:transparent;box-shadow:0 12px 26px -8px rgba(37,211,102,.5);transform:translateY(-2px)}
+.nav .nav-link-pricing:hover::after{display:none}
+@keyframes pricing-dot{0%,100%{box-shadow:0 0 0 0 rgba(37,211,102,.45)}50%{box-shadow:0 0 0 6px rgba(37,211,102,0)}}
+@media (prefers-reduced-motion:reduce){.nav .nav-link-pricing::before{animation:none}}
+/* ===== Pricing scroll-reveal (subtle pop-up on scroll, additive only) ===== */
+.pricing-reveal{opacity:0;transform:translateY(28px);transition:opacity .65s cubic-bezier(.22,1,.36,1),transform .65s cubic-bezier(.22,1,.36,1);will-change:opacity,transform}
+.pricing-reveal.is-visible{opacity:1;transform:translateY(0)}
+@media (max-width:560px){.nav .nav-link{padding:7px 11px;font-size:13.5px}.nav .nav-link-pricing{padding:7px 12px}}
+@media (prefers-reduced-motion:reduce){.pricing-reveal{opacity:1;transform:none;transition:none}}
 `;
 
 function renderShell(opts: {
@@ -318,11 +334,10 @@ function renderShell(opts: {
     <nav class="nav">
       <a class="brand" href="/">ChatAstay<span class="brand-tag">marketplace</span></a>
       <div class="links">
-        <a class="muted" href="/search">Search</a>
-        <a class="muted" href="/pricing">Pricing</a>
+        <a class="nav-link" href="/search">Search</a>
+        <a class="nav-link nav-link-pricing" href="/pricing">Pricing</a>
         <a class="nav-pill hotel" href="/admin/login">Hotel / Partner Extranet</a>
         <a class="nav-pill traveller" href="/guest/account">Traveller Account</a>
-        <a class="nav-pill" href="/guest/trips">My Trips</a>
       </div>
     </nav>
     ${opts.body}
@@ -956,19 +971,19 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
       ${planCardsHtml}
     </div>
 
-    <section class="card compare-card">
+    <section class="card compare-card pricing-reveal">
       <h2>Compare every feature</h2>
       <p class="lead">All plans include the WhatsApp assistant, secure data hosting, and lifetime product updates. Scroll horizontally on small screens.</p>
       ${renderPricingComparisonTable()}
     </section>
 
-    <section class="card faq-card">
+    <section class="card faq-card pricing-reveal">
       <h2>Frequently asked</h2>
       <p class="lead">Quick answers about trials, plan changes, and onboarding.</p>
       ${renderPricingFaq()}
     </section>
 
-    <section class="cta-banner">
+    <section class="cta-banner pricing-reveal">
       <div>
         <h3>Ready to run your hotel on WhatsApp?</h3>
         <p>Start your free 14-day trial — bring your team, connect your WhatsApp number, and we'll help you import your rooms and rates.</p>
@@ -1013,6 +1028,25 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
           }
         });
       });
+    })();
+
+    (function(){
+      var targets = document.querySelectorAll('.pricing-reveal');
+      if (!targets.length) return;
+      var prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (prefersReduced || typeof IntersectionObserver === 'undefined') {
+        Array.prototype.forEach.call(targets, function(el){ el.classList.add('is-visible'); });
+        return;
+      }
+      var io = new IntersectionObserver(function(entries){
+        entries.forEach(function(entry){
+          if (entry.isIntersecting) {
+            entry.target.classList.add('is-visible');
+            io.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+      Array.prototype.forEach.call(targets, function(el){ io.observe(el); });
     })();
   `;
 
