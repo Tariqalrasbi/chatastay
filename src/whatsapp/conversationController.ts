@@ -75,10 +75,13 @@ import {
 import { logWhatsAppMessage } from "./messageLogger";
 import {
   answerFromKnowledge,
-  buildKnowledgeFallbackMessage,
   getLocationAndHotelInfoForSubmenu,
   getOffersForBookingSubmenu
 } from "./knowledgeBase";
+import {
+  answerFromPropertyKnowledge,
+  buildKnowledgeFallbackMessage as buildPropertyKnowledgeFallbackMessage
+} from "../core/propertyKnowledge";
 import { sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppList, sendWhatsAppText, trySendWhatsAppFlow } from "./send";
 import { guestReceptionistHandoffMessage } from "./guestNotifications";
 import { handleGuestJourneyInboundReply, type GuestJourneyOperationalReply } from "./preArrivalGuestReplyNotify";
@@ -2474,8 +2477,9 @@ async function resolveHotel(
     if (hotels.length > 1) {
       console.warn(
         `[whatsapp-routing] No active hotel matches inbound phone_number_id=${inboundPhoneNumberId}. ` +
-          `Configure Settings → WhatsApp setup for the receiving property. Falling back to first active hotel "${hotels[0].displayName}" for this turn only.`
+          `Configure Settings → WhatsApp setup for the receiving property. Refusing to route rather than leaking a guest into the wrong hotel.`
       );
+      throw new Error("No active hotel matches inbound WhatsApp phone_number_id; routing refused.");
     } else {
       console.info(
         `[whatsapp-routing] Single-tenant fallback for inbound phone_number_id=${inboundPhoneNumberId} → ${hotels[0].displayName}.`
@@ -7176,8 +7180,18 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (conversationMode === "QUESTION_MODE") {
-    const knowledgeReply = answerFromKnowledge(input.text);
-    const responseBody = knowledgeReply.found ? knowledgeReply.answer! : buildKnowledgeFallbackMessage();
+    const tenantKnowledgeReply = await answerFromPropertyKnowledge(prisma, {
+      hotelId: hotel.id,
+      propertyId: persisted.suggestedPropertyId ?? null,
+      question: input.text,
+      locale: persisted.language || "en"
+    });
+    const knowledgeReply = tenantKnowledgeReply.isKnowledgeQuery || tenantKnowledgeReply.found
+      ? tenantKnowledgeReply
+      : answerFromKnowledge(input.text);
+    const responseBody = knowledgeReply.found
+      ? knowledgeReply.answer!
+      : buildPropertyKnowledgeFallbackMessage();
     await sendWhatsAppText({
       to: normalizedPhone,
       body: responseBody,
@@ -8182,13 +8196,21 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     return;
   }
 
-  const knowledgeReply = answerFromKnowledge(input.text);
+  const tenantKnowledgeReply = await answerFromPropertyKnowledge(prisma, {
+    hotelId: hotel.id,
+    propertyId: persisted.suggestedPropertyId ?? null,
+    question: input.text,
+    locale: persisted.language || "en"
+  });
+  const knowledgeReply = tenantKnowledgeReply.isKnowledgeQuery || tenantKnowledgeReply.found
+    ? tenantKnowledgeReply
+    : answerFromKnowledge(input.text);
   /** While choosing dates/guests/room, phrases like "I want to book" should continue the flow, not open FAQ. */
   const skipKnowledgeForBookingIntent =
     isBookingIntent(normalizedInputText) &&
     (conversationMode === "IDLE" || conversationMode === "BOOKING_MODE");
   if (knowledgeReply.isKnowledgeQuery && !skipKnowledgeForBookingIntent) {
-    const responseBody = knowledgeReply.found ? knowledgeReply.answer! : buildKnowledgeFallbackMessage();
+    const responseBody = knowledgeReply.found ? knowledgeReply.answer! : buildPropertyKnowledgeFallbackMessage();
     await sendWhatsAppText({
       to: normalizedPhone,
       body: responseBody,

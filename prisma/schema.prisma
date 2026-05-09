@@ -374,6 +374,9 @@ model Hotel {
   hotelDailyDigestLogs   HotelDailyDigestLog[]
   frontDeskShifts        FrontDeskShift[]
   housekeepingTasks      HousekeepingTask[]
+  knowledgeEntries       PropertyKnowledgeEntry[]
+  propertyPolicies       PropertyPolicy[]
+  onboardingProgress     PropertyOnboardingProgress?
   leads                  Lead[]
   leadOutreachLogs       LeadOutreachLog[]
   guestFeedbacks         GuestFeedback[]
@@ -429,6 +432,8 @@ model HotelUser {
   hkTasksCompleted             HousekeepingTask[]     @relation("HKTaskCompletedBy")
   hkTasksManualAssigned        HousekeepingTask[]     @relation("HKTaskManualAssignedBy")
   passwordResetTokens          PasswordResetToken[]
+  knowledgeEntriesCreated      PropertyKnowledgeEntry[] @relation("KnowledgeEntryCreatedBy")
+  knowledgeEntriesUpdated      PropertyKnowledgeEntry[] @relation("KnowledgeEntryUpdatedBy")
 
   @@unique([hotelId, email])
   @@unique([hotelId, username])
@@ -536,8 +541,63 @@ model Property {
   convertedLeads   Lead[]
   leadOutreachLogs LeadOutreachLog[]
   messages         Message[]
+  knowledgeEntries PropertyKnowledgeEntry[]
+  propertyPolicies PropertyPolicy[]
 
   @@unique([hotelId, name])
+}
+
+model PropertyKnowledgeEntry {
+  id          String     @id @default(cuid())
+  hotelId     String
+  hotel       Hotel      @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  propertyId  String?
+  property    Property?  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  category    String
+  question    String?
+  answer      String
+  locale      String     @default("en")
+  source      String     @default("MANUAL")
+  isActive    Boolean    @default(true)
+  version     Int        @default(1)
+  createdById String?
+  createdBy   HotelUser? @relation("KnowledgeEntryCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedById String?
+  updatedBy   HotelUser? @relation("KnowledgeEntryUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([hotelId, propertyId, category, locale])
+  @@index([hotelId, isActive, updatedAt])
+}
+
+model PropertyPolicy {
+  id         String    @id @default(cuid())
+  hotelId    String
+  hotel      Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  propertyId String?
+  property   Property? @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  type       String
+  title      String
+  body       String
+  locale     String    @default("en")
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([hotelId, propertyId, type, locale])
+  @@index([hotelId, isActive, updatedAt])
+}
+
+model PropertyOnboardingProgress {
+  id             String    @id @default(cuid())
+  hotelId         String    @unique
+  hotel           Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  currentStep     String    @default("BASIC_INFO")
+  completedSteps  String    @default("[]")
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
 model Lead {
@@ -1272,6 +1332,8 @@ model Plan {
   monthlyPrice            Float
   maxProperties           Int            @default(1)
   maxRoomTypes            Int            @default(20)
+  maxRoomUnits            Int            @default(60)
+  maxStaffUsers           Int            @default(8)
   maxMonthlyConversations Int            @default(2000)
   supportsChannelManager  Boolean        @default(false)
   supportsCustomBranding  Boolean        @default(false)

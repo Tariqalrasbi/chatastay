@@ -35,6 +35,7 @@ import {
   type RoomOffer
 } from "../core/availability";
 import { PLATFORM_HOTEL_ID, trackDecisionEventSafe } from "../core/decisionAnalytics";
+import { listKnowledgeEntries, listPolicies } from "../core/propertyKnowledge";
 
 /// Phase E: how long a marketplace intent token is valid (30 days). After
 /// expiry the wa.me link still opens WhatsApp, but the webhook silently
@@ -1052,6 +1053,24 @@ marketplaceRouter.get("/h/:slug", async (req: Request, res: Response) => {
   const photos = safeParseJsonArray(hotel.photoUrlsJson);
   const amenities = safeParseJsonArray(hotel.amenitiesJson);
   const coverStyle = hotel.coverImageUrl ? `background-image:url(${JSON.stringify(hotel.coverImageUrl).slice(1, -1)})` : "background:linear-gradient(135deg,#0b6e6e 0%,#13a4a4 100%)";
+  const primaryProperty = hotel.properties[0] ?? null;
+  const [publicPolicies, publicKnowledge] = await Promise.all([
+    listPolicies(prisma, hotel.id, { propertyId: primaryProperty?.id ?? null, locale: "en" }),
+    listKnowledgeEntries(prisma, hotel.id, { propertyId: primaryProperty?.id ?? null, locale: "en" })
+  ]);
+  const policyCardsHtml = publicPolicies.slice(0, 6).map((policy) => `<article class="card" style="margin-bottom:0">
+      <span class="badge">${escapeHtml(policy.type.replaceAll("_", " "))}</span>
+      <h3 style="font-size:16px;margin:10px 0 6px">${escapeHtml(policy.title)}</h3>
+      <p style="margin:0;font-size:14px">${escapeHtml(policy.body)}</p>
+    </article>`).join("");
+  const faqCardsHtml = publicKnowledge
+    .filter((entry) => entry.question && ["general", "rooms", "rates", "policies", "restaurant", "services", "activities", "directions", "contacts"].includes(entry.category))
+    .slice(0, 6)
+    .map((entry) => `<details class="card" style="margin-bottom:0">
+      <summary style="cursor:pointer;font-weight:800">${escapeHtml(entry.question ?? entry.category)}</summary>
+      <p style="margin:10px 0 0;font-size:14px">${escapeHtml(entry.answer)}</p>
+    </details>`)
+    .join("");
 
   /// Phase E: route the WhatsApp CTA through `/m/start` so we can mint a
   /// MarketplaceBookingIntent token, embed it in the wa.me message text, and
@@ -1105,7 +1124,9 @@ marketplaceRouter.get("/h/:slug", async (req: Request, res: Response) => {
     </section>
     ${photos.length
       ? `<section class="card"><h2 style="margin-top:0;font-size:18px">Photos</h2><div class="grid">${photos.map((url) => `<img src="${escapeHtml(url)}" alt="" style="width:100%;border-radius:10px;height:160px;object-fit:cover" />`).join("")}</div></section>`
-      : ""}`;
+      : ""}
+    ${policyCardsHtml ? `<section class="card"><h2 style="margin-top:0;font-size:18px">Policies</h2><div class="grid">${policyCardsHtml}</div></section>` : ""}
+    ${faqCardsHtml ? `<section class="card"><h2 style="margin-top:0;font-size:18px">Guest FAQ</h2><div class="grid">${faqCardsHtml}</div></section>` : ""}`;
 
   const marketplacePlanCodes = (
     await prisma.plan.findMany({ where: { supportsMarketplace: true, isActive: true }, select: { code: true } })

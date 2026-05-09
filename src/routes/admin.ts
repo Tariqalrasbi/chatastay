@@ -100,6 +100,21 @@ import {
   findConflictingHotelForWhatsappPhoneNumberId,
   type PartnerSetupConfig
 } from "../core/partnerSetup";
+import {
+  assertFeature,
+  assertWithinLimit,
+  loadHotelPlanContext,
+  upgradeMessage,
+  type HotelPlanContext,
+  type PlanFeatureSet
+} from "../core/planFeatures";
+import {
+  KNOWLEDGE_CATEGORIES,
+  answerFromPropertyKnowledge,
+  buildKnowledgeFallbackMessage as buildPropertyKnowledgeFallbackMessage,
+  listKnowledgeEntries,
+  listPolicies
+} from "../core/propertyKnowledge";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
 import { aiIntentDisplayLabel } from "../core/operationalLabels";
 import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
@@ -1758,6 +1773,7 @@ function renderLayout(
     links: [
       { href: "/admin/profile", label: "Hotel profile &amp; status" },
       { href: "/admin/setup", label: "Property setup" },
+      { href: "/admin/knowledge-bank", label: "Knowledge bank" },
       ...(sess && isPlatformAcquisitionSession(sess)
         ? [{ href: "/admin/leads", label: "Lead pipeline (platform)" }]
         : []),
@@ -2768,6 +2784,17 @@ function escapeHtml(input: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function safeParseJsonArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((item) => String(item).trim()).filter(Boolean);
+  } catch {
+    return raw.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 function parseShiftCloseSnapshot(raw: string): ShiftCloseSnapshotFile | null {
@@ -4412,6 +4439,17 @@ adminRouter.get("/module/front-desk", requireAuth, requirePmsModule("front_desk"
 adminRouter.get("/module/restaurant", requireAuth, requirePmsModule("restaurant"), async (_req, res) => {
   let chefPrepHtml = "";
   let buffetCardHtml = "";
+  const hotelForPlan = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (hotelForPlan) {
+    const planCtx = await loadHotelPlanContext(prisma, hotelForPlan.id);
+    if (!planCtx.features.restaurantModule) {
+      const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero"><h1>Restaurant workspace</h1><p>This module is available on Growth, Pro, Premium, and Enterprise plans.</p></div>
+${featureLockCard(planCtx, "restaurantModule", "Restaurant / café module is locked", "Menu management, room-service orders, KOT, buffet counts, and chef prep require a restaurant-enabled plan.")}`;
+      res.type("html").send(renderLayout(content, true));
+      return;
+    }
+  }
   try {
     const hotel = await prisma.hotel.findUnique({
       where: { slug: activeHotelSlug() },
@@ -4448,11 +4486,22 @@ ${buffetCardHtml}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.get("/module/housekeeping", requireAuth, requirePmsModule("housekeeping"), (req, res) => {
+adminRouter.get("/module/housekeeping", requireAuth, requirePmsModule("housekeeping"), async (req, res) => {
   const session = getSession(req)!;
   if (session.role === "HOUSEKEEPING") {
     res.redirect("/admin/hk");
     return;
+  }
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (hotel) {
+    const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+    if (!planCtx.features.housekeepingModule) {
+      const content = `${pmsWorkspacePageStyles}
+<div class="pms-hero"><h1>Housekeeping workspace</h1><p>This module is available on Growth, Pro, Premium, and Enterprise plans.</p></div>
+${featureLockCard(planCtx, "housekeepingModule", "Housekeeping module is locked", "Cleaning queues, staff task assignment, SLA tracking, and room-readiness boards require a housekeeping-enabled plan.")}`;
+      res.type("html").send(renderLayout(content, true));
+      return;
+    }
   }
   const content = `${pmsWorkspacePageStyles}
 <div class="pms-hero">
@@ -4632,6 +4681,23 @@ adminRouter.post("/onboard", async (req, res) => {
     return;
   }
 
+  const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+  const [currentProperties, currentRoomTypes, currentRoomUnits, currentStaff] = await Promise.all([
+    prisma.property.count({ where: { hotelId: hotel.id } }),
+    prisma.roomType.count({ where: { hotelId: hotel.id, isActive: true } }),
+    prisma.roomUnit.count({ where: { hotelId: hotel.id, isActive: true } }),
+    prisma.hotelUser.count({ where: { hotelId: hotel.id, isActive: true } })
+  ]);
+  try {
+    assertWithinLimit(planCtx, "maxProperties", currentProperties + 1, "Property");
+    assertWithinLimit(planCtx, "maxRoomTypes", currentRoomTypes + 1, "Room type");
+    assertWithinLimit(planCtx, "maxRoomUnits", currentRoomUnits + units, "Room unit");
+    assertWithinLimit(planCtx, "maxStaffUsers", currentStaff + 1, "Staff user");
+  } catch (limitErr) {
+    res.redirect(`/admin/onboard?error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Plan limit reached."))}`);
+    return;
+  }
+
   const propertyCode = await uniquePropertyCode(hotel.id, propertyName);
   const ownerPasswordHash = await hashSecret(password);
 
@@ -4694,6 +4760,18 @@ adminRouter.post("/onboard", async (req, res) => {
           defaultLanguage,
           whatsappPhone
         })
+      }
+    });
+    await tx.propertyOnboardingProgress.upsert({
+      where: { hotelId: hotel.id },
+      update: {
+        currentStep: "KNOWLEDGE",
+        completedSteps: JSON.stringify(["BASIC_INFO", "ROOMS", "STAFF"])
+      },
+      create: {
+        hotelId: hotel.id,
+        currentStep: "KNOWLEDGE",
+        completedSteps: JSON.stringify(["BASIC_INFO", "ROOMS", "STAFF"])
       }
     });
     return { propertyId: property.id };
@@ -6242,6 +6320,14 @@ adminRouter.post("/users", requireAuth, async (req, res) => {
     const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
     if (!hotel) {
       jsonErr(404, "Hotel not found.");
+      return;
+    }
+    const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+    const activeStaffCount = await prisma.hotelUser.count({ where: { hotelId: hotel.id, isActive: true } });
+    try {
+      assertWithinLimit(planCtx, "maxStaffUsers", activeStaffCount + 1, "Staff user");
+    } catch (limitErr) {
+      jsonErr(403, upgradeMessage(limitErr instanceof Error ? limitErr.message : "Staff user limit reached."));
       return;
     }
 
@@ -14248,6 +14334,14 @@ adminRouter.post("/rooms/:roomTypeId/units/add", requirePermission("ROOMS", "MAN
   }
   const sortOrderInput = String(req.body.sortOrder ?? "").trim();
   const sortOrder = sortOrderInput ? parseIntegerInput(sortOrderInput, 0) : null;
+  const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+  const currentUnits = await prisma.roomUnit.count({ where: { hotelId: hotel.id, isActive: true } });
+  try {
+    assertWithinLimit(planCtx, "maxRoomUnits", currentUnits + 1, "Room unit");
+  } catch (limitErr) {
+    res.redirect(`/admin/rooms?error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Room unit limit reached."))}`);
+    return;
+  }
   await prisma.roomUnit.create({
     data: {
       hotelId: hotel.id,
@@ -14277,6 +14371,14 @@ adminRouter.post("/rooms/:roomTypeId/units/bulk", requirePermission("ROOMS", "MA
   const existingNames = new Set(existing.map((row) => row.name));
   const createRows = names.filter((name) => !existingNames.has(name)).map((name, index) => ({ hotelId: hotel.id, roomTypeId, name, sortOrder: start + index }));
   if (createRows.length) {
+    const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+    const currentUnits = await prisma.roomUnit.count({ where: { hotelId: hotel.id, isActive: true } });
+    try {
+      assertWithinLimit(planCtx, "maxRoomUnits", currentUnits + createRows.length, "Room unit");
+    } catch (limitErr) {
+      res.redirect(`/admin/rooms?error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Room unit limit reached."))}`);
+      return;
+    }
     await prisma.roomUnit.createMany({ data: createRows });
   }
   res.redirect("/admin/rooms?unitSaved=1");
@@ -17581,6 +17683,13 @@ adminRouter.post("/fb/menu/add", requireFbOperationsEdit(), async (req, res) => 
   const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
   if (!hotel) {
     res.redirect("/admin/fb/menu");
+    return;
+  }
+  const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+  try {
+    assertFeature(planCtx, "restaurantModule", "Restaurant / café module");
+  } catch (limitErr) {
+    res.redirect(`/admin/fb/menu?error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Restaurant module is locked."))}`);
     return;
   }
   const outletRaw = String(req.body.outletType ?? "").toUpperCase();
@@ -23243,6 +23352,356 @@ adminRouter.post("/integrations/booking-com/prepare-sync", requirePermission("US
   res.redirect("/admin/integrations");
 });
 
+function featureLockCard(ctx: HotelPlanContext, feature: keyof PlanFeatureSet, title: string, body: string): string {
+  if (ctx.features[feature]) return "";
+  return `<section class="card" style="border-color:#fed7aa;background:#fff7ed">
+    <h3 style="margin-top:0">${escapeHtml(title)} <span class="badge alert">Locked</span></h3>
+    <p class="muted">${escapeHtml(upgradeMessage(body))}</p>
+    <a class="btn-link primary" href="/admin/subscription">View upgrade options</a>
+  </section>`;
+}
+
+function renderOnboardingStepList(completedSteps: string[]): string {
+  const steps = [
+    ["BASIC_INFO", "Basic property information"],
+    ["BRANDING", "Branding and public listing"],
+    ["ROOMS", "Rooms and rates"],
+    ["POLICIES", "Policies"],
+    ["RESTAURANT", "Restaurant / café"],
+    ["SERVICES", "Services and activities"],
+    ["KNOWLEDGE", "WhatsApp assistant knowledge"],
+    ["STAFF", "Staff and permissions"]
+  ];
+  return `<ol style="display:grid;gap:8px;padding-left:22px">${steps
+    .map(([id, label]) => {
+      const done = completedSteps.includes(id);
+      return `<li><strong>${escapeHtml(label)}</strong> ${done ? '<span class="badge ok">Done</span>' : '<span class="badge pending">Open</span>'}</li>`;
+    })
+    .join("")}</ol>`;
+}
+
+function parseCompletedOnboardingSteps(raw: string | null | undefined): string[] {
+  try {
+    const parsed = JSON.parse(raw ?? "[]");
+    return Array.isArray(parsed) ? parsed.map((x) => String(x)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderKnowledgeCategoryOptions(selected: string): string {
+  return KNOWLEDGE_CATEGORIES.map(
+    (category) => `<option value="${escapeHtml(category)}" ${category === selected ? "selected" : ""}>${escapeHtml(category)}</option>`
+  ).join("");
+}
+
+adminRouter.get("/knowledge-bank", requirePermission("USERS", "VIEW"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({
+    where: { slug: activeHotelSlug() },
+    include: { properties: { where: { status: PropertyStatus.ACTIVE }, orderBy: { createdAt: "asc" } } }
+  });
+  if (!hotel) {
+    res.type("html").send(renderLayout("<h2>Knowledge bank</h2><p>No hotel data found.</p>", true));
+    return;
+  }
+  const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
+  const property = hotel.properties.find((p) => p.id === activePropertyId) ?? hotel.properties[0] ?? null;
+  const [planCtx, progress, entries, policies] = await Promise.all([
+    loadHotelPlanContext(prisma, hotel.id),
+    prisma.propertyOnboardingProgress.upsert({
+      where: { hotelId: hotel.id },
+      update: {},
+      create: { hotelId: hotel.id }
+    }),
+    listKnowledgeEntries(prisma, hotel.id, { propertyId: property?.id ?? null, includeInactive: true }),
+    listPolicies(prisma, hotel.id, { propertyId: property?.id ?? null, includeInactive: true })
+  ]);
+  const previewQuestion = String(req.query.q ?? "").trim();
+  const preview = previewQuestion
+    ? await answerFromPropertyKnowledge(prisma, {
+        hotelId: hotel.id,
+        propertyId: property?.id ?? null,
+        question: previewQuestion,
+        locale: "en"
+      })
+    : null;
+  const completedSteps = parseCompletedOnboardingSteps(progress.completedSteps);
+  const updatedNotice = req.query.updated ? '<p class="badge ok">Knowledge bank updated.</p>' : "";
+  const deletedNotice = req.query.deleted ? '<p class="badge ok">Item archived.</p>' : "";
+  const errorNotice = typeof req.query.error === "string" ? `<p class="badge alert">${escapeHtml(req.query.error)}</p>` : "";
+  const propertyOptions = [
+    `<option value="">Hotel-wide knowledge</option>`,
+    ...hotel.properties.map(
+      (p) => `<option value="${escapeHtml(p.id)}" ${p.id === property?.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`
+    )
+  ].join("");
+  const entryRows = entries.length
+    ? entries
+        .map(
+          (entry) => `<tr>
+            <td><span class="badge">${escapeHtml(entry.category)}</span><br><span class="muted">${escapeHtml(entry.locale)}</span></td>
+            <td>${entry.question ? escapeHtml(entry.question) : '<span class="muted">General answer</span>'}</td>
+            <td>${escapeHtml(entry.answer).slice(0, 260)}${entry.answer.length > 260 ? "…" : ""}</td>
+            <td>${entry.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge pending">Archived</span>'}</td>
+            <td>
+              <form method="post" action="/admin/knowledge-bank/entry/${encodeURIComponent(entry.id)}/delete">
+                <button class="btn-link" type="submit">${entry.isActive ? "Archive" : "Keep archived"}</button>
+              </form>
+            </td>
+          </tr>`
+        )
+        .join("")
+    : `<tr><td colspan="5" class="muted">No knowledge entries yet. Add FAQs, policy answers, room descriptions, service notes, directions, or contact details.</td></tr>`;
+  const policyRows = policies.length
+    ? policies
+        .map(
+          (policy) => `<tr>
+            <td><span class="badge">${escapeHtml(policy.type)}</span><br><span class="muted">${escapeHtml(policy.locale)}</span></td>
+            <td>${escapeHtml(policy.title)}</td>
+            <td>${escapeHtml(policy.body).slice(0, 260)}${policy.body.length > 260 ? "…" : ""}</td>
+            <td>${policy.isActive ? '<span class="badge ok">Active</span>' : '<span class="badge pending">Archived</span>'}</td>
+            <td>
+              <form method="post" action="/admin/knowledge-bank/policy/${encodeURIComponent(policy.id)}/delete">
+                <button class="btn-link" type="submit">${policy.isActive ? "Archive" : "Keep archived"}</button>
+              </form>
+            </td>
+          </tr>`
+        )
+        .join("")
+    : `<tr><td colspan="5" class="muted">No structured policies yet. Add cancellation, deposit, child, payment, no-show, smoking/pets, or check-in rules.</td></tr>`;
+
+  const content = `
+<h2>Knowledge bank</h2>
+<p class="muted">Editable hotel knowledge for the website, booking engine, WhatsApp assistant, guest FAQs, policies, and service menus. Everything here is scoped to ${escapeHtml(hotel.displayName)}${property ? ` / ${escapeHtml(property.name)}` : ""}.</p>
+${updatedNotice}
+${deletedNotice}
+${errorNotice}
+<div class="actions">
+  <a class="btn-link primary" href="/admin/setup">Property setup</a>
+  <a class="btn-link" href="/admin/subscription">Plan &amp; limits</a>
+  <a class="btn-link" href="/h/${encodeURIComponent(hotel.slug)}" target="_blank" rel="noopener">Preview public page</a>
+</div>
+<div class="grid-2">
+  <section class="card">
+    <h3 style="margin-top:0">Onboarding progress</h3>
+    <p class="muted">Use this checklist as the hotel&apos;s guided setup path. It keeps the current quick-start flow but makes the missing setup obvious.</p>
+    ${renderOnboardingStepList(completedSteps)}
+    <form method="post" action="/admin/knowledge-bank/progress" style="display:grid;gap:8px">
+      <label>Current setup step
+        <select name="currentStep" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">
+          ${["BASIC_INFO", "BRANDING", "ROOMS", "POLICIES", "RESTAURANT", "SERVICES", "KNOWLEDGE", "STAFF", "COMPLETE"].map((step) => `<option value="${step}" ${progress.currentStep === step ? "selected" : ""}>${step.replaceAll("_", " ")}</option>`).join("")}
+        </select>
+      </label>
+      <label>Completed steps (comma-separated)
+        <input type="text" name="completedSteps" value="${escapeHtml(completedSteps.join(", "))}" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <button class="btn-link primary" type="submit">Update progress</button>
+    </form>
+  </section>
+  <section class="card">
+    <h3 style="margin-top:0">Subscription gates</h3>
+    <p><strong>${escapeHtml(planCtx.planName)}</strong> plan</p>
+    <ul class="muted">
+      <li>Properties: ${planCtx.features.maxProperties}</li>
+      <li>Room types: ${planCtx.features.maxRoomTypes}</li>
+      <li>Room units: ${planCtx.features.maxRoomUnits}</li>
+      <li>Staff users: ${planCtx.features.maxStaffUsers}</li>
+      <li>AI concierge: ${planCtx.features.aiConcierge ? "Included" : "Locked"}</li>
+      <li>Restaurant: ${planCtx.features.restaurantModule ? "Included" : "Locked"}</li>
+      <li>Advanced reports: ${planCtx.features.advancedReports ? "Included" : "Locked"}</li>
+    </ul>
+  </section>
+</div>
+${featureLockCard(planCtx, "aiConcierge", "AI concierge is locked", "The knowledge bank remains editable, but advanced AI answer automation is disabled on this plan.")}
+<section class="card">
+  <h3 style="margin-top:0">Add knowledge entry</h3>
+  <form method="post" action="/admin/knowledge-bank/entry" style="display:grid;gap:10px">
+    <div class="grid-2">
+      <label>Scope
+        <select name="propertyId" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">${propertyOptions}</select>
+      </label>
+      <label>Category
+        <select name="category" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">${renderKnowledgeCategoryOptions("general")}</select>
+      </label>
+    </div>
+    <div class="grid-2">
+      <label>Locale
+        <select name="locale" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">
+          <option value="en">English</option>
+          <option value="ar">Arabic</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+        </select>
+      </label>
+      <label>Guest question / trigger
+        <input type="text" name="question" placeholder="Do you have airport pickup?" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+    <label>Answer
+      <textarea name="answer" rows="5" required placeholder="Yes, airport pickup is available. Please share your flight number and arrival time." style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px"></textarea>
+    </label>
+    <button class="btn-link primary" type="submit">Save knowledge</button>
+  </form>
+</section>
+<section class="card">
+  <h3 style="margin-top:0">Knowledge entries</h3>
+  <table><thead><tr><th>Category</th><th>Question</th><th>Answer</th><th>Status</th><th></th></tr></thead><tbody>${entryRows}</tbody></table>
+</section>
+<section class="card">
+  <h3 style="margin-top:0">Add policy</h3>
+  <form method="post" action="/admin/knowledge-bank/policy" style="display:grid;gap:10px">
+    <div class="grid-2">
+      <label>Scope
+        <select name="propertyId" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px">${propertyOptions}</select>
+      </label>
+      <label>Policy type
+        <input type="text" name="type" value="cancellation" placeholder="cancellation, deposit, child, payment, no_show" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+    <div class="grid-2">
+      <label>Locale
+        <select name="locale" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px"><option value="en">English</option><option value="ar">Arabic</option></select>
+      </label>
+      <label>Title
+        <input type="text" name="title" required placeholder="Cancellation policy" style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+    </div>
+    <label>Policy text
+      <textarea name="body" rows="4" required placeholder="Free cancellation until 48 hours before arrival..." style="width:100%;padding:8px;border:1px solid #d8dee6;border-radius:8px"></textarea>
+    </label>
+    <button class="btn-link primary" type="submit">Save policy</button>
+  </form>
+</section>
+<section class="card">
+  <h3 style="margin-top:0">Policies</h3>
+  <table><thead><tr><th>Type</th><th>Title</th><th>Text</th><th>Status</th><th></th></tr></thead><tbody>${policyRows}</tbody></table>
+</section>
+<section class="card">
+  <h3 style="margin-top:0">Test assistant answer</h3>
+  <form method="get" action="/admin/knowledge-bank" style="display:flex;gap:8px;flex-wrap:wrap">
+    <input type="text" name="q" value="${escapeHtml(previewQuestion)}" placeholder="Ask a guest-style question" style="flex:1;min-width:240px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+    <button class="btn-link primary" type="submit">Preview answer</button>
+  </form>
+  ${previewQuestion ? `<div style="margin-top:12px;padding:12px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb"><strong>Answer:</strong><br>${escapeHtml(preview?.found ? preview.answer ?? "" : buildPropertyKnowledgeFallbackMessage()).replaceAll("\n", "<br>")}<p class="muted">Intent: ${escapeHtml(preview?.intent ?? "none")} · Source: ${escapeHtml(preview?.source ?? "fallback")}</p></div>` : ""}
+</section>`;
+  res.type("html").send(renderLayout(content, true));
+});
+
+adminRouter.post("/knowledge-bank/entry", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, include: { properties: true } });
+  const session = getSession(req);
+  if (!hotel) {
+    res.redirect("/admin/knowledge-bank?error=Hotel+not+found");
+    return;
+  }
+  const propertyIdRaw = String(req.body.propertyId ?? "").trim();
+  const propertyId = hotel.properties.some((p) => p.id === propertyIdRaw) ? propertyIdRaw : null;
+  const category = String(req.body.category ?? "general").trim().toLowerCase() || "general";
+  const locale = String(req.body.locale ?? "en").trim().toLowerCase() || "en";
+  const question = String(req.body.question ?? "").trim() || null;
+  const answer = String(req.body.answer ?? "").trim();
+  if (!answer) {
+    res.redirect("/admin/knowledge-bank?error=Answer+is+required");
+    return;
+  }
+  await prisma.propertyKnowledgeEntry.create({
+    data: {
+      hotelId: hotel.id,
+      propertyId,
+      category,
+      locale,
+      question,
+      answer,
+      source: "MANUAL",
+      createdById: hotelUserIdForPrismaFk(session?.staffId) ?? null,
+      updatedById: hotelUserIdForPrismaFk(session?.staffId) ?? null
+    }
+  });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "PROPERTY_KNOWLEDGE_ENTRY_CREATED",
+    entityType: "PropertyKnowledgeEntry",
+    metadata: { propertyId, category, locale, hasQuestion: Boolean(question) }
+  });
+  res.redirect("/admin/knowledge-bank?updated=1");
+});
+
+adminRouter.post("/knowledge-bank/entry/:id/delete", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (hotel) {
+    await prisma.propertyKnowledgeEntry.updateMany({
+      where: { id: String(req.params.id ?? ""), hotelId: hotel.id },
+      data: { isActive: false }
+    });
+  }
+  res.redirect("/admin/knowledge-bank?deleted=1");
+});
+
+adminRouter.post("/knowledge-bank/policy", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, include: { properties: true } });
+  if (!hotel) {
+    res.redirect("/admin/knowledge-bank?error=Hotel+not+found");
+    return;
+  }
+  const propertyIdRaw = String(req.body.propertyId ?? "").trim();
+  const propertyId = hotel.properties.some((p) => p.id === propertyIdRaw) ? propertyIdRaw : null;
+  const type = String(req.body.type ?? "general").trim().toLowerCase() || "general";
+  const locale = String(req.body.locale ?? "en").trim().toLowerCase() || "en";
+  const title = String(req.body.title ?? "").trim();
+  const body = String(req.body.body ?? "").trim();
+  if (!title || !body) {
+    res.redirect("/admin/knowledge-bank?error=Policy+title+and+text+are+required");
+    return;
+  }
+  await prisma.propertyPolicy.create({ data: { hotelId: hotel.id, propertyId, type, locale, title, body } });
+  await logAudit({
+    hotelId: hotel.id,
+    action: "PROPERTY_POLICY_CREATED",
+    entityType: "PropertyPolicy",
+    metadata: { propertyId, type, locale }
+  });
+  res.redirect("/admin/knowledge-bank?updated=1");
+});
+
+adminRouter.post("/knowledge-bank/policy/:id/delete", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (hotel) {
+    await prisma.propertyPolicy.updateMany({
+      where: { id: String(req.params.id ?? ""), hotelId: hotel.id },
+      data: { isActive: false }
+    });
+  }
+  res.redirect("/admin/knowledge-bank?deleted=1");
+});
+
+adminRouter.post("/knowledge-bank/progress", requirePermission("USERS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findFirst({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/knowledge-bank?error=Hotel+not+found");
+    return;
+  }
+  const currentStep = String(req.body.currentStep ?? "BASIC_INFO").trim() || "BASIC_INFO";
+  const completedSteps = String(req.body.completedSteps ?? "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase().replace(/\s+/g, "_"))
+    .filter(Boolean);
+  await prisma.propertyOnboardingProgress.upsert({
+    where: { hotelId: hotel.id },
+    update: {
+      currentStep,
+      completedSteps: JSON.stringify(completedSteps),
+      completedAt: currentStep === "COMPLETE" ? new Date() : null
+    },
+    create: {
+      hotelId: hotel.id,
+      currentStep,
+      completedSteps: JSON.stringify(completedSteps),
+      completedAt: currentStep === "COMPLETE" ? new Date() : null
+    }
+  });
+  res.redirect("/admin/knowledge-bank?updated=1");
+});
+
 adminRouter.get("/setup", requirePermission("USERS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
@@ -23268,6 +23727,7 @@ ${sentNotice}
 ${errorNotice}
 <div class="actions">
   <a class="btn-link primary" href="/admin/conversations">Test messages in Conversations</a>
+  <a class="btn-link" href="/admin/knowledge-bank">Edit knowledge bank</a>
   <a class="btn-link" href="/admin/integrations">Review channels</a>
   <a class="btn-link" href="/admin/subscription">Plan & usage</a>
 </div>
@@ -23299,6 +23759,22 @@ ${errorNotice}
       </div>
       <label>WhatsApp phone
         <input type="text" name="whatsappPhone" value="${escapeHtml(hotel.whatsappPhone ?? "")}" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <h4 style="margin:16px 0 8px">Public website content</h4>
+      <label>Public description
+        <textarea name="publicDescription" rows="4" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">${escapeHtml(hotel.description ?? "")}</textarea>
+      </label>
+      <label>Cover image URL
+        <input type="url" name="coverImageUrl" value="${escapeHtml(hotel.coverImageUrl ?? "")}" placeholder="https://..." style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <label>Gallery image URLs (one per line)
+        <textarea name="photoUrls" rows="3" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px">${escapeHtml(safeParseJsonArray(hotel.photoUrlsJson).join("\n"))}</textarea>
+      </label>
+      <label>Amenities (comma-separated)
+        <input type="text" name="amenities" value="${escapeHtml(safeParseJsonArray(hotel.amenitiesJson).join(", "))}" placeholder="WiFi, Pool, Breakfast" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
+      </label>
+      <label>Star rating
+        <input type="number" name="starRating" min="0" max="5" step="0.1" value="${hotel.starRating != null ? escapeHtml(String(hotel.starRating)) : ""}" style="width:100%; max-width:180px; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
       </label>
       <label>WhatsApp Phone Number ID (Cloud API)
         <input type="text" name="whatsappPhoneNumberId" value="${escapeHtml(config.whatsappPhoneNumberId)}" placeholder="Phone number ID from Meta → WhatsApp → API setup" style="width:100%; padding:8px; border:1px solid #d8dee6; border-radius:8px" />
@@ -23522,6 +23998,22 @@ adminRouter.post("/setup", requirePermission("USERS", "EDIT"), async (req, res) 
   const timezone = String(req.body.timezone ?? "").trim() || hotel.timezone;
   const currency = String(req.body.currency ?? "").trim() || hotel.currency;
   const whatsappPhone = String(req.body.whatsappPhone ?? "").trim() || null;
+  const publicDescription = String(req.body.publicDescription ?? "").trim() || null;
+  const coverImageUrl = String(req.body.coverImageUrl ?? "").trim() || null;
+  const photoUrlsJson = JSON.stringify(
+    String(req.body.photoUrls ?? "")
+      .split(/\r?\n/)
+      .map((url) => url.trim())
+      .filter(Boolean)
+  );
+  const amenitiesJson = JSON.stringify(
+    String(req.body.amenities ?? "")
+      .split(",")
+      .map((amenity) => amenity.trim())
+      .filter(Boolean)
+  );
+  const starRatingRaw = Number(req.body.starRating);
+  const starRating = Number.isFinite(starRatingRaw) ? Math.max(0, Math.min(5, starRatingRaw)) : null;
 
   const propertyName = String(req.body.propertyName ?? "").trim() || displayName;
   const propertyCity = String(req.body.propertyCity ?? "").trim() || city;
@@ -23530,10 +24022,34 @@ adminRouter.post("/setup", requirePermission("USERS", "EDIT"), async (req, res) 
   const checkOutTime = String(req.body.checkOutTime ?? "").trim() || null;
   const propertyId = String(req.body.propertyId ?? "").trim();
 
+  if (!propertyId) {
+    const planCtx = await loadHotelPlanContext(prisma, hotel.id);
+    const currentProperties = await prisma.property.count({ where: { hotelId: hotel.id } });
+    try {
+      assertWithinLimit(planCtx, "maxProperties", currentProperties + 1, "Property");
+    } catch (limitErr) {
+      res.redirect(`/admin/setup?sendError=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Property limit reached."))}`);
+      return;
+    }
+  }
+
   await prisma.$transaction(async (tx) => {
     await tx.hotel.update({
       where: { id: hotel.id },
-      data: { displayName, legalName, city, country, timezone, currency, whatsappPhone }
+      data: {
+        displayName,
+        legalName,
+        city,
+        country,
+        timezone,
+        currency,
+        whatsappPhone,
+        description: publicDescription,
+        coverImageUrl,
+        photoUrlsJson,
+        amenitiesJson,
+        starRating
+      }
     });
     if (propertyId) {
       await tx.property.updateMany({
