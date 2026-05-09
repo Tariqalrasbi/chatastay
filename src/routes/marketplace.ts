@@ -311,6 +311,63 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .pricing-reveal.is-visible{opacity:1;transform:translateY(0)}
 @media (max-width:560px){.nav .nav-link{padding:7px 11px;font-size:13.5px}.nav .nav-link-pricing{padding:7px 12px}}
 @media (prefers-reduced-motion:reduce){.pricing-reveal{opacity:1;transform:none;transition:none}}
+/* ===== Pricing polish menu: best-for badge, sizer, currency, trust strip, FAQ chevron, floating CTA ===== */
+.plan-card .plan-best-for{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--brand-2);background:linear-gradient(135deg,#dcfce7,#ecfff5);border:1px solid #c7f5d6;padding:5px 10px;border-radius:999px;margin:-2px 0 2px}
+.plan-card .plan-best-for span{font-size:14px;line-height:1;color:#25d366}
+.plan-card.recommended .plan-best-for{background:linear-gradient(135deg,#bbf7d0,#7df0ad);border-color:transparent;color:#053b18}
+.plan-card.enterprise .plan-best-for{background:rgba(125,240,173,.16);border-color:rgba(125,240,173,.3);color:#7df0ad}
+.plan-card.enterprise .plan-best-for span{color:#7df0ad}
+.plan-card .plan-after-trial{margin:-2px 0 4px;font-size:12.5px;color:var(--muted);font-weight:600}
+.plan-card.enterprise .plan-after-trial{color:rgba(220,252,231,.7)}
+.plan-card.is-suggested{outline:3px solid rgba(37,211,102,.55);outline-offset:2px;animation:plan-suggest-pulse 1.6s ease-in-out 1}
+@keyframes plan-suggest-pulse{0%{outline-color:rgba(37,211,102,0)}40%{outline-color:rgba(37,211,102,.7)}100%{outline-color:rgba(37,211,102,.55)}}
+.plan-card .plan-price{transition:transform .22s cubic-bezier(.25,1,.5,1),opacity .22s ease}
+.plan-card .plan-price.is-flipping{transform:translateY(-6px) scale(.96);opacity:.0}
+.pricing-controls{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:14px 18px;margin-top:24px}
+.pricing-currency{display:inline-flex;gap:4px;padding:4px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);border-radius:999px}
+.pricing-currency button{appearance:none;border:0;background:transparent;color:#ecfdf5;padding:6px 12px;font-size:12.5px;font-weight:800;letter-spacing:.04em;cursor:pointer;border-radius:999px;transition:background .18s ease,color .18s ease,box-shadow .18s ease}
+.pricing-currency button.is-active{background:#ffffff;color:#053b18;box-shadow:0 6px 18px -6px rgba(0,0,0,.18)}
+.pricing-currency button:hover:not(.is-active){background:rgba(255,255,255,.12)}
+.pricing-sizer{position:relative;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:18px;padding:10px 14px 10px 16px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);border-radius:999px;color:#ecfdf5;font-size:13.5px;font-weight:700}
+.pricing-sizer .sizer-label{opacity:.92}
+.pricing-sizer select{appearance:none;-webkit-appearance:none;background:#ffffff;color:#053b18;border:0;border-radius:999px;padding:7px 32px 7px 14px;font-size:13.5px;font-weight:800;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,#053b18 50%),linear-gradient(135deg,#053b18 50%,transparent 50%);background-position:calc(100% - 16px) 12px,calc(100% - 11px) 12px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.pricing-sizer select:focus{outline:0;box-shadow:0 0 0 4px rgba(37,211,102,.32)}
+.pricing-sizer .sizer-hint{display:inline-flex;align-items:center;gap:6px;color:#dcfce7;font-size:12.5px;font-weight:800}
+.pricing-sizer .sizer-hint:not(:empty)::before{content:"\\2192";color:#7df0ad;font-weight:900}
+.pricing-trust-strip{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px 22px;padding:14px 22px;margin:-22px 0 26px;border-radius:999px;background:linear-gradient(180deg,rgba(255,255,255,.92) 0%,rgba(247,253,250,.92) 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 12px 30px -16px rgba(15,44,38,.1);font-size:13px;color:var(--muted);font-weight:600}
+.pricing-trust-strip span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.pricing-trust-strip span::before{content:"\\2713";color:#25d366;font-weight:900}
+.pricing-trust-strip strong{color:var(--ink);font-weight:800}
+/* FAQ chevron: + → × rotation in WhatsApp green */
+.faq-item summary::after{content:"+";font-size:24px;color:#25d366;font-weight:700;line-height:1;display:inline-block;transform-origin:center;transition:transform .25s cubic-bezier(.22,1,.36,1),color .2s ease}
+.faq-item[open] summary::after{content:"+";transform:rotate(45deg);color:#dc2626}
+/* Sticky comparison thead inside its scroll container */
+.compare-table-wrap{max-height:75vh;overflow-y:auto}
+.compare-table thead th{position:sticky;top:0;z-index:5;backdrop-filter:saturate(160%) blur(6px);box-shadow:0 1px 0 var(--border)}
+/* Floating WhatsApp CTA, scoped to the pricing page only */
+.pricing-float-cta{position:fixed;right:20px;bottom:20px;z-index:60;display:inline-flex;align-items:center;gap:10px;padding:12px 16px 12px 14px;border-radius:999px;background:linear-gradient(135deg,#25d366 0%,#1bb673 50%,#128c7e 100%);color:#053b18;font-weight:800;font-size:14px;text-decoration:none;box-shadow:0 22px 50px -12px rgba(37,211,102,.55),inset 0 1px 0 rgba(255,255,255,.45);transition:transform .2s cubic-bezier(.25,1,.5,1),box-shadow .2s cubic-bezier(.25,1,.5,1);animation:float-cta-in .6s cubic-bezier(.22,1,.36,1) .8s both}
+.pricing-float-cta:hover{transform:translateY(-3px);box-shadow:0 30px 70px -12px rgba(37,211,102,.7),inset 0 1px 0 rgba(255,255,255,.55)}
+.pricing-float-cta .float-cta-bubble{width:30px;height:30px;border-radius:999px;background:#ffffff;position:relative;display:inline-block;flex-shrink:0;box-shadow:0 4px 10px -2px rgba(0,0,0,.15)}
+.pricing-float-cta .float-cta-bubble::before{content:"";position:absolute;inset:7px;background:linear-gradient(135deg,#25d366,#128c7e);border-radius:50%;mask:radial-gradient(circle at 50% 60%,transparent 38%,#000 39%);}
+.pricing-float-cta .float-cta-bubble::after{content:"";position:absolute;left:18px;top:9px;width:4px;height:4px;background:#ffffff;border-radius:50%;box-shadow:-7px 0 0 #ffffff,-3px 0 0 #ffffff}
+.pricing-float-cta .float-cta-text{line-height:1.15}
+.pricing-float-cta .float-cta-text strong{display:block;font-size:13px;font-weight:900;letter-spacing:.01em}
+@keyframes float-cta-in{from{opacity:0;transform:translateY(20px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}}
+@media (max-width:560px){
+  .pricing-controls{gap:10px}
+  .pricing-currency button{padding:6px 10px;font-size:12px}
+  .pricing-sizer{font-size:12.5px;padding:8px 12px;width:100%;justify-content:flex-start}
+  .pricing-trust-strip{margin-top:-12px;font-size:12px;padding:12px 16px;gap:8px 14px;border-radius:18px}
+  .pricing-float-cta{right:14px;bottom:14px;padding:10px 14px 10px 12px;font-size:13px}
+  .pricing-float-cta .float-cta-text strong{font-size:12px}
+  .compare-table-wrap{max-height:none}
+  .compare-table thead th{position:static}
+}
+@media (prefers-reduced-motion:reduce){
+  .plan-card.is-suggested{animation:none}
+  .plan-card .plan-price.is-flipping{transform:none}
+  .pricing-float-cta{animation:none}
+}
 `;
 
 function renderShell(opts: {
@@ -744,6 +801,7 @@ type PricingPlan = {
   id: "starter" | "growth" | "pro" | "enterprise";
   name: string;
   tagline: string;
+  bestFor: string;
   monthly: number | null; // OMR / month, or null for custom
   legacyMonthly?: number | null;
   features: string[];
@@ -754,6 +812,8 @@ type PricingPlan = {
   secondaryCtaHref?: string;
   recommended?: boolean;
   variant?: "enterprise";
+  // Sizing hint used by the room-count helper to recommend a plan.
+  sizeFloor: number; // matches "I have N rooms" >= sizeFloor → eligible
 };
 
 const PRICING_PLANS: PricingPlan[] = [
@@ -761,6 +821,8 @@ const PRICING_PLANS: PricingPlan[] = [
     id: "starter",
     name: "Starter",
     tagline: "Small guesthouses & boutique hotels",
+    bestFor: "Up to 30 rooms",
+    sizeFloor: 0,
     monthly: 19,
     legacyMonthly: 29,
     features: [
@@ -778,6 +840,8 @@ const PRICING_PLANS: PricingPlan[] = [
     id: "growth",
     name: "Growth",
     tagline: "Growing hotels with restaurant & housekeeping",
+    bestFor: "30 – 80 rooms",
+    sizeFloor: 30,
     monthly: 49,
     legacyMonthly: 69,
     features: [
@@ -796,6 +860,8 @@ const PRICING_PLANS: PricingPlan[] = [
     id: "pro",
     name: "Pro",
     tagline: "Multi-department resorts & serious operators",
+    bestFor: "80+ rooms · multi-dept",
+    sizeFloor: 80,
     monthly: 99,
     legacyMonthly: 129,
     features: [
@@ -814,6 +880,8 @@ const PRICING_PLANS: PricingPlan[] = [
     id: "enterprise",
     name: "Enterprise",
     tagline: "Hotel chains & large operators",
+    bestFor: "Chains · multi-property",
+    sizeFloor: 200,
     monthly: null,
     features: [
       "Everything in Pro",
@@ -832,6 +900,15 @@ const PRICING_PLANS: PricingPlan[] = [
       encodeURIComponent("Hi ChatAstay, I'd like a demo of the Enterprise plan."),
     variant: "enterprise"
   }
+];
+
+// Static FX rates relative to OMR. Clearly labelled "approx" in the UI so
+// nobody confuses these with live rates. Update annually.
+const PRICING_CURRENCY: { code: "OMR" | "USD" | "AED" | "SAR"; symbol: string; perOmr: number; round: number }[] = [
+  { code: "OMR", symbol: "OMR", perOmr: 1,    round: 1 },
+  { code: "USD", symbol: "USD", perOmr: 2.6,  round: 1 },
+  { code: "AED", symbol: "AED", perOmr: 9.55, round: 5 },
+  { code: "SAR", symbol: "SAR", perOmr: 9.75, round: 5 }
 ];
 
 const PRICING_FAQ: { q: string; a: string }[] = [
@@ -865,23 +942,34 @@ function renderPricingPlanCard(plan: PricingPlan): string {
   const classes = ["plan-card"];
   if (plan.recommended) classes.push("recommended");
   if (plan.variant === "enterprise") classes.push("enterprise");
+  // data-monthly-omr lets the client-side JS recompute prices accurately for
+  // the active currency + cadence without parsing rendered text.
   const priceHtml =
     plan.monthly == null
-      ? `<div class="plan-price custom"><span>Custom</span></div>`
-      : `<div class="plan-price">${
+      ? `<div class="plan-price custom" data-custom="1"><span class="plan-price-value">Custom</span></div>`
+      : `<div class="plan-price" data-monthly-omr="${plan.monthly}"${
+          plan.legacyMonthly && plan.legacyMonthly > plan.monthly
+            ? ` data-legacy-omr="${plan.legacyMonthly}"`
+            : ""
+        }>${
           plan.legacyMonthly && plan.legacyMonthly > plan.monthly
             ? `<span class="legacy">${plan.legacyMonthly} OMR</span>`
             : ""
-        }<span>${plan.monthly} OMR</span><small>/ month</small></div>`;
+        }<span class="plan-price-value">${plan.monthly} OMR</span><small class="plan-price-cadence">/ month</small></div>`;
   const featuresHtml = plan.features.map((f) => `<li>${escapeHtml(f)}</li>`).join("");
   const secondaryCta =
     plan.secondaryCtaLabel && plan.secondaryCtaHref
       ? `<a class="secondary-cta" href="${escapeHtml(plan.secondaryCtaHref)}"${plan.secondaryCtaHref.startsWith("http") ? ' target="_blank" rel="noopener"' : ""}>${escapeHtml(plan.secondaryCtaLabel)}</a>`
       : "";
-  return `<article class="${classes.join(" ")}" data-plan="${escapeHtml(plan.id)}">
+  const trialHint = plan.monthly == null
+    ? `<p class="plan-after-trial">Custom pricing &middot; tailored to your portfolio</p>`
+    : `<p class="plan-after-trial">14-day free trial &middot; cancel anytime</p>`;
+  return `<article class="${classes.join(" ")}" data-plan="${escapeHtml(plan.id)}" data-size-floor="${plan.sizeFloor}">
     <p class="plan-name">${escapeHtml(plan.name)}</p>
     <p class="plan-tag">${escapeHtml(plan.tagline)}</p>
+    <p class="plan-best-for"><span aria-hidden="true">&#9678;</span>${escapeHtml(plan.bestFor)}</p>
     ${priceHtml}
+    ${trialHint}
     <ul>${featuresHtml}</ul>
     <div class="plan-cta">
       <a class="${escapeHtml(plan.ctaClass)}" href="${escapeHtml(plan.ctaHref)}"${plan.ctaHref.startsWith("http") || plan.ctaHref.startsWith("mailto:") ? ' rel="noopener"' : ""}>${escapeHtml(plan.ctaLabel)}</a>
@@ -950,6 +1038,69 @@ function renderPricingFaq(): string {
 
 marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
   const planCardsHtml = PRICING_PLANS.map(renderPricingPlanCard).join("");
+
+  // Currency buttons rendered server-side so they appear before JS hydrates.
+  const currencyButtonsHtml = PRICING_CURRENCY.map(
+    (c, i) =>
+      `<button type="button" data-currency="${c.code}" class="${i === 0 ? "is-active" : ""}" aria-pressed="${i === 0 ? "true" : "false"}">${c.code}</button>`
+  ).join("");
+
+  // Sizer options: friendly labels mapped to a numeric room count the JS reads
+  // off the option's data-rooms attribute.
+  const sizerOptionsHtml = [
+    { rooms: 0, label: "Pick a size" },
+    { rooms: 12, label: "Up to 20 rooms" },
+    { rooms: 30, label: "21 – 50 rooms" },
+    { rooms: 80, label: "51 – 120 rooms" },
+    { rooms: 200, label: "120+ rooms" },
+    { rooms: 999, label: "Multi-property / chain" }
+  ]
+    .map(
+      (o, i) =>
+        `<option value="${o.rooms}"${i === 0 ? ' disabled selected' : ""}>${escapeHtml(o.label)}</option>`
+    )
+    .join("");
+
+  // JSON-LD: emit one Product per plan with an Offer. Helps Google rich
+  // results and AI crawlers index pricing accurately. Static, no PII.
+  const jsonLdItems = PRICING_PLANS.filter((p) => p.monthly != null).map((plan, idx) => ({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: `ChatAstay ${plan.name}`,
+    description: `${plan.tagline}. ${plan.bestFor}.`,
+    brand: { "@type": "Brand", name: "ChatAstay" },
+    category: "SoftwareApplication",
+    offers: {
+      "@type": "Offer",
+      url: "https://chatastay.com/pricing",
+      priceCurrency: "OMR",
+      price: String(plan.monthly),
+      priceSpecification: {
+        "@type": "UnitPriceSpecification",
+        price: String(plan.monthly),
+        priceCurrency: "OMR",
+        unitCode: "MON",
+        billingDuration: "P1M"
+      },
+      availability: "https://schema.org/InStock",
+      itemOffered: {
+        "@type": "Service",
+        name: `ChatAstay ${plan.name} subscription`,
+        serviceType: "Hospitality SaaS"
+      }
+    },
+    position: idx + 1
+  }));
+  const jsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    itemListElement: jsonLdItems.map((p, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      item: p
+    }))
+  }).replace(/</g, "\\u003c");
+
   const body = `
     <section class="pricing-hero">
       <span class="eyebrow">Pricing</span>
@@ -961,11 +1112,28 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         <span class="trust-pill">Cancel anytime</span>
         <span class="trust-pill">Setup in under a day</span>
       </div>
-      <div class="pricing-toggle" role="tablist" aria-label="Billing cadence">
-        <button type="button" class="is-active" aria-pressed="true">Monthly</button>
-        <button type="button" aria-pressed="false">Annual <span class="save-flag">Save 20%</span></button>
+      <div class="pricing-controls">
+        <div class="pricing-toggle" role="tablist" aria-label="Billing cadence">
+          <button type="button" role="tab" data-cadence="monthly" class="is-active" aria-pressed="true" aria-selected="true" tabindex="0">Monthly</button>
+          <button type="button" role="tab" data-cadence="annual" aria-pressed="false" aria-selected="false" tabindex="-1">Annual <span class="save-flag">Save 20%</span></button>
+        </div>
+        <div class="pricing-currency" role="tablist" aria-label="Display currency">
+          ${currencyButtonsHtml}
+        </div>
       </div>
+      <label class="pricing-sizer">
+        <span class="sizer-label">How many rooms do you have?</span>
+        <select aria-label="Number of rooms">${sizerOptionsHtml}</select>
+        <span class="sizer-hint" aria-live="polite"></span>
+      </label>
     </section>
+
+    <div class="pricing-trust-strip pricing-reveal" role="list">
+      <span role="listitem"><strong>Trusted by hotels</strong> in Oman, Saudi, UAE</span>
+      <span role="listitem">PCI-aware payments &middot; Stripe &amp; Thawani</span>
+      <span role="listitem">Daily encrypted backups</span>
+      <span role="listitem">GDPR-friendly data handling</span>
+    </div>
 
     <div class="pricing-grid">
       ${planCardsHtml}
@@ -996,38 +1164,184 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         <a class="btn btn-ghost" href="mailto:sales@chatastay.com?subject=ChatAstay%20Sales%20enquiry">Contact Sales</a>
       </div>
     </section>
+
+    <a class="pricing-float-cta" href="https://wa.me/?text=${encodeURIComponent(
+      "Hi ChatAstay, I have a pricing question."
+    )}" target="_blank" rel="noopener" aria-label="Talk to ChatAstay on WhatsApp">
+      <span class="float-cta-bubble" aria-hidden="true"></span>
+      <span class="float-cta-text">Pricing question? <strong>Chat with us</strong></span>
+    </a>
   `;
 
-  // Inline script powers the Monthly / Annual toggle. No backend dependency:
-  // we recompute prices client-side from the data-* attributes the cards
-  // already carry. If JS is disabled the static monthly prices are correct.
+  // FX rates are inlined into the script so we don't need a network call.
+  // Keep these in sync with PRICING_CURRENCY above.
+  const fxJson = JSON.stringify(
+    PRICING_CURRENCY.reduce<Record<string, { symbol: string; perOmr: number; round: number }>>((acc, c) => {
+      acc[c.code] = { symbol: c.symbol, perOmr: c.perOmr, round: c.round };
+      return acc;
+    }, {})
+  );
+
+  // One inline script handles: cadence toggle (with persistence + keyboard +
+  // animated swap), currency switching, the room-count sizer, and the
+  // existing scroll-reveal observer. All purely client-side.
   const inlineScript = `
     (function(){
-      var toggle = document.querySelector('.pricing-toggle');
-      if (!toggle) return;
-      var buttons = Array.prototype.slice.call(toggle.querySelectorAll('button'));
+      var FX = ${fxJson};
+      var STORE_KEY_CADENCE = 'chatastay.pricing.cadence';
+      var STORE_KEY_CURRENCY = 'chatastay.pricing.currency';
+      var ANNUAL_DISCOUNT = 0.8; // 20% off
+      var safeStorage = (function(){
+        try { var k='__cs_t'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return localStorage; }
+        catch(e){ return null; }
+      })();
+      function readPref(key, fallback){
+        if (!safeStorage) return fallback;
+        try { var v = safeStorage.getItem(key); return v == null ? fallback : v; } catch(e){ return fallback; }
+      }
+      function writePref(key, value){
+        if (!safeStorage) return;
+        try { safeStorage.setItem(key, value); } catch(e){ /* quota exceeded, ignore */ }
+      }
+      function roundTo(value, step){
+        if (step <= 1) return Math.round(value);
+        return Math.round(value / step) * step;
+      }
+      function formatPrice(omrMonthly, currency, cadence){
+        var fx = FX[currency] || FX.OMR;
+        var amount = omrMonthly * fx.perOmr;
+        if (cadence === 'annual') amount = amount * 12 * ANNUAL_DISCOUNT;
+        return roundTo(amount, fx.round) + ' ' + fx.symbol;
+      }
+      function cadenceSuffix(cadence){
+        return cadence === 'annual' ? '/ year (Save 20%)' : '/ month';
+      }
+
+      var state = {
+        cadence: readPref(STORE_KEY_CADENCE, 'monthly') === 'annual' ? 'annual' : 'monthly',
+        currency: (function(){ var c = readPref(STORE_KEY_CURRENCY, 'OMR'); return FX[c] ? c : 'OMR'; })()
+      };
+
       var prices = Array.prototype.slice.call(document.querySelectorAll('.plan-card .plan-price'));
-      var originalHtml = prices.map(function(el){ return el.innerHTML; });
-      buttons.forEach(function(btn, idx){
-        btn.addEventListener('click', function(){
-          buttons.forEach(function(b){ b.classList.remove('is-active'); b.setAttribute('aria-pressed','false'); });
-          btn.classList.add('is-active');
-          btn.setAttribute('aria-pressed','true');
-          if (idx === 1) {
-            // annual = monthly × 12 × 0.8 (20% off), rounded
-            prices.forEach(function(el){
-              if (el.classList.contains('custom')) return;
-              var match = el.textContent.match(/([0-9]+)\\s*OMR/);
-              if (!match) return;
-              var monthly = parseFloat(match[1]);
-              var annual = Math.round(monthly * 12 * 0.8);
-              el.innerHTML = '<span>' + annual + ' OMR</span><small>/ year (Save 20%)</small>';
-            });
+      var prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      function rerenderAllPrices(animate){
+        prices.forEach(function(el){
+          if (el.dataset.custom === '1') return;
+          var omr = parseFloat(el.dataset.monthlyOmr || '0');
+          if (!omr) return;
+          var legacyOmr = parseFloat(el.dataset.legacyOmr || '0');
+          var newPrice = formatPrice(omr, state.currency, state.cadence);
+          var newSuffix = cadenceSuffix(state.cadence);
+          var legacyHtml = '';
+          if (legacyOmr && legacyOmr > omr && state.cadence === 'monthly') {
+            legacyHtml = '<span class="legacy">' + formatPrice(legacyOmr, state.currency, 'monthly') + '</span>';
+          }
+          var html = legacyHtml +
+            '<span class="plan-price-value">' + newPrice + '</span>' +
+            '<small class="plan-price-cadence">' + newSuffix + '</small>';
+          if (animate && !prefersReduced) {
+            el.classList.remove('is-flipping');
+            void el.offsetWidth; // restart transition
+            el.classList.add('is-flipping');
+            setTimeout(function(){ el.innerHTML = html; }, 110);
+            setTimeout(function(){ el.classList.remove('is-flipping'); }, 320);
           } else {
-            prices.forEach(function(el, i){ el.innerHTML = originalHtml[i]; });
+            el.innerHTML = html;
           }
         });
-      });
+      }
+
+      function setCadence(cadence, animate){
+        state.cadence = cadence;
+        writePref(STORE_KEY_CADENCE, cadence);
+        var btns = document.querySelectorAll('.pricing-toggle button');
+        Array.prototype.forEach.call(btns, function(b){
+          var isActive = b.getAttribute('data-cadence') === cadence;
+          b.classList.toggle('is-active', isActive);
+          b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+          b.setAttribute('aria-selected', isActive ? 'true' : 'false');
+          b.setAttribute('tabindex', isActive ? '0' : '-1');
+        });
+        rerenderAllPrices(animate);
+      }
+
+      function setCurrency(code, animate){
+        if (!FX[code]) return;
+        state.currency = code;
+        writePref(STORE_KEY_CURRENCY, code);
+        var btns = document.querySelectorAll('.pricing-currency button');
+        Array.prototype.forEach.call(btns, function(b){
+          var isActive = b.getAttribute('data-currency') === code;
+          b.classList.toggle('is-active', isActive);
+          b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+        rerenderAllPrices(animate);
+      }
+
+      // Wire up cadence buttons (click + keyboard arrow nav).
+      var toggle = document.querySelector('.pricing-toggle');
+      if (toggle) {
+        var cadenceBtns = Array.prototype.slice.call(toggle.querySelectorAll('button'));
+        cadenceBtns.forEach(function(btn){
+          btn.addEventListener('click', function(){ setCadence(btn.getAttribute('data-cadence'), true); btn.focus(); });
+          btn.addEventListener('keydown', function(e){
+            if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+              e.preventDefault();
+              var nextIdx = (cadenceBtns.indexOf(btn) + (e.key === 'ArrowRight' ? 1 : -1) + cadenceBtns.length) % cadenceBtns.length;
+              cadenceBtns[nextIdx].focus();
+              setCadence(cadenceBtns[nextIdx].getAttribute('data-cadence'), true);
+            }
+          });
+        });
+      }
+
+      // Wire up currency buttons.
+      var currencyBar = document.querySelector('.pricing-currency');
+      if (currencyBar) {
+        var ccBtns = Array.prototype.slice.call(currencyBar.querySelectorAll('button'));
+        ccBtns.forEach(function(btn){
+          btn.addEventListener('click', function(){ setCurrency(btn.getAttribute('data-currency'), true); btn.focus(); });
+          btn.addEventListener('keydown', function(e){
+            if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+              e.preventDefault();
+              var nextIdx = (ccBtns.indexOf(btn) + (e.key === 'ArrowRight' ? 1 : -1) + ccBtns.length) % ccBtns.length;
+              ccBtns[nextIdx].focus();
+              setCurrency(ccBtns[nextIdx].getAttribute('data-currency'), true);
+            }
+          });
+        });
+      }
+
+      // Initial paint reflects persisted preferences (no animation on load).
+      setCadence(state.cadence, false);
+      setCurrency(state.currency, false);
+
+      // Room-count sizer: highlight the highest-tier plan whose sizeFloor
+      // <= rooms (so 5 rooms → Starter, 50 → Growth, 90 → Pro, 250 → Enterprise).
+      var sizer = document.querySelector('.pricing-sizer select');
+      var sizerHint = document.querySelector('.pricing-sizer .sizer-hint');
+      if (sizer) {
+        sizer.addEventListener('change', function(){
+          var rooms = parseInt(sizer.value, 10) || 0;
+          if (rooms <= 0) return;
+          var cards = Array.prototype.slice.call(document.querySelectorAll('.plan-card'));
+          var match = null;
+          cards.forEach(function(card){
+            var floor = parseInt(card.getAttribute('data-size-floor') || '0', 10);
+            if (rooms >= floor) match = card;
+            card.classList.remove('is-suggested');
+          });
+          if (match) {
+            match.classList.add('is-suggested');
+            var name = (match.querySelector('.plan-name') || {}).textContent || '';
+            if (sizerHint) sizerHint.textContent = 'Recommended: ' + name + ' plan';
+            if (!prefersReduced && match.scrollIntoView) {
+              match.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }
+        });
+      }
     })();
 
     (function(){
@@ -1057,7 +1371,10 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         description:
           "ChatAstay subscription plans for hotels — Starter, Growth, Pro, and Enterprise. Built for WhatsApp-first hotel operations."
       },
-      body: body + `<script>${inlineScript}</script>`
+      body:
+        body +
+        `<script type="application/ld+json">${jsonLd}</script>` +
+        `<script>${inlineScript}</script>`
     })
   );
 });
