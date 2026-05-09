@@ -103,6 +103,7 @@ import {
 import {
   assertFeature,
   assertWithinLimit,
+  getPlanFeatures,
   loadHotelPlanContext,
   upgradeMessage,
   type HotelPlanContext,
@@ -360,6 +361,51 @@ function slugifyName(input: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
+}
+
+async function uniqueHotelSlug(baseName: string): Promise<string> {
+  const base = slugifyName(baseName) || `hotel-${Date.now().toString(36)}`;
+  for (let i = 0; i < 100; i++) {
+    const slug = i === 0 ? base : `${base}-${i + 1}`;
+    const existing = await prisma.hotel.findUnique({ where: { slug }, select: { id: true } });
+    if (!existing) return slug;
+  }
+  return `${base}-${Date.now().toString(36)}`.slice(0, 64);
+}
+
+async function ensurePlanForOnboarding(planCodeRaw: string) {
+  const code = ["starter", "growth", "pro"].includes(planCodeRaw) ? planCodeRaw : "growth";
+  const features = getPlanFeatures(code);
+  return prisma.plan.upsert({
+    where: { code },
+    update: {
+      name: features.label,
+      maxProperties: features.maxProperties,
+      maxRoomTypes: features.maxRoomTypes,
+      maxRoomUnits: features.maxRoomUnits,
+      maxStaffUsers: features.maxStaffUsers,
+      maxMonthlyConversations: features.maxMonthlyConversations,
+      supportsChannelManager: features.channelManager,
+      supportsCustomBranding: features.customBranding,
+      supportsAiAutomation: features.aiConcierge,
+      supportsMarketplace: features.marketplaceVisibility
+    },
+    create: {
+      code,
+      name: features.label,
+      description: `${features.label} subscription plan`,
+      monthlyPrice: code === "starter" ? 19 : code === "growth" ? 49 : 99,
+      maxProperties: features.maxProperties,
+      maxRoomTypes: features.maxRoomTypes,
+      maxRoomUnits: features.maxRoomUnits,
+      maxStaffUsers: features.maxStaffUsers,
+      maxMonthlyConversations: features.maxMonthlyConversations,
+      supportsChannelManager: features.channelManager,
+      supportsCustomBranding: features.customBranding,
+      supportsAiAutomation: features.aiConcierge,
+      supportsMarketplace: features.marketplaceVisibility
+    }
+  });
 }
 
 async function uniquePropertyCode(hotelId: string, baseName: string): Promise<string> {
@@ -4592,6 +4638,9 @@ adminRouter.get("/onboard", async (req, res) => {
   const err = typeof req.query.error === "string" ? String(req.query.error) : "";
   const leadId = typeof req.query.leadId === "string" ? String(req.query.leadId) : "";
   const errHtml = err ? `<p class="badge alert">${escapeHtml(err)}</p>` : "";
+  const requestedPlan = String(req.query.plan ?? "growth").trim().toLowerCase();
+  const planCode = ["starter", "growth", "pro"].includes(requestedPlan) ? requestedPlan : "growth";
+  const planFeatures = getPlanFeatures(planCode);
   const lead = leadId
     ? await prisma.lead.findFirst({
         where: { id: leadId },
@@ -4602,46 +4651,165 @@ adminRouter.get("/onboard", async (req, res) => {
   const cityVal = escapeHtml(String(req.query.city ?? lead?.location ?? ""));
   const emailVal = escapeHtml(String(req.query.email ?? lead?.contactEmail ?? ""));
   const ownerNameVal = escapeHtml(String(req.query.ownerName ?? lead?.contactName ?? ""));
-  const onboardTitle = session ? "Onboard new property" : "Partner onboarding";
-  const onboardLead = session
-    ? "Creates a new property under this platform account, default room type, units, and a property owner login."
-    : "Set up your property in minutes. This creates your property, default room setup, and owner account.";
+  const planCards = (["starter", "growth", "pro"] as const)
+    .map((code) => {
+      const features = getPlanFeatures(code);
+      const active = code === planCode;
+      return `<a class="onboard-plan ${active ? "active" : ""}" href="/admin/onboard?plan=${encodeURIComponent(code)}${leadId ? `&leadId=${encodeURIComponent(leadId)}` : ""}">
+        <strong>${escapeHtml(features.label)}</strong>
+        <span>${features.maxRoomUnits} rooms · ${features.maxStaffUsers} staff · ${features.restaurantModule ? "Restaurant included" : "Basic PMS"}</span>
+      </a>`;
+    })
+    .join("");
+  const moduleList = [
+    ["Basic PMS", true],
+    ["WhatsApp booking", true],
+    ["Restaurant / café", planFeatures.restaurantModule],
+    ["Housekeeping", planFeatures.housekeepingModule],
+    ["Advanced reports", planFeatures.advancedReports],
+    ["AI concierge", planFeatures.aiConcierge],
+    ["Marketplace visibility", planFeatures.marketplaceVisibility]
+  ]
+    .map(([label, enabled]) => `<li class="${enabled ? "ok" : "locked"}">${enabled ? "Included" : "Locked"} — ${escapeHtml(String(label))}</li>`)
+    .join("");
   const content = `
-<h2>${escapeHtml(onboardTitle)}</h2>
-<p class="muted">${onboardLead}</p>
+<style>
+  .onboard-shell{display:grid;gap:18px}
+  .onboard-hero{position:relative;overflow:hidden;border-radius:24px;padding:28px;background:linear-gradient(135deg,#064e46,#128c7e 60%,#25d366 135%);color:#fff;box-shadow:0 18px 50px rgba(15,44,38,.16)}
+  .onboard-hero h1{margin:0 0 8px;font-size:clamp(28px,4vw,42px);letter-spacing:-.04em}
+  .onboard-hero p{margin:0;max-width:760px;opacity:.94}
+  .onboard-progress{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:18px}
+  .onboard-progress span{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.22);padding:9px 10px;border-radius:999px;font-size:12px;font-weight:800;text-align:center}
+  .onboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;align-items:start}
+  .onboard-card{background:#fff;border:1px solid #dce8e3;border-radius:20px;padding:18px;box-shadow:0 12px 34px rgba(15,44,38,.08)}
+  .onboard-card h3{margin:0 0 8px}
+  .onboard-card label{display:grid;gap:6px;font-weight:800;color:#0b1f1c}
+  .onboard-card input,.onboard-card textarea,.onboard-card select{width:100%;padding:11px 12px;border:1px solid #d8dee6;border-radius:12px;font:inherit}
+  .onboard-card textarea{resize:vertical}
+  .onboard-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .onboard-plans{display:grid;gap:10px}
+  .onboard-plan{display:grid;gap:3px;text-decoration:none;color:#0b1f1c;border:1px solid #dce8e3;border-radius:16px;padding:12px;background:#f8fafc}
+  .onboard-plan.active{border-color:#25d366;background:#ecfff5;box-shadow:0 0 0 3px rgba(37,211,102,.16)}
+  .onboard-plan span{color:#64736f;font-size:12px}
+  .onboard-modules{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+  .onboard-modules li{padding:8px 10px;border-radius:12px;font-size:13px;font-weight:800}
+  .onboard-modules .ok{background:#dcfce7;color:#166534}
+  .onboard-modules .locked{background:#fff7ed;color:#9a3412}
+  .onboard-submit{border:0;border-radius:14px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:900;padding:13px 18px;cursor:pointer}
+  @media(max-width:880px){.onboard-grid{grid-template-columns:1fr}}
+</style>
+<div class="onboard-shell">
+<section class="onboard-hero">
+  <p class="badge ok" style="background:rgba(255,255,255,.18);color:#fff;border-color:rgba(255,255,255,.22)">14-day free trial · ${escapeHtml(planFeatures.label)} plan</p>
+  <h1>Set up your hotel on ChatAstay</h1>
+  <p>This is the real partner setup: create your login, property profile, rooms, policies, and WhatsApp knowledge bank. When you sign in, the PMS will already match what your subscription includes.</p>
+  <div class="onboard-progress"><span>1. Property</span><span>2. Branding</span><span>3. Rooms</span><span>4. Policies</span><span>5. Knowledge bank</span><span>6. Login</span></div>
+</section>
 ${errHtml}
-<form method="post" action="/admin/onboard" style="max-width:760px; display:grid; gap:12px">
+<div class="onboard-grid">
+<form method="post" action="/admin/onboard" style="display:grid; gap:16px">
   <input type="hidden" name="leadId" value="${escapeHtml(lead?.id ?? leadId)}" />
-  <label>Property name
-    <input name="propertyName" required placeholder="Example Beach Resort" value="${propertyNameVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <label>Location (city)
-    <input name="city" required placeholder="Muscat" value="${cityVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <label>Contact email
-    <input type="email" name="email" required placeholder="owner@property.com" value="${emailVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <label>Owner full name
-    <input name="ownerName" required placeholder="Property Owner" value="${ownerNameVal}" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <label>Password
-    <input type="password" name="password" required minlength="8" placeholder="At least 8 characters" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <label>Rooms / units
-    <input type="number" name="units" min="1" max="500" value="12" required style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <label>Default language
-    <select name="defaultLanguage" style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px">
-      <option value="en">English</option>
-      <option value="ar">Arabic</option>
-    </select>
-  </label>
-  <label>WhatsApp number (optional)
-    <input name="whatsappPhone" placeholder="+968..." style="width:100%; margin-top:6px; padding:10px; border:1px solid #d8dee6; border-radius:10px" />
-  </label>
-  <button type="submit" style="padding:10px 16px; border:0; border-radius:10px; background:#25d366; color:#083d2d; font-weight:700; width:fit-content">Create property</button>
+  <input type="hidden" name="planCode" value="${escapeHtml(planCode)}" />
+  <section class="onboard-card">
+    <h3>1. Subscription & property</h3>
+    <div class="onboard-two">
+      <label>Hotel / property name
+        <input name="propertyName" required placeholder="Example Beach Resort" value="${propertyNameVal}" />
+      </label>
+      <label>City / destination
+        <input name="city" required placeholder="Muscat" value="${cityVal}" />
+      </label>
+      <label>Address
+        <input name="addressLine1" placeholder="Street, area, country" />
+      </label>
+      <label>Contact WhatsApp
+        <input name="whatsappPhone" placeholder="+968..." />
+      </label>
+    </div>
+  </section>
+  <section class="onboard-card">
+    <h3>2. Branding & public website</h3>
+    <div class="onboard-two">
+      <label>Website / Instagram
+        <input name="websiteUrl" placeholder="https:// or @hotel" />
+      </label>
+      <label>Cover image URL
+        <input name="coverImageUrl" placeholder="https://..." />
+      </label>
+    </div>
+    <label>Property description
+      <textarea name="publicDescription" rows="4" placeholder="Describe the hotel, location, rooms, and guest experience."></textarea>
+    </label>
+    <label>Amenities (comma-separated)
+      <input name="amenities" placeholder="WiFi, Pool, Breakfast, Parking, Beach access" />
+    </label>
+  </section>
+  <section class="onboard-card">
+    <h3>3. Rooms & rates</h3>
+    <div class="onboard-two">
+      <label>Main room type name
+        <input name="roomTypeName" value="Standard Room" />
+      </label>
+      <label>Rooms / units
+        <input type="number" name="units" min="1" max="${planFeatures.maxRoomUnits}" value="${Math.min(12, planFeatures.maxRoomUnits)}" required />
+      </label>
+      <label>Base nightly rate
+        <input type="number" name="baseNightlyRate" min="0" step="0.01" value="35" />
+      </label>
+      <label>Currency
+        <input name="currency" value="OMR" maxlength="8" />
+      </label>
+    </div>
+  </section>
+  <section class="onboard-card">
+    <h3>4. Policies</h3>
+    <label>Cancellation / no-show policy
+      <textarea name="cancellationPolicy" rows="3" placeholder="Example: Free cancellation until 48 hours before arrival..."></textarea>
+    </label>
+    <label>Check-in / checkout policy
+      <textarea name="checkInPolicy" rows="3" placeholder="Example: Check-in from 2pm, checkout by 12pm..."></textarea>
+    </label>
+    <label>Payment / deposit policy
+      <textarea name="paymentPolicy" rows="3" placeholder="Example: Deposit required to confirm high-season bookings..."></textarea>
+    </label>
+  </section>
+  <section class="onboard-card">
+    <h3>5. WhatsApp assistant knowledge bank</h3>
+    <p class="muted">This is what the guest assistant will use for FAQs, directions, policies, services, restaurant info, and preferred responses.</p>
+    <label>Knowledge bank
+      <textarea name="knowledgeBank" rows="8" placeholder="Add FAQs and answers. Example:&#10;Do you have airport pickup? | Yes, airport pickup is available with advance notice.&#10;Do you allow pets? | Pets are not allowed except service animals."></textarea>
+    </label>
+  </section>
+  <section class="onboard-card">
+    <h3>6. Owner login</h3>
+    <div class="onboard-two">
+      <label>Owner full name
+        <input name="ownerName" required placeholder="Property Owner" value="${ownerNameVal}" />
+      </label>
+      <label>Login email
+        <input type="email" name="email" required placeholder="owner@property.com" value="${emailVal}" />
+      </label>
+      <label>Password
+        <input type="password" name="password" required minlength="8" placeholder="At least 8 characters" />
+      </label>
+      <label>Default language
+        <select name="defaultLanguage"><option value="en">English</option><option value="ar">Arabic</option></select>
+      </label>
+    </div>
+  </section>
+  <button class="onboard-submit" type="submit">Create my hotel workspace</button>
 </form>
-<p class="muted" style="margin-top:12px">${session ? '<a class="inline-link" href="/admin/profile">Back to profile</a>' : '<a href="/admin/login">Back to login</a>'}</p>`;
+<aside class="onboard-card">
+  <h3 style="margin-top:0">${escapeHtml(planFeatures.label)} plan preview</h3>
+  <div class="onboard-plans">${planCards}</div>
+  <h4>What your workspace will include</h4>
+  <ul class="onboard-modules">${moduleList}</ul>
+  <p class="muted">Limits: ${planFeatures.maxProperties} propert${planFeatures.maxProperties === 1 ? "y" : "ies"}, ${planFeatures.maxRoomUnits} rooms, ${planFeatures.maxStaffUsers} staff users, ${planFeatures.maxMonthlyConversations.toLocaleString()} monthly conversations.</p>
+  <p class="muted">After setup, we send you to the hotel login with your new hotel selected.</p>
+</aside>
+</div>
+<p class="muted" style="margin-top:12px">${session ? '<a class="inline-link" href="/admin/profile">Back to profile</a>' : '<a href="/admin/login">Back to login</a>'}</p>
+</div>`;
   res.type("html").send(renderLayout(content, Boolean(session)));
 });
 
@@ -4656,6 +4824,26 @@ adminRouter.post("/onboard", async (req, res) => {
   const email = String(req.body.email ?? "").trim().toLowerCase();
   const ownerName = String(req.body.ownerName ?? "").trim();
   const password = String(req.body.password ?? "");
+  const requestedPlanCode = String(req.body.planCode ?? "growth").trim().toLowerCase();
+  const planCode = ["starter", "growth", "pro"].includes(requestedPlanCode) ? requestedPlanCode : "growth";
+  const addressLine1 = String(req.body.addressLine1 ?? "").trim() || null;
+  const publicDescription = String(req.body.publicDescription ?? "").trim() || `${propertyName} in ${city}.`;
+  const coverImageUrl = String(req.body.coverImageUrl ?? "").trim() || null;
+  const websiteUrl = String(req.body.websiteUrl ?? "").trim();
+  const amenitiesJson = JSON.stringify(
+    String(req.body.amenities ?? "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+  );
+  const roomTypeName = String(req.body.roomTypeName ?? "Standard Room").trim() || "Standard Room";
+  const baseNightlyRateRaw = Number(req.body.baseNightlyRate);
+  const baseNightlyRate = Number.isFinite(baseNightlyRateRaw) ? Math.max(0, baseNightlyRateRaw) : 35;
+  const currency = String(req.body.currency ?? "OMR").trim().toUpperCase().slice(0, 8) || "OMR";
+  const cancellationPolicy = String(req.body.cancellationPolicy ?? "").trim();
+  const checkInPolicy = String(req.body.checkInPolicy ?? "").trim();
+  const paymentPolicy = String(req.body.paymentPolicy ?? "").trim();
+  const knowledgeBank = String(req.body.knowledgeBank ?? "").trim();
   const unitsRaw = parseInt(String(req.body.units ?? "12"), 10);
   const units = Number.isFinite(unitsRaw) ? Math.max(1, Math.min(500, unitsRaw)) : 12;
   const defaultLanguage = String(req.body.defaultLanguage ?? "en") === "ar" ? "ar" : "en";
@@ -4663,7 +4851,183 @@ adminRouter.post("/onboard", async (req, res) => {
   const leadId = String(req.body.leadId ?? "").trim();
 
   if (!propertyName || !city || !email || !ownerName || password.length < 8) {
-    res.redirect("/admin/onboard?error=Please+complete+all+required+fields");
+    res.redirect(`/admin/onboard?plan=${encodeURIComponent(planCode)}&error=Please+complete+all+required+fields`);
+    return;
+  }
+
+  if (!session) {
+    const plan = await ensurePlanForOnboarding(planCode);
+    const features = getPlanFeatures(planCode);
+    try {
+      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxProperties", 1, "Property");
+      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxRoomTypes", 1, "Room type");
+      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxRoomUnits", units, "Room unit");
+      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxStaffUsers", 1, "Staff user");
+    } catch (limitErr) {
+      res.redirect(`/admin/onboard?plan=${encodeURIComponent(planCode)}&error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Plan limit reached."))}`);
+      return;
+    }
+
+    const hotelSlug = await uniqueHotelSlug(propertyName);
+    const propertyCode = (slugifyName(propertyName).replace(/-/g, "_") || "property").toUpperCase().slice(0, 10);
+    const ownerPasswordHash = await hashSecret(password);
+    const now = new Date();
+    const created = await prisma.$transaction(async (tx) => {
+      const newHotel = await tx.hotel.create({
+        data: {
+          slug: hotelSlug,
+          legalName: propertyName,
+          displayName: propertyName,
+          city,
+          country: "OM",
+          timezone: "Asia/Muscat",
+          currency,
+          whatsappPhone: whatsappPhone || null,
+          isActive: true,
+          subscriptionPlanCode: plan.code,
+          subscriptionStatusCached: "TRIALING",
+          trialEndsAt: addDays(now, 14),
+          description: publicDescription,
+          coverImageUrl,
+          amenitiesJson
+        }
+      });
+      await tx.subscription.create({
+        data: {
+          hotelId: newHotel.id,
+          planId: plan.id,
+          status: "TRIALING",
+          startedAt: now,
+          currentPeriodStart: now,
+          currentPeriodEnd: addDays(now, 14)
+        }
+      });
+      const property = await tx.property.create({
+        data: {
+          hotelId: newHotel.id,
+          name: propertyName,
+          city,
+          addressLine1,
+          checkInTime: "14:00",
+          checkOutTime: "12:00",
+          description: publicDescription,
+          coverImageUrl,
+          amenitiesJson
+        }
+      });
+      const roomType = await tx.roomType.create({
+        data: {
+          hotelId: newHotel.id,
+          propertyId: property.id,
+          name: roomTypeName,
+          code: `${propertyCode}_STD`,
+          capacity: 2,
+          baseNightlyRate,
+          totalInventory: units,
+          isActive: true
+        }
+      });
+      await tx.roomUnit.createMany({
+        data: Array.from({ length: units }).map((_, idx) => ({
+          hotelId: newHotel.id,
+          roomTypeId: roomType.id,
+          name: `${propertyCode}-${String(idx + 1).padStart(3, "0")}`,
+          sortOrder: idx
+        }))
+      });
+      const owner = await tx.hotelUser.create({
+        data: {
+          hotelId: newHotel.id,
+          fullName: ownerName,
+          email,
+          username: slugifyName(ownerName).slice(0, 30) || "owner",
+          passwordHash: ownerPasswordHash,
+          role: UserRole.OWNER,
+          isActive: true
+        }
+      });
+      const policyRows = [
+        cancellationPolicy ? { type: "cancellation", title: "Cancellation / no-show policy", body: cancellationPolicy } : null,
+        checkInPolicy ? { type: "check_in", title: "Check-in / checkout policy", body: checkInPolicy } : null,
+        paymentPolicy ? { type: "payment", title: "Payment / deposit policy", body: paymentPolicy } : null
+      ].filter((row): row is { type: string; title: string; body: string } => Boolean(row));
+      if (policyRows.length) {
+        await tx.propertyPolicy.createMany({
+          data: policyRows.map((row) => ({
+            hotelId: newHotel.id,
+            propertyId: property.id,
+            type: row.type,
+            title: row.title,
+            body: row.body,
+            locale: defaultLanguage
+          }))
+        });
+      }
+      const knowledgeRows = knowledgeBank
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(0, 40)
+        .map((line) => {
+          const [q, ...rest] = line.split("|");
+          const answer = (rest.join("|").trim() || line).slice(0, 2400);
+          return {
+            hotelId: newHotel.id,
+            propertyId: property.id,
+            category: "general",
+            question: rest.length ? q.trim().slice(0, 500) : null,
+            answer,
+            locale: defaultLanguage,
+            source: "ONBOARDING"
+          };
+        });
+      if (knowledgeRows.length) {
+        await tx.propertyKnowledgeEntry.createMany({ data: knowledgeRows });
+      }
+      if (websiteUrl) {
+        await tx.propertyKnowledgeEntry.create({
+          data: {
+            hotelId: newHotel.id,
+            propertyId: property.id,
+            category: "contacts",
+            question: "What is the hotel website or social page?",
+            answer: websiteUrl,
+            locale: defaultLanguage,
+            source: "ONBOARDING"
+          }
+        });
+      }
+      await tx.propertyOnboardingProgress.create({
+        data: {
+          hotelId: newHotel.id,
+          currentStep: "COMPLETE",
+          completedSteps: JSON.stringify(["BASIC_INFO", "BRANDING", "ROOMS", "POLICIES", "KNOWLEDGE", "STAFF"]),
+          completedAt: now
+        }
+      });
+      await tx.auditLog.create({
+        data: {
+          hotelId: newHotel.id,
+          actorUserId: owner.id,
+          actorEmail: email,
+          action: "PARTNER_TENANT_ONBOARDING_COMPLETED",
+          entityType: "Hotel",
+          entityId: newHotel.id,
+          metadataJson: JSON.stringify({ planCode: plan.code, propertyName, city, units })
+        }
+      });
+      return { hotelId: newHotel.id, hotelSlug: newHotel.slug, propertyId: property.id };
+    });
+
+    const cfg = loadPartnerSetupConfig(created.hotelId);
+    cfg.hotelDescription = publicDescription;
+    cfg.amenitiesSummary = String(req.body.amenities ?? "").trim();
+    cfg.aiKnowledgeBase = knowledgeBank;
+    cfg.aiKnowledgeBaseEn = defaultLanguage === "en" ? knowledgeBank : cfg.aiKnowledgeBaseEn;
+    cfg.aiKnowledgeBaseAr = defaultLanguage === "ar" ? knowledgeBank : cfg.aiKnowledgeBaseAr;
+    cfg.aiEnabled = features.aiConcierge;
+    savePartnerSetupConfig(cfg, created.hotelId);
+    res.redirect(`/admin/login?onboard=1&hotel=${encodeURIComponent(created.hotelSlug)}`);
     return;
   }
 

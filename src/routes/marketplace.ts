@@ -834,7 +834,7 @@ marketplaceRouter.get("/", async (req: Request, res: Response) => {
         <p>WhatsApp-first PMS, marketplace exposure, 14-day free trial. Most teams are live the same day.</p>
       </div>
       <div class="partner-actions">
-        <a class="btn btn-whatsapp" href="/admin/onboard">Become a partner</a>
+        <a class="btn btn-whatsapp" href="/admin/onboard?plan=growth">Become a partner</a>
         <a class="btn btn-ghost" href="/pricing">View pricing</a>
       </div>
     </section>
@@ -857,7 +857,7 @@ marketplaceRouter.get("/", async (req: Request, res: Response) => {
         <div class="footer-col">
           <h4>For hotels</h4>
           <ul>
-            <li><a href="/admin/onboard">Become a partner</a></li>
+            <li><a href="/admin/onboard?plan=growth">Become a partner</a></li>
             <li><a href="/pricing">Pricing</a></li>
             <li><a href="/admin/login">Hotel extranet</a></li>
             <li><a href="mailto:sales@chatastay.com">Contact sales</a></li>
@@ -1209,7 +1209,7 @@ marketplaceRouter.get("/h/:slug/availability.json", async (req: Request, res: Re
 //   • "Start Free Trial" → /admin/onboard (real tenant signup)
 //   • "Request Demo"     → wa.me with a pre-filled message
 //   • "Contact Sales"    → mailto:
-// No Prisma schema changes; no fake billing logic.
+// Billing remains trial/signup only; no fake payment collection is performed here.
 type PricingPlan = {
   id: "starter" | "growth" | "pro" | "enterprise";
   name: string;
@@ -1246,7 +1246,7 @@ const PRICING_PLANS: PricingPlan[] = [
       "Email & business-hours support"
     ],
     ctaLabel: "Start Free Trial",
-    ctaHref: "/admin/onboard",
+    ctaHref: "/admin/onboard?plan=starter",
     ctaClass: "btn btn-primary"
   },
   {
@@ -1265,7 +1265,7 @@ const PRICING_PLANS: PricingPlan[] = [
       "Reports center & guest review collection"
     ],
     ctaLabel: "Start Free Trial",
-    ctaHref: "/admin/onboard",
+    ctaHref: "/admin/onboard?plan=growth",
     ctaClass: "btn btn-primary",
     recommended: true
   },
@@ -1286,7 +1286,7 @@ const PRICING_PLANS: PricingPlan[] = [
       "Priority WhatsApp support"
     ],
     ctaLabel: "Start Free Trial",
-    ctaHref: "/admin/onboard",
+    ctaHref: "/admin/onboard?plan=pro",
     ctaClass: "btn btn-primary"
   },
   {
@@ -1576,7 +1576,7 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         <p>Start your free 14-day trial — bring your team, connect your WhatsApp number, and we'll help you import your rooms and rates.</p>
       </div>
       <div class="cta-actions">
-        <a class="btn btn-whatsapp" href="/admin/onboard">Start Free Trial</a>
+        <a class="btn btn-whatsapp" href="/admin/onboard?plan=growth">Start Free Trial</a>
         <a class="btn btn-ghost" href="https://wa.me/?text=${encodeURIComponent(
           "Hi ChatAstay, I'd like to request a product demo."
         )}" target="_blank" rel="noopener">Request Demo</a>
