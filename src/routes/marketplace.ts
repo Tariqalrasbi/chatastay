@@ -217,6 +217,84 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .amenity{background:linear-gradient(135deg,#dcfce7 0%,#c7f5d6 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 2px 6px rgba(15,44,38,.04)}
 .badge{font-weight:700}
 ::selection{background:rgba(37,211,102,.3);color:#053b18}
+/* ===== Pricing page (subscription plans) — premium SaaS look in the existing brand palette ===== */
+.pricing-hero{padding:60px 36px;border-radius:32px;text-align:left;margin-bottom:36px;background:linear-gradient(135deg,#053b34 0%,#0c7a6e 50%,#128c7e 100%);box-shadow:0 36px 90px -16px rgba(7,68,58,.32),inset 0 1px 0 rgba(255,255,255,.12);position:relative;overflow:hidden;color:#fff}
+.pricing-hero::before{content:"";position:absolute;left:-90px;bottom:-90px;width:280px;height:280px;border-radius:999px;background:rgba(255,255,255,.08);pointer-events:none}
+.pricing-hero::after{content:"";position:absolute;right:-90px;top:-90px;width:240px;height:240px;border-radius:999px;background:rgba(37,211,102,.18);pointer-events:none}
+.pricing-hero .eyebrow{position:relative;display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);padding:6px 14px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;margin-bottom:14px;color:#dcfce7}
+.pricing-hero h1{position:relative;margin:0 0 12px;font-size:clamp(34px,5.4vw,58px);letter-spacing:-.04em;line-height:1.02;background:linear-gradient(135deg,#ffffff 0%,#d9fbe8 100%);-webkit-background-clip:text;background-clip:text;color:transparent;max-width:780px}
+.pricing-hero p{position:relative;margin:0;opacity:.94;font-size:18px;line-height:1.55;max-width:680px}
+.pricing-hero .trust-row{position:relative;margin-top:22px;display:flex;flex-wrap:wrap;gap:10px}
+.pricing-hero .trust-pill{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);padding:7px 12px;border-radius:999px;font-size:12.5px;font-weight:700;color:#ecfdf5}
+.pricing-toggle{display:inline-flex;align-items:center;gap:0;padding:5px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.24);border-radius:999px;margin-top:24px;position:relative}
+.pricing-toggle button{appearance:none;border:0;background:transparent;color:#ecfdf5;padding:8px 18px;font-size:13.5px;font-weight:800;cursor:pointer;border-radius:999px;letter-spacing:.01em;transition:background .2s ease,color .2s ease,box-shadow .2s ease}
+.pricing-toggle button.is-active{background:#ffffff;color:#053b18;box-shadow:0 8px 22px -6px rgba(0,0,0,.18)}
+.pricing-toggle .save-flag{margin-left:8px;background:#dcfce7;color:#166534;font-size:11px;font-weight:800;border-radius:999px;padding:3px 8px;letter-spacing:.04em;text-transform:uppercase}
+.pricing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-bottom:34px;align-items:stretch}
+.plan-card{position:relative;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);border-radius:24px;padding:26px 24px 24px;display:flex;flex-direction:column;gap:14px;box-shadow:0 18px 48px -16px rgba(15,44,38,.16),inset 0 1px 0 rgba(255,255,255,.85);animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both;transition:transform .22s cubic-bezier(.25,1,.5,1),box-shadow .22s cubic-bezier(.25,1,.5,1),border-color .22s cubic-bezier(.25,1,.5,1)}
+.plan-card:hover{transform:translateY(-6px);box-shadow:0 32px 80px -20px rgba(7,68,58,.22);border-color:#cbe5da}
+.plan-card:nth-child(2){animation-delay:.05s}
+.plan-card:nth-child(3){animation-delay:.1s}
+.plan-card:nth-child(4){animation-delay:.15s}
+.plan-card .plan-name{font-size:14px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--brand-2);margin:0}
+.plan-card .plan-tag{font-size:13px;color:var(--muted);margin:0 0 4px}
+.plan-card .plan-price{display:flex;align-items:baseline;gap:6px;font-size:38px;font-weight:900;color:var(--ink);letter-spacing:-.025em;line-height:1.05;margin:6px 0 4px}
+.plan-card .plan-price small{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:0}
+.plan-card .plan-price .legacy{text-decoration:line-through;font-size:18px;color:#94a3b8;font-weight:700;margin-right:4px}
+.plan-card .plan-price.custom{font-size:30px}
+.plan-card ul{list-style:none;padding:0;margin:8px 0 0;display:flex;flex-direction:column;gap:10px;flex:1}
+.plan-card ul li{position:relative;padding-left:26px;font-size:14px;color:var(--ink);line-height:1.5}
+.plan-card ul li::before{content:"";position:absolute;left:0;top:4px;width:18px;height:18px;border-radius:50%;background:linear-gradient(135deg,#25d366,#7df0ad);box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 2px 6px rgba(37,211,102,.22)}
+.plan-card ul li::after{content:"";position:absolute;left:5px;top:7px;width:8px;height:5px;border-left:2px solid #053b18;border-bottom:2px solid #053b18;transform:rotate(-45deg)}
+.plan-card .plan-cta{margin-top:6px;display:flex;flex-direction:column;gap:8px}
+.plan-card .plan-cta .btn{text-align:center;width:100%}
+.plan-card .plan-cta .secondary-cta{display:inline-flex;justify-content:center;font-size:13px;font-weight:700;color:var(--brand-2);text-decoration:none;padding:6px 0}
+.plan-card .plan-cta .secondary-cta:hover{text-decoration:underline}
+.plan-card.recommended{border-color:transparent;background:linear-gradient(180deg,#ffffff 0%,#f0fdf6 100%);box-shadow:0 32px 80px -20px rgba(37,211,102,.32),inset 0 1px 0 rgba(255,255,255,.95);outline:2px solid rgba(37,211,102,.45);outline-offset:0;animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both,plan-glow 3.4s ease-in-out infinite alternate;animation-delay:.05s,.4s}
+.plan-card.recommended:hover{transform:translateY(-8px);box-shadow:0 38px 90px -16px rgba(37,211,102,.42)}
+.plan-card.recommended .plan-name{color:var(--brand)}
+.plan-card.recommended::before{content:"Most popular";position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#25d366 0%,#7df0ad 100%);color:#053b18;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;padding:6px 14px;border-radius:999px;box-shadow:0 12px 26px -6px rgba(37,211,102,.5);white-space:nowrap}
+@keyframes plan-glow{from{box-shadow:0 32px 80px -20px rgba(37,211,102,.28),inset 0 1px 0 rgba(255,255,255,.95)}to{box-shadow:0 36px 90px -18px rgba(37,211,102,.5),inset 0 1px 0 rgba(255,255,255,.95)}}
+.plan-card.enterprise{background:linear-gradient(180deg,#0b1f1c 0%,#053b34 100%);color:#ecfdf5;border-color:transparent}
+.plan-card.enterprise .plan-name{color:#7df0ad}
+.plan-card.enterprise .plan-tag{color:rgba(220,252,231,.78)}
+.plan-card.enterprise .plan-price{color:#ffffff}
+.plan-card.enterprise .plan-price small{color:rgba(220,252,231,.72)}
+.plan-card.enterprise ul li{color:rgba(255,255,255,.9)}
+.plan-card.enterprise ul li::before{background:linear-gradient(135deg,#7df0ad,#25d366)}
+.plan-card.enterprise:hover{transform:translateY(-6px);box-shadow:0 36px 90px -18px rgba(7,68,58,.6)}
+.compare-card{padding:26px 22px;animation:wa-fade-up .42s ease-out both;animation-delay:.18s}
+.compare-card h2{margin:0 0 6px;font-size:22px;letter-spacing:-.025em}
+.compare-card .lead{margin:0 0 16px;color:var(--muted);font-size:15px}
+.compare-table-wrap{overflow-x:auto;border-radius:18px;border:1px solid var(--border);background:#fff;-webkit-overflow-scrolling:touch}
+.compare-table{width:100%;min-width:640px;border-collapse:collapse;font-size:14px}
+.compare-table thead th{position:sticky;top:0;background:linear-gradient(180deg,#f6fcf9,#eef7f2);text-align:left;padding:14px 14px;font-size:12.5px;font-weight:800;color:var(--brand);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+.compare-table tbody td{padding:13px 14px;border-bottom:1px solid #eef2ef;color:var(--ink);vertical-align:middle}
+.compare-table tbody tr:last-child td{border-bottom:0}
+.compare-table tbody td:first-child{font-weight:700;color:var(--ink)}
+.compare-table .yes{color:#059669;font-weight:800}
+.compare-table .no{color:#cbd5d1;font-weight:700}
+.compare-table .recommended-col{background:linear-gradient(180deg,rgba(37,211,102,.06),rgba(37,211,102,.02));border-left:1px solid rgba(37,211,102,.2);border-right:1px solid rgba(37,211,102,.2)}
+.faq-card{padding:26px 22px;animation:wa-fade-up .42s ease-out both;animation-delay:.22s}
+.faq-card h2{margin:0 0 8px;font-size:22px;letter-spacing:-.025em}
+.faq-card .lead{margin:0 0 14px;color:var(--muted);font-size:15px}
+.faq-list{display:flex;flex-direction:column;gap:10px}
+.faq-item{border:1px solid var(--border);border-radius:14px;background:#ffffff;transition:border-color .2s ease,box-shadow .2s ease}
+.faq-item[open]{border-color:#bbf7d0;box-shadow:0 12px 30px -16px rgba(37,211,102,.32)}
+.faq-item summary{cursor:pointer;list-style:none;padding:14px 16px;font-weight:800;color:var(--ink);font-size:15px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.faq-item summary::-webkit-details-marker{display:none}
+.faq-item summary::after{content:"+";font-size:22px;color:var(--brand-2);font-weight:700;transition:transform .2s ease}
+.faq-item[open] summary::after{content:"−"}
+.faq-item .answer{padding:0 16px 16px;color:var(--muted);line-height:1.6;font-size:14.5px}
+.cta-banner{margin-top:30px;padding:36px 28px;border-radius:28px;background:linear-gradient(135deg,#053b34 0%,#0c7a6e 50%,#25d366 140%);color:#ffffff;display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;box-shadow:0 32px 80px -22px rgba(7,68,58,.36)}
+.cta-banner h3{margin:0 0 4px;font-size:22px;letter-spacing:-.02em}
+.cta-banner p{margin:0;opacity:.92;font-size:14.5px;max-width:520px;line-height:1.55}
+.cta-banner .cta-actions{display:flex;gap:10px;flex-wrap:wrap}
+.cta-banner .btn{padding:12px 18px}
+.cta-banner .btn-ghost{background:rgba(255,255,255,.16);color:#ffffff;border:1px solid rgba(255,255,255,.32);box-shadow:none}
+.cta-banner .btn-ghost:hover{background:rgba(255,255,255,.24);filter:none}
+@media (max-width:560px){.pricing-hero{padding:36px 22px;border-radius:24px}.pricing-hero h1{font-size:32px}.pricing-hero p{font-size:15px}.pricing-grid{grid-template-columns:minmax(0,1fr);gap:14px}.plan-card{padding:22px 20px}.plan-card.recommended::before{font-size:10px;padding:5px 10px}.cta-banner{padding:26px 20px;border-radius:22px}.compare-card,.faq-card{padding:22px 18px}}
+@media (prefers-reduced-motion:reduce){.plan-card,.compare-card,.faq-card{animation:none}.plan-card.recommended{animation:none}}
 `;
 
 function renderShell(opts: {
@@ -241,6 +319,7 @@ function renderShell(opts: {
       <a class="brand" href="/">ChatAstay<span class="brand-tag">marketplace</span></a>
       <div class="links">
         <a class="muted" href="/search">Search</a>
+        <a class="muted" href="/pricing">Pricing</a>
         <a class="nav-pill hotel" href="/admin/login">Hotel / Partner Extranet</a>
         <a class="nav-pill traveller" href="/guest/account">Traveller Account</a>
         <a class="nav-pill" href="/guest/trips">My Trips</a>
@@ -636,6 +715,319 @@ marketplaceRouter.get("/h/:slug/availability.json", async (req: Request, res: Re
 // =============================================================================
 // GET /m/start — mint MarketplaceBookingIntent + redirect to wa.me
 // =============================================================================
+// =============================================================================
+// GET /pricing — public subscription / plans page
+// =============================================================================
+// Frontend-only. Plans are presentational text rendered by the same shell
+// (renderShell) every other public page uses, so it inherits the brand nav,
+// styles, and accessibility chrome. CTAs deep-link to existing flows:
+//   • "Start Free Trial" → /admin/onboard (real tenant signup)
+//   • "Request Demo"     → wa.me with a pre-filled message
+//   • "Contact Sales"    → mailto:
+// No Prisma schema changes; no fake billing logic.
+type PricingPlan = {
+  id: "starter" | "growth" | "pro" | "enterprise";
+  name: string;
+  tagline: string;
+  monthly: number | null; // OMR / month, or null for custom
+  legacyMonthly?: number | null;
+  features: string[];
+  ctaLabel: string;
+  ctaHref: string;
+  ctaClass: string;
+  secondaryCtaLabel?: string;
+  secondaryCtaHref?: string;
+  recommended?: boolean;
+  variant?: "enterprise";
+};
+
+const PRICING_PLANS: PricingPlan[] = [
+  {
+    id: "starter",
+    name: "Starter",
+    tagline: "Small guesthouses & boutique hotels",
+    monthly: 19,
+    legacyMonthly: 29,
+    features: [
+      "Basic PMS (room rack, reservations, check-in / out)",
+      "WhatsApp booking assistant for direct bookings",
+      "Room types, rates & availability management",
+      "Guest profiles with stay history",
+      "Email & business-hours support"
+    ],
+    ctaLabel: "Start Free Trial",
+    ctaHref: "/admin/onboard",
+    ctaClass: "btn btn-primary"
+  },
+  {
+    id: "growth",
+    name: "Growth",
+    tagline: "Growing hotels with restaurant & housekeeping",
+    monthly: 49,
+    legacyMonthly: 69,
+    features: [
+      "Everything in Starter",
+      "Restaurant / Café module (menu, KOT, folio posting)",
+      "Housekeeping tasks & SLA board",
+      "WhatsApp in-stay service requests",
+      "Reports center & guest review collection"
+    ],
+    ctaLabel: "Start Free Trial",
+    ctaHref: "/admin/onboard",
+    ctaClass: "btn btn-primary",
+    recommended: true
+  },
+  {
+    id: "pro",
+    name: "Pro",
+    tagline: "Multi-department resorts & serious operators",
+    monthly: 99,
+    legacyMonthly: 129,
+    features: [
+      "Everything in Growth",
+      "Advanced PMS ops (folio adjustments, voids, refunds)",
+      "Multi-property readiness",
+      "Staff roles, permissions & audit trail",
+      "Advanced analytics & AI automation",
+      "Priority WhatsApp support"
+    ],
+    ctaLabel: "Start Free Trial",
+    ctaHref: "/admin/onboard",
+    ctaClass: "btn btn-primary"
+  },
+  {
+    id: "enterprise",
+    name: "Enterprise",
+    tagline: "Hotel chains & large operators",
+    monthly: null,
+    features: [
+      "Everything in Pro",
+      "Multi-property management & central inventory",
+      "Custom integrations (PMS, channel manager, OTAs)",
+      "Dedicated onboarding & training",
+      "Advanced permissions & SSO-ready",
+      "SLA-backed support with named CSM"
+    ],
+    ctaLabel: "Contact Sales",
+    ctaHref: "mailto:sales@chatastay.com?subject=ChatAstay%20Enterprise%20enquiry",
+    ctaClass: "btn btn-whatsapp",
+    secondaryCtaLabel: "Request Demo",
+    secondaryCtaHref:
+      "https://wa.me/?text=" +
+      encodeURIComponent("Hi ChatAstay, I'd like a demo of the Enterprise plan."),
+    variant: "enterprise"
+  }
+];
+
+const PRICING_FAQ: { q: string; a: string }[] = [
+  {
+    q: "Can I switch plans later?",
+    a: "Yes. You can upgrade or downgrade at any time from your hotel admin. Upgrades are immediate and prorated; downgrades take effect at the end of the current billing period."
+  },
+  {
+    q: "Is there a free trial?",
+    a: "Every paid plan starts with a 14-day free trial — no credit card required. You can sign up, connect your WhatsApp number, and onboard your team before deciding."
+  },
+  {
+    q: "Do you support WhatsApp Business / Cloud API?",
+    a: "Yes. ChatAstay is WhatsApp-first. You connect your WhatsApp Cloud API number once and the assistant, in-stay menus, and review requests work for every booking — direct, OTA, or marketplace."
+  },
+  {
+    q: "Will my staff need training?",
+    a: "Most teams are live the same day. Front desk, housekeeping, and restaurant staff each get a focused workspace with only the tabs they need. Pro and Enterprise plans include guided onboarding sessions."
+  },
+  {
+    q: "What about payments and invoicing?",
+    a: "ChatAstay supports cash, card, Stripe, and Thawani out of the box. Invoices are issued automatically once a folio is fully settled, and outstanding balances surface on the front-desk dashboard."
+  },
+  {
+    q: "Can I migrate from another PMS?",
+    a: "Yes. Growth, Pro, and Enterprise plans include guided data import (rooms, rates, guests, future bookings). Our team handles the heavy lifting so you can switch without losing reservations."
+  }
+];
+
+function renderPricingPlanCard(plan: PricingPlan): string {
+  const classes = ["plan-card"];
+  if (plan.recommended) classes.push("recommended");
+  if (plan.variant === "enterprise") classes.push("enterprise");
+  const priceHtml =
+    plan.monthly == null
+      ? `<div class="plan-price custom"><span>Custom</span></div>`
+      : `<div class="plan-price">${
+          plan.legacyMonthly && plan.legacyMonthly > plan.monthly
+            ? `<span class="legacy">${plan.legacyMonthly} OMR</span>`
+            : ""
+        }<span>${plan.monthly} OMR</span><small>/ month</small></div>`;
+  const featuresHtml = plan.features.map((f) => `<li>${escapeHtml(f)}</li>`).join("");
+  const secondaryCta =
+    plan.secondaryCtaLabel && plan.secondaryCtaHref
+      ? `<a class="secondary-cta" href="${escapeHtml(plan.secondaryCtaHref)}"${plan.secondaryCtaHref.startsWith("http") ? ' target="_blank" rel="noopener"' : ""}>${escapeHtml(plan.secondaryCtaLabel)}</a>`
+      : "";
+  return `<article class="${classes.join(" ")}" data-plan="${escapeHtml(plan.id)}">
+    <p class="plan-name">${escapeHtml(plan.name)}</p>
+    <p class="plan-tag">${escapeHtml(plan.tagline)}</p>
+    ${priceHtml}
+    <ul>${featuresHtml}</ul>
+    <div class="plan-cta">
+      <a class="${escapeHtml(plan.ctaClass)}" href="${escapeHtml(plan.ctaHref)}"${plan.ctaHref.startsWith("http") || plan.ctaHref.startsWith("mailto:") ? ' rel="noopener"' : ""}>${escapeHtml(plan.ctaLabel)}</a>
+      ${secondaryCta}
+    </div>
+  </article>`;
+}
+
+function renderPricingComparisonTable(): string {
+  // Display-only comparison. Add new rows here without touching the route.
+  const rows: { label: string; values: [string | boolean, string | boolean, string | boolean, string | boolean] }[] = [
+    { label: "WhatsApp booking assistant", values: [true, true, true, true] },
+    { label: "Room rack & reservations", values: [true, true, true, true] },
+    { label: "Restaurant / Café module", values: [false, true, true, true] },
+    { label: "Housekeeping SLA board", values: [false, true, true, true] },
+    { label: "In-stay WhatsApp services", values: [false, true, true, true] },
+    { label: "Reports & guest reviews", values: ["Basic", true, true, true] },
+    { label: "Staff roles & permissions", values: ["1 admin", "Up to 5", "Unlimited", "Unlimited + SSO"] },
+    { label: "Multi-property", values: [false, false, "Ready", true] },
+    { label: "AI automation", values: [false, false, true, true] },
+    { label: "Priority support", values: [false, false, true, "SLA + named CSM"] },
+    { label: "Custom integrations", values: [false, false, false, true] }
+  ];
+  const cellHtml = (v: string | boolean) =>
+    v === true
+      ? '<span class="yes" aria-label="Included">✓</span>'
+      : v === false
+        ? '<span class="no" aria-label="Not included">—</span>'
+        : `<span>${escapeHtml(String(v))}</span>`;
+  const body = rows
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(r.label)}</td>
+        <td>${cellHtml(r.values[0])}</td>
+        <td class="recommended-col">${cellHtml(r.values[1])}</td>
+        <td>${cellHtml(r.values[2])}</td>
+        <td>${cellHtml(r.values[3])}</td>
+      </tr>`
+    )
+    .join("");
+  return `<div class="compare-table-wrap">
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Starter</th>
+          <th class="recommended-col">Growth</th>
+          <th>Pro</th>
+          <th>Enterprise</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderPricingFaq(): string {
+  const items = PRICING_FAQ.map(
+    (f, i) => `<details class="faq-item"${i === 0 ? " open" : ""}>
+      <summary>${escapeHtml(f.q)}</summary>
+      <div class="answer">${escapeHtml(f.a)}</div>
+    </details>`
+  ).join("");
+  return `<div class="faq-list">${items}</div>`;
+}
+
+marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
+  const planCardsHtml = PRICING_PLANS.map(renderPricingPlanCard).join("");
+  const body = `
+    <section class="pricing-hero">
+      <span class="eyebrow">Pricing</span>
+      <h1>Plans that grow with your hotel</h1>
+      <p>Built for WhatsApp-first hotel operations. From a single boutique to a multi-property chain — pick the plan that fits today and upgrade in a click.</p>
+      <div class="trust-row">
+        <span class="trust-pill">14-day free trial</span>
+        <span class="trust-pill">No credit card required</span>
+        <span class="trust-pill">Cancel anytime</span>
+        <span class="trust-pill">Setup in under a day</span>
+      </div>
+      <div class="pricing-toggle" role="tablist" aria-label="Billing cadence">
+        <button type="button" class="is-active" aria-pressed="true">Monthly</button>
+        <button type="button" aria-pressed="false">Annual <span class="save-flag">Save 20%</span></button>
+      </div>
+    </section>
+
+    <div class="pricing-grid">
+      ${planCardsHtml}
+    </div>
+
+    <section class="card compare-card">
+      <h2>Compare every feature</h2>
+      <p class="lead">All plans include the WhatsApp assistant, secure data hosting, and lifetime product updates. Scroll horizontally on small screens.</p>
+      ${renderPricingComparisonTable()}
+    </section>
+
+    <section class="card faq-card">
+      <h2>Frequently asked</h2>
+      <p class="lead">Quick answers about trials, plan changes, and onboarding.</p>
+      ${renderPricingFaq()}
+    </section>
+
+    <section class="cta-banner">
+      <div>
+        <h3>Ready to run your hotel on WhatsApp?</h3>
+        <p>Start your free 14-day trial — bring your team, connect your WhatsApp number, and we'll help you import your rooms and rates.</p>
+      </div>
+      <div class="cta-actions">
+        <a class="btn btn-whatsapp" href="/admin/onboard">Start Free Trial</a>
+        <a class="btn btn-ghost" href="https://wa.me/?text=${encodeURIComponent(
+          "Hi ChatAstay, I'd like to request a product demo."
+        )}" target="_blank" rel="noopener">Request Demo</a>
+        <a class="btn btn-ghost" href="mailto:sales@chatastay.com?subject=ChatAstay%20Sales%20enquiry">Contact Sales</a>
+      </div>
+    </section>
+  `;
+
+  // Inline script powers the Monthly / Annual toggle. No backend dependency:
+  // we recompute prices client-side from the data-* attributes the cards
+  // already carry. If JS is disabled the static monthly prices are correct.
+  const inlineScript = `
+    (function(){
+      var toggle = document.querySelector('.pricing-toggle');
+      if (!toggle) return;
+      var buttons = Array.prototype.slice.call(toggle.querySelectorAll('button'));
+      var prices = Array.prototype.slice.call(document.querySelectorAll('.plan-card .plan-price'));
+      var originalHtml = prices.map(function(el){ return el.innerHTML; });
+      buttons.forEach(function(btn, idx){
+        btn.addEventListener('click', function(){
+          buttons.forEach(function(b){ b.classList.remove('is-active'); b.setAttribute('aria-pressed','false'); });
+          btn.classList.add('is-active');
+          btn.setAttribute('aria-pressed','true');
+          if (idx === 1) {
+            // annual = monthly × 12 × 0.8 (20% off), rounded
+            prices.forEach(function(el){
+              if (el.classList.contains('custom')) return;
+              var match = el.textContent.match(/([0-9]+)\\s*OMR/);
+              if (!match) return;
+              var monthly = parseFloat(match[1]);
+              var annual = Math.round(monthly * 12 * 0.8);
+              el.innerHTML = '<span>' + annual + ' OMR</span><small>/ year (Save 20%)</small>';
+            });
+          } else {
+            prices.forEach(function(el, i){ el.innerHTML = originalHtml[i]; });
+          }
+        });
+      });
+    })();
+  `;
+
+  res.type("html").send(
+    renderShell({
+      title: "Pricing — ChatAstay",
+      meta: {
+        description:
+          "ChatAstay subscription plans for hotels — Starter, Growth, Pro, and Enterprise. Built for WhatsApp-first hotel operations."
+      },
+      body: body + `<script>${inlineScript}</script>`
+    })
+  );
+});
+
 // Creates a one-shot intent token and redirects the guest to WhatsApp with the
 // token embedded in the message text. The WhatsApp webhook (Phase E claim
 // handler) will pick up the token and seed a BookingDraft for the
