@@ -394,7 +394,11 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .stayli-panel{position:fixed;right:20px;bottom:20px;z-index:65;width:360px;max-width:calc(100vw - 24px);height:540px;max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border-radius:24px;box-shadow:0 32px 80px -12px rgba(7,68,58,.45),0 0 0 1px rgba(220,232,227,.6);overflow:hidden;opacity:0;transform:translateY(20px) scale(.96);pointer-events:none;transition:opacity .3s cubic-bezier(.22,1,.36,1),transform .3s cubic-bezier(.22,1,.36,1)}
 .stayli-panel.is-open{opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
 .stayli-header{display:flex;align-items:center;gap:12px;padding:14px 16px;background:linear-gradient(135deg,#053b34 0%,#0c7a6e 50%,#128c7e 100%);color:#fff;flex-shrink:0}
-.stayli-avatar{width:38px;height:38px;border-radius:999px;background:linear-gradient(135deg,#25d366,#7df0ad);display:inline-flex;align-items:center;justify-content:center;font-weight:900;color:#053b18;font-size:16px;letter-spacing:-.02em;box-shadow:0 6px 14px -4px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.5);flex-shrink:0;cursor:default}
+.stayli-avatar{width:38px;height:38px;border-radius:999px;background:linear-gradient(135deg,#25d366,#7df0ad);display:inline-flex;align-items:center;justify-content:center;box-shadow:0 6px 14px -4px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.5);flex-shrink:0;cursor:default;overflow:visible}
+.stayli-avatar .stayli-bot{width:30px;height:30px;display:block;overflow:visible}
+.stayli-avatar .stayli-eye{transform-box:fill-box;transform-origin:center;animation:stayli-blink 5.4s ease-in-out infinite}
+.stayli-avatar .stayli-eye-r{animation-delay:.04s}
+@keyframes stayli-blink{0%,92%,100%{transform:scaleY(1)}94%{transform:scaleY(.12)}96%{transform:scaleY(1)}}
 .stayli-id{flex:1;min-width:0;cursor:default}
 .stayli-id .stayli-name{margin:0;font-weight:900;font-size:15px;letter-spacing:-.01em;line-height:1.1}
 .stayli-id .stayli-status{margin:2px 0 0;font-size:11.5px;opacity:.88;font-weight:600;display:flex;align-items:center;gap:6px}
@@ -430,6 +434,7 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
   .stayli-msg{animation:none}
   .stayli-dot{animation:none}
   .stayli-msg.bot.typing span{animation:none;opacity:.5}
+  .stayli-avatar .stayli-eye{animation:none}
 }
 `;
 
@@ -1241,7 +1246,20 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
 
     <aside id="stayli-panel" class="stayli-panel" role="dialog" aria-modal="false" aria-label="Stayli pricing assistant" aria-hidden="true">
       <header class="stayli-header">
-        <div class="stayli-avatar" aria-hidden="true">S</div>
+        <div class="stayli-avatar" aria-hidden="true">
+          <svg class="stayli-bot" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" focusable="false">
+            <line x1="16" y1="3.6" x2="16" y2="7" stroke="#053b18" stroke-width="1.6" stroke-linecap="round"/>
+            <circle cx="16" cy="3" r="1.7" fill="#053b18"/>
+            <rect x="6" y="7" width="20" height="17" rx="5.5" ry="5.5" fill="#053b18"/>
+            <rect x="4.4" y="13" width="1.8" height="5" rx="0.9" fill="#053b18"/>
+            <rect x="25.8" y="13" width="1.8" height="5" rx="0.9" fill="#053b18"/>
+            <rect x="9.5" y="11.5" width="5.5" height="5.5" rx="1.4" fill="#0c7a6e"/>
+            <rect x="17" y="11.5" width="5.5" height="5.5" rx="1.4" fill="#0c7a6e"/>
+            <circle class="stayli-eye stayli-eye-l" cx="12.25" cy="14.25" r="1.4" fill="#7df0ad"/>
+            <circle class="stayli-eye stayli-eye-r" cx="19.75" cy="14.25" r="1.4" fill="#7df0ad"/>
+            <rect x="11.5" y="19.6" width="9" height="1.6" rx="0.8" fill="#7df0ad"/>
+          </svg>
+        </div>
         <div class="stayli-id">
           <p class="stayli-name">Stayli</p>
           <p class="stayli-status"><span class="stayli-dot" aria-hidden="true"></span> Online &middot; Pricing assistant</p>
