@@ -90,7 +90,8 @@ import {
   writeManualRoomStatusToNotes as mergeRoomBoardStatusNote,
   parseMaintenanceUrgentFromNotes,
   setMaintenanceUrgentInNotes,
-  stripRoomNoteTags
+  stripRoomNoteTags,
+  setRoomNoteText
 } from "../core/roomBoardNotes";
 import {
   loadPartnerSetupConfig,
@@ -118,6 +119,7 @@ import {
   postChargeToFolio,
   postPaymentToFolio,
   postRefundToFolio,
+  syncBookingPaymentStatusFromFolio,
   voidFolioTransaction
 } from "../core/folioService";
 import { computeRoomUnitFolioSummary, mapChargeCategoryToFolio, parsePostingTarget, round2 } from "../core/roomUnitFolio";
@@ -1728,9 +1730,7 @@ function renderLayout(
             { href: "/admin/outlet-orders", label: "Order history" },
             { href: "/admin/restaurant-ops", label: "Operations guide" }
           ]
-        : canNavFb
-          ? [{ href: "/admin/fb/menu#fb-inhouse", label: "Room service (folio)" }]
-          : [])
+        : [])
     ]
   };
   // Reports group: every link here is hotel-scoped (filtered by activeHotelSlug()) and sits behind REPORTS:VIEW.
@@ -1810,7 +1810,7 @@ function renderLayout(
       ? frontDeskTabs
       : false,
     perm && hasPermission(perm, "ROOMS", "VIEW") ? inventoryTabs : false,
-    reportTabs,
+    canNavReports ? reportTabs : false,
     adminTabs
   ]);
   const restaurantTabs = renderSections([todayTabs, foodBeverageTabs, accountTabsForChrome]);
@@ -1818,8 +1818,14 @@ function renderLayout(
     todayTabs,
     {
       group: "housekeeping",
+      links: [{ href: "/admin/housekeeping", label: "Cleaning queue" }]
+    },
+    // Room board + handover live in the front-desk group per `groupByPath` in
+    // layout.html; keeping them in the same `frontdesk` group here ensures the
+    // section-tab strip highlights correctly when an HK manager opens those pages.
+    {
+      group: "frontdesk",
       links: [
-        { href: "/admin/housekeeping", label: "Cleaning queue" },
         { href: "/admin/room-board", label: "Room board" },
         ...(perm && hasPermission(perm, "BOOKINGS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover" }] : [])
       ]
@@ -4291,7 +4297,14 @@ adminRouter.use((req, res, next) => {
       return;
     }
     const p = req.path;
-    if (p === "/hk" || p.startsWith("/hk/room-board") || p.startsWith("/hk/task/")) {
+    // Profile is the only "Settings" entry in the housekeeping sidebar, so we must let
+    // it through here — otherwise clicking it returns the user to /admin/hk silently.
+    if (
+      p === "/hk" ||
+      p.startsWith("/hk/room-board") ||
+      p.startsWith("/hk/task/") ||
+      p === "/profile"
+    ) {
       next();
       return;
     }
@@ -9958,10 +9971,9 @@ adminRouter.post("/front-desk/check-out/settle", requirePermission("ROOMS", "EDI
     sourceType: FolioTxnSourceType.MANUAL_FRONTDESK,
     allocateFifo: true
   });
-  const { isPaid } = await getBookingFolioSettlementSnapshot(booking);
-  if (isPaid) {
-    await prisma.booking.update({ where: { id: booking.id }, data: { paymentStatus: PaymentStatus.SUCCEEDED } });
-  }
+  // postPaymentToFolio above already calls syncBookingPaymentStatusFromFolio internally,
+  // so booking.paymentStatus is already authoritative. Avoid a second write here so the
+  // folio-derived state is the only source of truth.
   await logAudit({
     hotelId: hotel.id,
     action: "FRONT_DESK_CHECKOUT_PAYMENT_SETTLED",
@@ -15734,7 +15746,7 @@ ${flash}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/daily-digest/send", requireAuth, async (req, res) => {
+adminRouter.post("/daily-digest/send", requirePermission("REPORTS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() }
   });
@@ -17983,8 +17995,12 @@ const maintenanceStyles = `<style>
 .maint-pill.maint { background:#f3e8ff; color:#6b21a8; }
 .maint-pill.urgent { background:#fee2e2; color:#991b1b; box-shadow:0 0 0 0 rgba(239,68,68,.5); animation:maint-pulse 2s ease-in-out infinite; }
 @keyframes maint-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,.45); } 50% { box-shadow:0 0 0 6px rgba(239,68,68,0); } }
-.maint-note { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; color:#1f2937; font-size:13.5px; line-height:1.5; white-space:pre-wrap; min-height:36px; }
-.maint-note.empty { color:#94a3b8; font-style:italic; }
+.maint-card-form { display:block; margin:0; }
+.maint-note-label { display:block; font-size:11px; color:#64748b; letter-spacing:.05em; text-transform:uppercase; font-weight:800; margin:0 0 6px; }
+.maint-card-form textarea { width:100%; box-sizing:border-box; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; color:#1f2937; font:inherit; font-size:13.5px; line-height:1.5; resize:vertical; min-height:60px; transition:border-color .12s ease, box-shadow .12s ease, background .12s ease; }
+.maint-card-form textarea:hover { background:#fff; }
+.maint-card-form textarea:focus { outline:none; background:#fff; border-color:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.18); }
+.maint-card.urgent .maint-card-form textarea:focus { border-color:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,.18); }
 .maint-impact { margin-top:10px; border:1px solid #e2e8f0; border-radius:12px; padding:10px 12px; background:#fff; }
 .maint-impact h4 { margin:0 0 7px; font-size:12px; color:#475569; letter-spacing:.05em; text-transform:uppercase; font-weight:900; }
 .maint-impact-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
@@ -18001,7 +18017,9 @@ const maintenanceStyles = `<style>
 .maint-btn-urgent:hover { background:#dc2626; box-shadow:0 10px 22px rgba(220,38,38,.32); }
 .maint-btn-clear { background:#fef3c7; color:#92400e; }
 .maint-btn-clear:hover { background:#fde68a; }
-.maint-btn-link { background:transparent; color:#0f766e; padding:9px 6px; }
+.maint-btn-secondary { background:#e2e8f0; color:#0f172a; }
+.maint-btn-secondary:hover { background:#cbd5e1; }
+.maint-btn-link { background:transparent; color:#0f766e; padding:9px 6px; text-decoration:none; }
 .maint-btn-link:hover { text-decoration:underline; }
 .maint-empty { padding:38px 16px; text-align:center; color:#94a3b8; background:#fff; border:1px dashed #e2e8f0; border-radius:14px; }
 .maint-flash { padding:10px 14px; border-radius:12px; font-size:13.5px; font-weight:600; margin:0 0 14px; border:1px solid; }
@@ -18100,24 +18118,14 @@ adminRouter.get(
       flashHtml = `<p class="maint-flash warn">🚨 Room <strong>${escapeHtml(flashRaw.slice("urgent-".length))}</strong> flagged as urgent. Housekeeping &amp; managers have been notified.</p>`;
     } else if (flashRaw.startsWith("clear-")) {
       flashHtml = `<p class="maint-flash info">Cleared the urgent flag on room <strong>${escapeHtml(flashRaw.slice("clear-".length))}</strong>.</p>`;
+    } else if (flashRaw.startsWith("note-")) {
+      flashHtml = `<p class="maint-flash info">Note saved for room <strong>${escapeHtml(flashRaw.slice("note-".length))}</strong>.</p>`;
     }
 
     const roomCards = maintenanceUnits
       .map((u) => {
         const isUrgent = parseMaintenanceUrgentFromNotes(u.notes);
         const noteText = stripRoomNoteTags(u.notes);
-        const noteHtml = noteText
-          ? `<div class="maint-note">${escapeHtml(noteText)}</div>`
-          : `<div class="maint-note empty">No reason logged. Click "Flag urgent" to add one.</div>`;
-        const urgentBtn = isUrgent
-          ? `<form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/flag-urgent">
-              <input type="hidden" name="urgent" value="false" />
-              <button type="submit" class="maint-btn maint-btn-clear">Clear urgent flag</button>
-            </form>`
-          : `<form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/flag-urgent">
-              <input type="hidden" name="urgent" value="true" />
-              <button type="submit" class="maint-btn maint-btn-urgent">🚨 Flag urgent</button>
-            </form>`;
         const impacted = impactedByUnit.get(u.id) ?? [];
         const nextBooking = impacted[0];
         const altCount = alternativesByRoomType.get(u.roomTypeId) ?? 0;
@@ -18136,6 +18144,13 @@ adminRouter.get(
               : `<p class="muted" style="font-size:12px;margin:8px 0 0">No assigned future stay is currently blocked by this room.</p>`
           }
         </div>`;
+        // The whole card is a single form. Each action button uses `formaction`
+        // to route to the correct POST endpoint, so the typed note travels with
+        // every action — including "Mark fixed" and "Flag urgent".
+        const noteFieldId = `maint-note-${escapeHtml(u.id)}`;
+        const urgentLabel = isUrgent ? "Clear urgent" : "🚨 Flag urgent";
+        const urgentClass = isUrgent ? "maint-btn-clear" : "maint-btn-urgent";
+        const urgentValue = isUrgent ? "false" : "true";
         return `<article class="maint-card ${isUrgent ? "urgent" : ""}" data-unit-id="${escapeHtml(u.id)}">
           <div class="head">
             <div>
@@ -18147,15 +18162,30 @@ adminRouter.get(
               ${isUrgent ? `<span class="maint-pill urgent">🚨 Urgent</span>` : ""}
             </div>
           </div>
-          ${noteHtml}
-          ${impactHtml}
-          <div class="actions">
-            <form method="post" action="/admin/maintenance/${encodeURIComponent(u.id)}/mark-fixed">
-              <button type="submit" class="maint-btn maint-btn-fix">✅ Mark fixed</button>
-            </form>
-            ${urgentBtn}
-            <a class="maint-btn maint-btn-link" href="/admin/room-board/unit/${encodeURIComponent(u.id)}/details">Open room →</a>
-          </div>
+          <form method="post" class="maint-card-form" action="/admin/maintenance/${encodeURIComponent(u.id)}/note" autocomplete="off">
+            <label class="maint-note-label" for="${noteFieldId}">Reason / fix notes</label>
+            <textarea id="${noteFieldId}" name="note" rows="3" cols="40" maxlength="600" spellcheck="true" tabindex="0" placeholder="e.g. AC compressor replaced, awaiting filter / Broken shower head — parts ordered" style="width:100%;display:block;pointer-events:auto;user-select:text">${escapeHtml(noteText)}</textarea>
+            <input type="hidden" name="urgent" value="${urgentValue}" />
+            ${impactHtml}
+            <div class="actions">
+              <button
+                type="submit"
+                class="maint-btn maint-btn-fix"
+                formaction="/admin/maintenance/${encodeURIComponent(u.id)}/mark-fixed"
+              >✅ Mark fixed</button>
+              <button
+                type="submit"
+                class="maint-btn ${urgentClass}"
+                formaction="/admin/maintenance/${encodeURIComponent(u.id)}/flag-urgent"
+              >${urgentLabel}</button>
+              <button
+                type="submit"
+                class="maint-btn maint-btn-secondary"
+                formaction="/admin/maintenance/${encodeURIComponent(u.id)}/note"
+              >Save note</button>
+              <a class="maint-btn maint-btn-link" href="/admin/room-board/unit/${encodeURIComponent(u.id)}/details">Open room →</a>
+            </div>
+          </form>
         </article>`;
       })
       .join("");
@@ -18224,12 +18254,18 @@ adminRouter.post(
     }
     const session = getSession(req);
     const staffId = session?.staffId ?? null;
+    const typedNoteRaw = String(req.body?.note ?? "");
+    const typedNote = typedNoteRaw.trim().slice(0, 600);
 
     await prisma.$transaction(async (tx) => {
       const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
-      // Status -> AVAILABLE, urgent flag cleared
+      // Order matters: write the human-readable note first, then re-stamp the
+      // status tag, then clear the urgent flag. setRoomNoteText preserves any
+      // tags that were in `fresh.notes` so we don't drop the status tag while
+      // typing in the textarea.
+      const withNote = setRoomNoteText(fresh?.notes, typedNote);
       const cleanedNotes = setMaintenanceUrgentInNotes(
-        writeManualRoomStatusToNotes(fresh?.notes, "AVAILABLE"),
+        writeManualRoomStatusToNotes(withNote, "AVAILABLE"),
         false
       );
       await tx.roomUnit.update({
@@ -18261,7 +18297,9 @@ adminRouter.post(
         hotelId: hotel.id,
         type: "MAINTENANCE_FIXED",
         title: "Room is back in service",
-        body: `Room ${unit.name} — maintenance marked complete; status is now AVAILABLE.`,
+        body: typedNote
+          ? `Room ${unit.name} — maintenance marked complete (${typedNote}); status is now AVAILABLE.`
+          : `Room ${unit.name} — maintenance marked complete; status is now AVAILABLE.`,
         severity: "info",
         link: "/admin/maintenance"
       });
@@ -18279,7 +18317,8 @@ adminRouter.post(
         previousStatus: "MAINTENANCE",
         unitName: unit.name,
         source: "maintenance_page",
-        action: "mark_fixed"
+        action: "mark_fixed",
+        ...(typedNote ? { note: typedNote } : {})
       }
     });
 
@@ -18301,6 +18340,7 @@ adminRouter.post(
     }
     const unitId = String(req.params.unitId ?? "");
     const wantUrgent = String(req.body?.urgent ?? "true").toLowerCase() !== "false";
+    const typedNote = String(req.body?.note ?? "").trim().slice(0, 600);
     const unit = await prisma.roomUnit.findFirst({
       where: { id: unitId, hotelId: hotel.id },
       select: { id: true, name: true, notes: true }
@@ -18312,10 +18352,12 @@ adminRouter.post(
 
     await prisma.$transaction(async (tx) => {
       const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
-      // Make sure we keep MAINTENANCE status when flagging urgent.
+      // Persist the typed reason first so the status / urgent tags re-stamp on top
+      // of the human note, not the other way round.
+      const withNote = setRoomNoteText(fresh?.notes, typedNote);
       const withStatus = wantUrgent
-        ? writeManualRoomStatusToNotes(fresh?.notes, "MAINTENANCE")
-        : (fresh?.notes ?? "");
+        ? writeManualRoomStatusToNotes(withNote, "MAINTENANCE")
+        : withNote;
       const newNotes = setMaintenanceUrgentInNotes(withStatus, wantUrgent);
       await tx.roomUnit.update({
         where: { id: unit.id },
@@ -18329,7 +18371,9 @@ adminRouter.post(
           hotelId: hotel.id,
           type: "MAINTENANCE_URGENT",
           title: "🚨 Urgent maintenance",
-          body: `Room ${unit.name} — flagged as urgent. Please prioritise.`,
+          body: typedNote
+            ? `Room ${unit.name} — urgent: ${typedNote}`
+            : `Room ${unit.name} — flagged as urgent. Please prioritise.`,
           severity: "critical",
           link: "/admin/maintenance"
         });
@@ -18347,12 +18391,59 @@ adminRouter.post(
         status: "MAINTENANCE",
         unitName: unit.name,
         source: "maintenance_page",
-        action: wantUrgent ? "flag_urgent" : "clear_urgent"
+        action: wantUrgent ? "flag_urgent" : "clear_urgent",
+        ...(typedNote ? { note: typedNote } : {})
       }
     });
 
     const flashKey = wantUrgent ? "urgent" : "clear";
     res.redirect(`/admin/maintenance?ok=${flashKey}-${encodeURIComponent(unit.name)}`);
+  }
+);
+
+adminRouter.post(
+  "/maintenance/:unitId/note",
+  requirePermissionAny([{ module: "ROOMS", action: "EDIT" }, { module: "HOUSEKEEPING", action: "EDIT" }]),
+  async (req, res) => {
+    const hotel = await prisma.hotel.findFirst({
+      where: { slug: activeHotelSlug() },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.redirect("/admin/maintenance");
+      return;
+    }
+    const unitId = String(req.params.unitId ?? "");
+    const typedNote = String(req.body?.note ?? "").trim().slice(0, 600);
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: unitId, hotelId: hotel.id },
+      select: { id: true, name: true, notes: true }
+    });
+    if (!unit) {
+      res.redirect("/admin/maintenance");
+      return;
+    }
+
+    const newNotes = setRoomNoteText(unit.notes, typedNote);
+    await prisma.roomUnit.update({
+      where: { id: unit.id },
+      data: { notes: newNotes }
+    });
+
+    await logAudit({
+      hotelId: hotel.id,
+      action: "ROOM_BOARD_UNIT_STATUS",
+      entityType: "RoomUnit",
+      entityId: unit.id,
+      metadata: {
+        unitName: unit.name,
+        source: "maintenance_page",
+        action: "save_note",
+        note: typedNote
+      }
+    });
+
+    res.redirect(`/admin/maintenance?ok=note-${encodeURIComponent(unit.name)}`);
   }
 );
 
@@ -21166,7 +21257,14 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
   const bookingId = String(req.params.id ?? "");
   const existingBooking = await prisma.booking.findFirst({
     where: { id: bookingId, hotelId: hotel.id },
-    select: { id: true, status: true }
+    select: {
+      id: true,
+      status: true,
+      roomTypeId: true,
+      roomUnitId: true,
+      checkIn: true,
+      checkOut: true
+    }
   });
   if (!existingBooking) {
     res.redirect("/admin/bookings");
@@ -21183,10 +21281,41 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
     ? (rawStatus as BookingStatus)
     : null;
 
+  // Releasing held inventory + clearing the assigned unit must run on a transition
+  // *into* CANCELLED / NO_SHOW from an inventory-holding state. Idempotent: if the
+  // booking is already in a non-holding state, releaseInventoryForStayRange is a no-op
+  // for already-decremented nights.
+  const inventoryHoldingStatuses: BookingStatus[] = [
+    BookingStatus.PENDING,
+    BookingStatus.CONFIRMED,
+    BookingStatus.CHECKED_IN
+  ];
+  const becameInventoryReleasing =
+    !!nextStatus &&
+    (nextStatus === BookingStatus.CANCELLED || nextStatus === BookingStatus.NO_SHOW) &&
+    inventoryHoldingStatuses.includes(existingBooking.status);
+
   if (nextStatus) {
-    await prisma.booking.updateMany({
-      where: { id: bookingId, hotelId: hotel.id },
-      data: { status: nextStatus }
+    await prisma.$transaction(async (tx) => {
+      await tx.booking.updateMany({
+        where: { id: bookingId, hotelId: hotel.id },
+        data: {
+          status: nextStatus,
+          ...(becameInventoryReleasing ? { roomUnitId: null } : {})
+        }
+      });
+      if (becameInventoryReleasing) {
+        // Each Booking row represents a single physical key (no `rooms` column on the
+        // model — `rooms` lives on BookingDraft only). Match the convention used by
+        // the shorten-stay path on /front-desk/check-out.
+        await releaseInventoryForStayRange({
+          tx,
+          roomTypeId: existingBooking.roomTypeId,
+          start: existingBooking.checkIn,
+          endExclusive: existingBooking.checkOut,
+          rooms: 1
+        });
+      }
     });
     const statusSession = getSession(req);
     await recordBookingStatusChange(prisma, {
@@ -21203,7 +21332,12 @@ adminRouter.post("/bookings/:id/status", requirePermission("BOOKINGS", "EDIT"), 
       entityType: "Booking",
       entityId: bookingId,
       bookingId,
-      metadata: { status: nextStatus }
+      metadata: {
+        status: nextStatus,
+        ...(becameInventoryReleasing
+          ? { releasedInventory: true, releasedRoomUnitId: existingBooking.roomUnitId ?? null }
+          : {})
+      }
     });
     if (nextStatus === BookingStatus.CHECKED_IN && existingBooking.status !== BookingStatus.CHECKED_IN) {
       sendInStayWelcomeMenuIfEligible(bookingId).catch((err) =>
@@ -21317,14 +21451,19 @@ adminRouter.post("/bookings/:id/payment", requirePermission("BILLING", "EDIT"), 
       where: { id: bookingId, hotelId: hotel.id },
       data: { paymentStatus: nextPaymentStatus }
     });
+    // Reconcile against the folio so the manual override doesn't drift from real
+    // ledger reality (e.g. staff sets SUCCEEDED while folio still has outstanding
+    // charges → sync clamps it back to PENDING). Single source of truth: folio.
+    const synced = await syncBookingPaymentStatusFromFolio(prisma, hotel.id, bookingId);
+    const effectivePaymentStatus = synced?.paymentStatus ?? nextPaymentStatus;
     await logAudit({
       hotelId: hotel.id,
       action: "BOOKING_PAYMENT_UPDATED",
       entityType: "Booking",
       entityId: bookingId,
-      metadata: { paymentStatus: nextPaymentStatus }
+      metadata: { paymentStatus: effectivePaymentStatus, requested: nextPaymentStatus }
     });
-    if (nextPaymentStatus === PaymentStatus.SUCCEEDED) {
+    if (effectivePaymentStatus === PaymentStatus.SUCCEEDED) {
       const invoiceResult = await sendInvoicePdfForBooking({
         hotelId: hotel.id,
         bookingId,
@@ -22946,7 +23085,7 @@ adminRouter.get("/billing/export", requirePermission("BILLING", "VIEW"), async (
     .send(header + invoiceLines + paymentLines + folioPaymentLines);
 });
 
-adminRouter.get("/integrations", requireAuth, async (_req, res) => {
+adminRouter.get("/integrations", requirePermission("USERS", "VIEW"), async (_req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     include: {
@@ -23051,7 +23190,7 @@ adminRouter.get("/integrations", requireAuth, async (_req, res) => {
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/integrations/booking-com/prepare-sync", requireAuth, async (req, res) => {
+adminRouter.post("/integrations/booking-com/prepare-sync", requirePermission("USERS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     include: { integrations: true }
@@ -23104,7 +23243,7 @@ adminRouter.post("/integrations/booking-com/prepare-sync", requireAuth, async (r
   res.redirect("/admin/integrations");
 });
 
-adminRouter.get("/setup", requireAuth, async (req, res) => {
+adminRouter.get("/setup", requirePermission("USERS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     include: { properties: { orderBy: { createdAt: "asc" } } }
@@ -23366,7 +23505,7 @@ ${errorNotice}
   res.type("html").send(renderLayout(content, true));
 });
 
-adminRouter.post("/setup", requireAuth, async (req, res) => {
+adminRouter.post("/setup", requirePermission("USERS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     include: { properties: { orderBy: { createdAt: "asc" } } }
@@ -23487,7 +23626,7 @@ adminRouter.post("/setup", requireAuth, async (req, res) => {
   res.redirect("/admin/setup?updated=1");
 });
 
-adminRouter.post("/setup/send-test", requireAuth, async (req, res) => {
+adminRouter.post("/setup/send-test", requirePermission("USERS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
     include: { properties: { orderBy: { createdAt: "asc" } } }

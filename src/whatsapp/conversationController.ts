@@ -3279,7 +3279,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (conversationMode === "AGENT_MODE") {
-    return;
+    // While in human-handoff, the bot stays silent EXCEPT for an explicit MENU/RESET.
+    // Without this escape hatch a guest cannot return to self-service once an agent
+    // has stopped responding. We let the global-reset path (further down) handle the
+    // actual state cleanup so behavior matches normal MENU.
+    if (!isGlobalResetMessage(input.text)) {
+      return;
+    }
   }
 
   if (guestJourneyOperationalReply?.matched && guestJourneyOperationalReply.category) {
@@ -4119,7 +4125,13 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         bookingMealPlanCode: undefined,
         pendingPrebookOrder: null,
         fbCartDraft: null,
-        bookingFlowReturn: null
+        bookingFlowReturn: null,
+        // Clear in-stay capture state so a half-typed complaint or extra-quantity
+        // session does not survive a global MENU reset and ambush the next message.
+        inStayComplaintStep: null,
+        inStayComplaintCategory: null,
+        inStayExtraAwaitQtyFor: null,
+        lastInStayMenuSentAt: null
       }
     });
     if (needsLanguageSelection(persisted.language)) {
