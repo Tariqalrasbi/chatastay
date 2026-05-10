@@ -171,6 +171,11 @@ import {
 } from "../core/commandCenterDashboardHtml";
 import { allocateBookingReferenceCode, displayBookingReference } from "../core/bookingReference";
 import {
+  evaluateGuestCheckoutEligibility,
+  getBookingCheckoutSettlementSnapshot,
+  performGuestCheckout
+} from "../core/guestCheckout";
+import {
   formatGuestVipAndTagsHtml,
   refreshGuestSegmentTagsForGuest,
   SEGMENT_TAG_LABELS
@@ -272,6 +277,8 @@ function deriveFeedbackSignals(params: {
 }
 
 const viewsDir = path.join(process.cwd(), "src", "views");
+/** Avoid re-reading multi-KB templates from disk on every HTML response (major win for admin navigation). */
+const adminViewFileCache = new Map<string, string>();
 const sessionCookieName = "chatastay_admin_session";
 type PermissionAction = "VIEW" | "EDIT" | "CREATE" | "DELETE" | "MANAGE";
 type PermissionModule =
@@ -866,7 +873,11 @@ function writeOffers(offers: OfferDefinition[]): void {
 }
 
 function readView(name: string): string {
-  return fs.readFileSync(path.join(viewsDir, name), "utf8");
+  const cached = adminViewFileCache.get(name);
+  if (cached) return cached;
+  const text = fs.readFileSync(path.join(viewsDir, name), "utf8");
+  adminViewFileCache.set(name, text);
+  return text;
 }
 
 /** Demo / local credentials — omitted when NODE_ENV is production. */
@@ -8258,8 +8269,10 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         include: { plan: true },
         take: 1
       },
-      properties: true,
-      roomTypes: true,
+      roomTypes: {
+        where: { isActive: true },
+        select: { id: true, code: true, name: true, isActive: true }
+      },
       integrations: { orderBy: { provider: "asc" } },
       invoices: { orderBy: { createdAt: "desc" }, take: 10 }
     }
@@ -8421,9 +8434,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
 
   await ensureDefaultRoomUnitsForBoard(
     hotel.id,
-    hotel.roomTypes
-      .filter((rt) => rt.isActive)
-      .map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
+    hotel.roomTypes.map((rt) => ({ id: rt.id, code: rt.code, name: rt.name }))
   );
   await backfillMissingRoomUnitAssignmentsForDate({
     hotelId: hotel.id,
@@ -8449,6 +8460,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
     checkIn: Date | null;
     checkOut: Date | null;
     bookingId: string | null;
+    bookingRefShort: string | null;
   }> = [];
 
   for (const rt of roomTypesWithUnits) {
@@ -8478,7 +8490,7 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
     for (const unit of units) {
       const bookingsForUnit = todayBookings.filter((b) => b.roomUnitId === unit.id);
       const firstBooking = bookingsForUnit[0] ?? null;
-      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED");
+      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED" || b.status === "CHECKED_IN");
       const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
       const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
       const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
@@ -8513,12 +8525,13 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         guestName: firstBooking?.guest.fullName ?? firstBooking?.guest.phoneE164 ?? null,
         checkIn: firstBooking?.checkIn ?? null,
         checkOut: firstBooking?.checkOut ?? null,
-        bookingId: firstBooking?.id ?? null
+        bookingId: firstBooking?.id ?? null,
+        bookingRefShort: firstBooking ? displayBookingReference(firstBooking) : null
       });
     }
 
     for (const b of overlapForType.filter((x) => !x.roomUnitId)) {
-      const hasConfirmed = b.status === "CONFIRMED";
+      const hasConfirmed = b.status === "CONFIRMED" || b.status === "CHECKED_IN";
       const hasPending = b.status === "PENDING";
       let status: RoomBoardStatus;
       const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
@@ -8536,7 +8549,8 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         guestName: b.guest?.fullName ?? b.guest?.phoneE164 ?? null,
         checkIn: b.checkIn,
         checkOut: b.checkOut,
-        bookingId: b.id
+        bookingId: b.id,
+        bookingRefShort: displayBookingReference(b)
       });
     }
   }
@@ -8558,7 +8572,9 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
                 ? "room-board-yellow"
                 : "room-board-purple";
       const detailHref = card.unitId
-        ? `/admin/room-board/unit/${encodeURIComponent(card.unitId)}/details?date=${formatDateForInput(dayStart)}`
+        ? `/admin/room-board/unit/${encodeURIComponent(card.unitId)}/details?date=${formatDateForInput(dayStart)}${
+            card.bookingId ? `&highlightBooking=${encodeURIComponent(card.bookingId)}` : ""
+          }`
         : `/admin/bookings/${encodeURIComponent(card.bookingId ?? "")}`;
       const statusForm = card.unitId
         ? roomBoardStatusFormHtml({
@@ -8576,6 +8592,11 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.status)}</div>
         ${card.guestName ? `<div style="margin-top:6px; font-size:12px">Guest: ${escapeHtml(card.guestName)}</div>` : ""}
         ${card.checkIn && card.checkOut ? `<div class="muted" style="font-size:11px">${formatDateForInput(card.checkIn)} - ${formatDateForInput(card.checkOut)}</div>` : ""}
+        ${
+          card.bookingRefShort
+            ? `<div class="muted" style="font-size:10px;margin-top:4px" title="Reservation">Res: <strong>${escapeHtml(card.bookingRefShort)}</strong></div>`
+            : ""
+        }
         <div class="room-board-card-meta-links" style="margin-top:8px">
           <a class="inline-link" href="${detailHref}">${card.unitId ? "details" : "booking"}</a>
         </div>
@@ -8736,6 +8757,8 @@ type RoomBoardCardRow = {
   checkIn: Date | null;
   checkOut: Date | null;
   bookingId: string | null;
+  /** Compact reservation ref for cards (e.g. WA-… or id prefix). */
+  bookingRefShort: string | null;
   isUnassignedBooking: boolean;
   adults: number | null;
   children: number | null;
@@ -8849,7 +8872,7 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
         hotelId: hotel.id,
         checkIn: { lt: dateEndExclusive },
         checkOut: { gt: dateStart },
-        status: { in: ["CONFIRMED", "PENDING"] }
+        status: { in: ["CONFIRMED", "PENDING", "CHECKED_IN"] }
       },
       include: { guest: true, roomType: true, roomUnit: true },
       orderBy: { checkIn: "asc" }
@@ -8888,7 +8911,7 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
     for (const unit of units) {
       const bookingsForUnit = overlappingBookings.filter((b) => b.roomUnitId === unit.id);
       const firstBooking = bookingsForUnit[0] ?? null;
-      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED");
+      const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED" || b.status === "CHECKED_IN");
       const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
       const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
       const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
@@ -8925,6 +8948,7 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
         checkIn: firstBooking?.checkIn ?? null,
         checkOut: firstBooking?.checkOut ?? null,
         bookingId: firstBooking?.id ?? null,
+        bookingRefShort: firstBooking ? displayBookingReference(firstBooking) : null,
         isUnassignedBooking: false,
         adults: firstBooking ? firstBooking.adults : null,
         children: firstBooking ? firstBooking.children : null,
@@ -8934,7 +8958,7 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
 
     const unassignedForType = overlappingBookings.filter((b) => b.roomTypeId === roomType.id && !b.roomUnitId);
     for (const b of unassignedForType) {
-      const hasConfirmed = b.status === "CONFIRMED";
+      const hasConfirmed = b.status === "CONFIRMED" || b.status === "CHECKED_IN";
       const hasPending = b.status === "PENDING";
       let status: RoomBoardStatus;
       const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
@@ -8954,6 +8978,7 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
         checkIn: b.checkIn,
         checkOut: b.checkOut,
         bookingId: b.id,
+        bookingRefShort: displayBookingReference(b),
         isUnassignedBooking: true,
         adults: b.adults,
         children: b.children,
@@ -9663,6 +9688,17 @@ async function ensureDefaultRoomUnitsForBoard(hotelId: string, roomTypes: Array<
 }
 
 async function backfillMissingRoomUnitAssignmentsForDate(params: { hotelId: string; dateStart: Date; dateEndExclusive: Date }): Promise<void> {
+  const pending = await prisma.booking.count({
+    where: {
+      hotelId: params.hotelId,
+      roomUnitId: null,
+      checkIn: { lt: params.dateEndExclusive },
+      checkOut: { gt: params.dateStart },
+      status: { in: ["CONFIRMED", "PENDING"] }
+    }
+  });
+  if (pending === 0) return;
+
   const roomTypes = await prisma.roomType.findMany({
     where: { hotelId: params.hotelId, isActive: true },
     select: { id: true }
@@ -10397,7 +10433,9 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
       (c) => {
         const statusClass = getRoomBoardStatusClass(c.status);
         const detailUrl = c.unitId
-          ? `/admin/room-board/unit/${encodeURIComponent(c.unitId)}/details?date=${formatDateForInput(boardDate)}`
+          ? `/admin/room-board/unit/${encodeURIComponent(c.unitId)}/details?date=${formatDateForInput(boardDate)}${
+              c.bookingId ? `&highlightBooking=${encodeURIComponent(c.bookingId)}` : ""
+            }`
           : `/admin/bookings/${encodeURIComponent(c.bookingId ?? "")}`;
         const statusForm =
           c.unitId && !c.isUnassignedBooking
@@ -10430,6 +10468,11 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
   ${c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
   ${stayDetailHtml}
   ${c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
+  ${
+    c.bookingRefShort
+      ? `<div style="font-size:10px;color:var(--muted);margin-top:3px;line-height:1.25" title="Reservation">Res: <strong>${escapeHtml(c.bookingRefShort)}</strong></div>`
+      : ""
+  }
   <div class="room-board-card-meta-links" style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
     <a class="inline-link" href="${detailUrl}">${c.isUnassignedBooking ? "booking" : "details"}</a>
   </div>
@@ -11000,28 +11043,6 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
   }
 });
 
-async function getBookingFolioSettlementSnapshot(booking: {
-  id: string;
-  hotelId: string;
-  totalAmount: number;
-  currency: string;
-  paymentStatus: PaymentStatus;
-}) {
-  const paidAgg = await prisma.paymentIntent.aggregate({
-    where: { hotelId: booking.hotelId, bookingId: booking.id, status: PaymentStatus.SUCCEEDED },
-    _sum: { amount: true }
-  });
-  const folio = await getFolioSummary({
-    hotelId: booking.hotelId,
-    bookingId: booking.id,
-    bookingTotalAmount: booking.totalAmount,
-    currency: booking.currency,
-    paymentIntentsSucceededTotal: round2(paidAgg._sum.amount ?? 0)
-  });
-  const isPaid = folio.outstandingBalance <= 0.005 || booking.paymentStatus === PaymentStatus.SUCCEEDED;
-  return { folio, isPaid };
-}
-
 adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
@@ -11060,7 +11081,7 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
   const candidateRows = (
     await Promise.all(
       checkoutCandidates.map(async (b) => {
-        const { folio, isPaid } = await getBookingFolioSettlementSnapshot(b);
+        const { folio, isPaid } = await getBookingCheckoutSettlementSnapshot(prisma, b);
         const guestName = b.guest.fullName || b.guest.phoneE164 || "Guest";
         const outstanding = `${folio.outstandingBalance.toFixed(2)} ${escapeHtml(folio.currency)}`;
         return `<tr>
@@ -11097,10 +11118,19 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
               </div>
             </details>
             <form method="post" action="/admin/front-desk/check-out" style="margin-top:8px;display:grid;gap:6px">
+              <input type="hidden" name="bookingId" value="${escapeHtml(b.id)}" />
               <input type="hidden" name="roomUnitId" value="${escapeHtml(b.roomUnitId ?? "")}" />
               <input type="hidden" name="departureDate" value="${escapeHtml(formatDateForInput(b.checkOut))}" />
+              <input type="hidden" name="returnTo" value="${escapeHtml(
+                `/admin/room-board/unit/${encodeURIComponent(b.roomUnitId!)}/details?date=${encodeURIComponent(boardDateStr)}&highlightBooking=${encodeURIComponent(b.id)}&checkoutSuccess=1`
+              )}" />
               <button type="submit" ${isPaid ? "" : "disabled"}>${isPaid ? "Complete checkout" : "Settle payment first"}</button>
             </form>
+            ${
+              b.roomUnitId
+                ? `<p class="muted" style="margin:6px 0 0;font-size:11px"><a class="inline-link" href="/admin/room-board/unit/${encodeURIComponent(b.roomUnitId)}/details?date=${encodeURIComponent(boardDateStr)}&highlightBooking=${encodeURIComponent(b.id)}">Open reservation</a> for guided checkout.</p>`
+                : ""
+            }
           </td>
         </tr>`;
       })
@@ -11109,7 +11139,7 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
 
   const content = `
 <h2>Departures / check-out</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — One-page checkout: identify the guest, review folio, settle payment, then complete checkout and send the room to housekeeping.</p>
+<p class="muted">${escapeHtml(hotel.displayName)} — For the clearest flow, open <strong>Reservation details</strong> from the room board and use <strong>Checkout guest</strong> there after the folio is settled. This page still supports quick settlement and checkout for departures.</p>
 ${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px">${escapeHtml(errorMsg)}</p>` : ""}
 ${settledMsg}
 <section style="margin:12px 0 18px">
@@ -11213,67 +11243,106 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
     return;
   }
   const roomUnitId = String(req.body.roomUnitId ?? "").trim();
+  const bookingIdFromBody = String(req.body.bookingId ?? "").trim();
   const departureDate = startOfDay(parseDateInput(req.body.departureDate, startOfDay(new Date())));
   const departureTimeRaw = String(req.body.departureTime ?? "").trim();
   const departureReason = String(req.body.departureReason ?? "").trim().slice(0, 2000);
   const discountParsed = parseFloat(String(req.body.discountAmount ?? ""));
   const discountRequested = Number.isFinite(discountParsed) && discountParsed > 0 ? discountParsed : 0;
+  const returnToRaw = String(req.body.returnTo ?? "").trim();
+  const returnTo = returnToRaw ? safeAdminReturnToPath(returnToRaw, "") : "";
 
   const errRedirect = (msg: string) => {
     res.redirect(`/admin/front-desk/check-out?date=${encodeURIComponent(formatDateForInput(departureDate))}&error=${encodeURIComponent(msg)}`);
   };
 
-  if (!roomUnitId) {
-    errRedirect("Select a room unit.");
-    return;
-  }
-
-  const unit = await prisma.roomUnit.findFirst({
-    where: { id: roomUnitId, hotelId: hotel.id },
-    select: { id: true, notes: true }
-  });
-  if (!unit) {
-    errRedirect("Room not found.");
-    return;
-  }
-
   const staffSession = getSession(req);
   const executedByEmail = staffSession?.email ?? "unknown";
 
-  try {
-    const paymentBooking = await prisma.booking.findFirst({
-      where: {
+  const afterSuccessRedirect = (result: { roomUnitId: string; departureDateKey: string; auditBookingId: string | null }) => {
+    if (returnTo) {
+      const join = returnTo.includes("?") ? "&" : "?";
+      const withToast = returnTo.includes("checkoutSuccess=") ? returnTo : `${returnTo}${join}checkoutSuccess=1`;
+      res.redirect(withToast);
+      return;
+    }
+    res.redirect(
+      `/admin/room-board/unit/${encodeURIComponent(result.roomUnitId)}/details?date=${encodeURIComponent(result.departureDateKey)}&checkoutSuccess=1`
+    );
+  };
+
+  const notifyAndInvoice = async (params: {
+    unitId: string;
+    auditBookingId: string | null;
+    hkFromCheckout: { created: boolean; taskId: string | null };
+  }) => {
+    if (params.hkFromCheckout.created && params.hkFromCheckout.taskId) {
+      const unitLabel = await prisma.roomUnit.findUnique({
+        where: { id: params.unitId },
+        select: { name: true, roomType: { select: { name: true } } }
+      });
+      const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : params.unitId;
+      await notifyHousekeepingStaff({
         hotelId: hotel.id,
-        roomUnitId: unit.id,
-        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
-        checkIn: { lte: departureDate },
-        checkOut: { gte: departureDate }
-      },
-      orderBy: { checkIn: "asc" }
-    });
-    if (paymentBooking) {
-      const { isPaid, folio } = await getBookingFolioSettlementSnapshot(paymentBooking);
-      if (!isPaid) {
-        errRedirect(
-          `Checkout cannot be completed until the outstanding balance is settled. Outstanding balance: ${folio.outstandingBalance.toFixed(2)} ${folio.currency}.`
-        );
+        type: "HK_TASK_NEW",
+        title: "Checkout — room needs cleaning",
+        body: `${label} — task created after manual check-out.`,
+        payloadJson: JSON.stringify({
+          taskId: params.hkFromCheckout.taskId,
+          roomUnitId: params.unitId,
+          bookingId: params.auditBookingId
+        })
+      });
+    }
+    if (params.auditBookingId) {
+      sendInvoicePdfForBooking({
+        hotelId: hotel.id,
+        bookingId: params.auditBookingId,
+        trigger: "FRONT_DESK_CHECKOUT",
+        force: true
+      }).catch((err) =>
+        console.error(
+          `[front-desk-checkout] auto invoice send failed booking=${params.auditBookingId}:`,
+          err instanceof Error ? err.message : String(err)
+        )
+      );
+    }
+  };
+
+  try {
+    let resolvedBookingId: string | null = null;
+    if (bookingIdFromBody) {
+      const byId = await prisma.booking.findFirst({
+        where: {
+          id: bookingIdFromBody,
+          hotelId: hotel.id,
+          status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] }
+        },
+        select: { id: true, roomUnitId: true }
+      });
+      if (!byId?.roomUnitId) {
+        errRedirect("Reservation not found or not eligible for checkout.");
         return;
       }
-    }
-
-    let auditBookingId: string | undefined;
-    let hkFromCheckout: { created: boolean; taskId: string | null } = { created: false, taskId: null };
-    let auditMetadata: Record<string, unknown> = {
-      roomUnitId: unit.id,
-      departureDate: formatDateForInput(departureDate),
-      departureTime: departureTimeRaw || undefined,
-      departureReason: departureReason || undefined,
-      discountRequested,
-      executedByEmail
-    };
-
-    await prisma.$transaction(async (tx) => {
-      const booking = await tx.booking.findFirst({
+      if (roomUnitId && byId.roomUnitId !== roomUnitId) {
+        errRedirect("Room unit does not match this reservation.");
+        return;
+      }
+      resolvedBookingId = byId.id;
+    } else {
+      if (!roomUnitId) {
+        errRedirect("Select a room unit or open checkout from the reservation.");
+        return;
+      }
+      const unit = await prisma.roomUnit.findFirst({
+        where: { id: roomUnitId, hotelId: hotel.id },
+        select: { id: true }
+      });
+      if (!unit) {
+        errRedirect("Room not found.");
+        return;
+      }
+      const paymentBooking = await prisma.booking.findFirst({
         where: {
           hotelId: hotel.id,
           roomUnitId: unit.id,
@@ -11281,69 +11350,82 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
           checkIn: { lte: departureDate },
           checkOut: { gte: departureDate }
         },
-        orderBy: { checkIn: "asc" }
+        orderBy: { checkIn: "asc" },
+        select: { id: true }
       });
+      resolvedBookingId = paymentBooking?.id ?? null;
+    }
 
-      if (booking) {
-        const checkInDay = startOfDay(booking.checkIn);
-        const oldCheckOut = startOfDay(booking.checkOut);
-        const newCheckOut = departureDate;
-        if (newCheckOut.getTime() < checkInDay.getTime()) {
-          throw new Error("Departure cannot be before check-in.");
-        }
-        if (newCheckOut.getTime() > oldCheckOut.getTime()) {
-          throw new Error("Departure cannot be after the scheduled checkout date.");
-        }
-        const priorNights = Math.round((oldCheckOut.getTime() - checkInDay.getTime()) / 86400000);
-        if (priorNights < 1) {
-          throw new Error("Could not determine stay length from this booking.");
-        }
-        const newNights = Math.round((newCheckOut.getTime() - checkInDay.getTime()) / 86400000);
-        if (newNights < 0) throw new Error("Invalid stay length after checkout.");
-
-        const proRated = Math.round(((booking.totalAmount * newNights) / priorNights) * 1000) / 1000;
-        const cappedDiscount = Math.min(discountRequested, proRated);
-        const newTotal = Math.max(0, Math.round((proRated - cappedDiscount) * 1000) / 1000);
-
-        await tx.booking.update({
-          where: { id: booking.id },
-          data: {
-            checkOut: newCheckOut,
-            nights: newNights,
-            totalAmount: newTotal
-          }
-        });
-
-        if (newCheckOut.getTime() < oldCheckOut.getTime()) {
-          await releaseInventoryForStayRange({
-            tx,
-            roomTypeId: booking.roomTypeId,
-            start: newCheckOut,
-            endExclusive: oldCheckOut,
-            rooms: 1
-          });
-        }
-
-        auditBookingId = booking.id;
-        auditMetadata = {
-          ...auditMetadata,
-          bookingId: booking.id,
-          previousCheckOut: formatDateForInput(oldCheckOut),
-          newCheckOut: formatDateForInput(newCheckOut),
-          previousNights: priorNights,
-          newNights,
-          previousTotalAmount: booking.totalAmount,
-          proRatedRoomTotal: proRated,
-          discountApplied: cappedDiscount,
-          newTotalAmount: newTotal
-        };
-      } else {
-        auditMetadata = {
-          ...auditMetadata,
-          noActiveBooking: true
-        };
+    if (resolvedBookingId) {
+      const result = await performGuestCheckout(prisma, {
+        hotelId: hotel.id,
+        bookingId: resolvedBookingId,
+        departureDate,
+        departureTimeRaw,
+        departureReason,
+        discountRequested,
+        executedByEmail,
+        staffId: staffSession?.staffId ?? null,
+        ensureHkTask: ensureHousekeepingTaskForCleaningTx
+      });
+      if (!result.ok) {
+        errRedirect(result.message);
+        return;
       }
+      await logAudit({
+        hotelId: hotel.id,
+        action: "MANUAL_FRONT_DESK_CHECK_OUT",
+        entityType: result.auditBookingId ? "Booking" : "RoomUnit",
+        entityId: result.auditBookingId ?? result.roomUnitId,
+        metadata: {
+          roomUnitId: result.roomUnitId,
+          bookingId: result.auditBookingId,
+          departureDate: result.departureDateKey,
+          departureTime: departureTimeRaw || undefined,
+          departureReason: departureReason || undefined,
+          discountRequested,
+          executedByEmail,
+          path: "shared_guest_checkout"
+        }
+      });
+      await notifyAndInvoice({
+        unitId: result.roomUnitId,
+        auditBookingId: result.auditBookingId,
+        hkFromCheckout: result.hkFromCheckout
+      });
+      afterSuccessRedirect({
+        roomUnitId: result.roomUnitId,
+        departureDateKey: result.departureDateKey,
+        auditBookingId: result.auditBookingId
+      });
+      return;
+    }
 
+    if (!roomUnitId) {
+      errRedirect("Select a room unit.");
+      return;
+    }
+    const unit = await prisma.roomUnit.findFirst({
+      where: { id: roomUnitId, hotelId: hotel.id },
+      select: { id: true, notes: true }
+    });
+    if (!unit) {
+      errRedirect("Room not found.");
+      return;
+    }
+
+    let hkFromCheckout: { created: boolean; taskId: string | null } = { created: false, taskId: null };
+    const auditMetadata: Record<string, unknown> = {
+      roomUnitId: unit.id,
+      departureDate: formatDateForInput(departureDate),
+      departureTime: departureTimeRaw || undefined,
+      departureReason: departureReason || undefined,
+      discountRequested,
+      executedByEmail,
+      noActiveBooking: true
+    };
+
+    await prisma.$transaction(async (tx) => {
       const fresh = await tx.roomUnit.findUnique({ where: { id: unit.id }, select: { notes: true } });
       await tx.roomUnit.update({
         where: { id: unit.id },
@@ -11353,7 +11435,7 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
         hotelId: hotel.id,
         roomUnitId: unit.id,
         source: HousekeepingTaskSource.CHECKOUT,
-        bookingId: auditBookingId ?? null,
+        bookingId: null,
         createdByUserId: staffSession?.staffId ?? null,
         notes: "Guest departure (manual check-out)"
       });
@@ -11362,45 +11444,16 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
     await logAudit({
       hotelId: hotel.id,
       action: "MANUAL_FRONT_DESK_CHECK_OUT",
-      entityType: auditBookingId ? "Booking" : "RoomUnit",
-      entityId: auditBookingId ?? unit.id,
+      entityType: "RoomUnit",
+      entityId: unit.id,
       metadata: auditMetadata
     });
-
-    if (hkFromCheckout.created && hkFromCheckout.taskId) {
-      const unitLabel = await prisma.roomUnit.findUnique({
-        where: { id: unit.id },
-        select: { name: true, roomType: { select: { name: true } } }
-      });
-      const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : unit.id;
-      await notifyHousekeepingStaff({
-        hotelId: hotel.id,
-        type: "HK_TASK_NEW",
-        title: "Checkout — room needs cleaning",
-        body: `${label} — task created after manual check-out.`,
-        payloadJson: JSON.stringify({ taskId: hkFromCheckout.taskId, roomUnitId: unit.id, bookingId: auditBookingId })
-      });
+    await notifyAndInvoice({ unitId: unit.id, auditBookingId: null, hkFromCheckout });
+    if (returnTo) {
+      res.redirect(returnTo);
+    } else {
+      res.redirect(`/admin/room-board?date=${encodeURIComponent(formatDateForInput(departureDate))}&manualCheckOut=1`);
     }
-
-    // Hospitality lifecycle: front-desk check-out triggers immediate final-invoice delivery, BEFORE
-    // any post-stay thank-you / review flow runs. Idempotent — `sendInvoicePdfForBooking` dedupes
-    // by latest BOOKING_INVOICE_PDF_SENT audit + paymentStatus, and `force: true` is safe to call
-    // exactly once per checkout press because the journey sweep also gates on that audit.
-    if (auditBookingId) {
-      sendInvoicePdfForBooking({
-        hotelId: hotel.id,
-        bookingId: auditBookingId,
-        trigger: "FRONT_DESK_CHECKOUT",
-        force: true
-      }).catch((err) =>
-        console.error(
-          `[front-desk-checkout] auto invoice send failed booking=${auditBookingId}:`,
-          err instanceof Error ? err.message : String(err)
-        )
-      );
-    }
-
-    res.redirect(`/admin/room-board?date=${encodeURIComponent(formatDateForInput(departureDate))}&manualCheckOut=1`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Check-out could not be completed.";
     errRedirect(msg);
@@ -12338,6 +12391,11 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   const dateEndExclusive = addDays(boardDate, 1);
   const unitDetailDayRange = inventoryDayRangeExclusive(boardDate);
   const savedNotice = req.query.saved ? '<p class="badge ok">Room &amp; guest details saved.</p>' : "";
+  const checkoutSuccessNotice =
+    req.query.checkoutSuccess === "1"
+      ? `<p class="badge ok" id="rud-checkout-success-banner">Guest checked out successfully. Room marked for housekeeping. <a class="btn-link primary" href="/admin/room-board?date=${encodeURIComponent(dateKey)}">Back to Room Rack</a></p>`
+      : "";
+  const highlightBookingId = String(req.query.highlightBooking ?? "").trim();
 
   const unit = await prisma.roomUnit.findFirst({
     where: { id: unitId, hotelId: hotel.id },
@@ -12348,22 +12406,12 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     return;
   }
 
-  const [inventoryRow, booking, manualDetails, activeSiblings, typeOverlappingBookings] = await Promise.all([
+  const overlapStatuses = [BookingStatus.CONFIRMED, BookingStatus.PENDING, BookingStatus.CHECKED_IN] as const;
+
+  const [inventoryRow, manualDetails, activeSiblings, typeOverlappingBookings] = await Promise.all([
     prisma.inventory.findFirst({
       where: { hotelId: hotel.id, roomTypeId: unit.roomTypeId, date: { gte: unitDetailDayRange.gte, lt: unitDetailDayRange.lt } },
       select: { closedOut: true, total: true, reserved: true }
-    }),
-    prisma.booking.findFirst({
-      where: {
-        hotelId: hotel.id,
-        roomTypeId: unit.roomTypeId,
-        roomUnitId: unit.id,
-        checkIn: { lt: dateEndExclusive },
-        checkOut: { gt: boardDate },
-        status: { in: ["CONFIRMED", "PENDING"] }
-      },
-      include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } },
-      orderBy: { checkIn: "asc" }
     }),
     getManualGuestDetailsForUnitOnDate(unit.id, dateKey),
     prisma.roomUnit.findMany({
@@ -12377,11 +12425,46 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         roomTypeId: unit.roomTypeId,
         checkIn: { lt: dateEndExclusive },
         checkOut: { gt: boardDate },
-        status: { in: ["CONFIRMED", "PENDING"] }
+        status: { in: [...overlapStatuses] }
       },
       select: { roomUnitId: true }
     })
   ]);
+
+  let booking =
+    highlightBookingId.length > 0
+      ? await prisma.booking.findFirst({
+          where: {
+            id: highlightBookingId,
+            hotelId: hotel.id,
+            roomUnitId: unit.id,
+            roomTypeId: unit.roomTypeId,
+            checkIn: { lt: dateEndExclusive },
+            checkOut: { gt: boardDate },
+            status: { in: [...overlapStatuses] }
+          },
+          include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } }
+        })
+      : null;
+  if (!booking) {
+    booking = await prisma.booking.findFirst({
+      where: {
+        hotelId: hotel.id,
+        roomTypeId: unit.roomTypeId,
+        roomUnitId: unit.id,
+        checkIn: { lt: dateEndExclusive },
+        checkOut: { gt: boardDate },
+        status: { in: [...overlapStatuses] }
+      },
+      include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } },
+      orderBy: { checkIn: "asc" }
+    });
+  }
+
+  const checkoutEligibility =
+    booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.CHECKED_IN)
+      ? await evaluateGuestCheckoutEligibility(prisma, hotel.id, booking.id)
+      : { ok: false as const, code: "no_eligible_booking", message: "Checkout is available when an active confirmed or in-house reservation is linked to this room." };
 
   let linkedRoomsBanner = "";
   if (booking?.bookingGroupId) {
@@ -12412,12 +12495,15 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     }
   }
   const rudChangeRoomLink =
-    booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.PENDING)
+    booking &&
+    (booking.status === BookingStatus.CONFIRMED ||
+      booking.status === BookingStatus.PENDING ||
+      booking.status === BookingStatus.CHECKED_IN)
       ? `<a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/change-room">Change room</a>`
       : "";
 
   const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
-  const hasConfirmed = Boolean(booking && booking.status === "CONFIRMED");
+  const hasConfirmed = Boolean(booking && (booking.status === "CONFIRMED" || booking.status === "CHECKED_IN"));
   const hasPending = Boolean(booking && booking.status === "PENDING");
   const closedOut = inventoryRow?.closedOut ?? false;
   const bookableTotal = inventoryRow?.total ?? unit.roomType.totalInventory;
@@ -12697,9 +12783,23 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     : "—";
   const stayNights = booking ? String(booking.nights) : "—";
   const ledgerTbodyEmpty = !booking && folioRows.length === 0;
+  const stayCardHighlightClass =
+    booking && highlightBookingId && highlightBookingId === booking.id ? " rud-card-stay-highlight" : "";
+  const checkoutEligibilityJson = JSON.stringify(checkoutEligibility).replace(/</g, "\\u003c");
+  const canOfferCheckoutButton = Boolean(
+    booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.CHECKED_IN)
+  );
 
   const content = `
 <div class="rud-page">
+  <style>
+    .rud-card-stay-highlight { outline: 2px solid #128c7e; outline-offset: 3px; border-radius: 12px; }
+    #rud-checkout-modal .rud-checkout-grid { display: grid; gap: 8px; font-size: 13px; }
+    #rud-checkout-modal .rud-checkout-grid dt { color: var(--muted, #5f6b7a); font-weight: 600; }
+    #rud-checkout-modal .rud-checkout-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; align-items: center; }
+    #rud-checkout-modal .rud-checkout-primary { padding: 10px 18px; border: 0; border-radius: 10px; background: #128c7e; color: #fff; font-weight: 700; cursor: pointer; }
+    #rud-checkout-modal .rud-checkout-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+  </style>
   <header class="rud-page-head">
     <div>
       <h2 class="rud-title">Reservation details</h2>
@@ -12707,6 +12807,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     </div>
   </header>
   ${savedNotice}
+  ${checkoutSuccessNotice}
   ${linkedRoomsBanner}
   <div id="folio-toast" class="rud-toast" role="status" aria-live="polite"></div>
 
@@ -12720,6 +12821,11 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <input type="hidden" name="date" value="${dateKey}" />
         <button type="submit" class="btn-link">Send invoice via WhatsApp</button>
       </form>
+      ${
+        canOfferCheckoutButton
+          ? `<button type="button" class="btn-link" id="rud-open-checkout" style="font-weight:700">Checkout guest</button>`
+          : ""
+      }
       ${
         editMode
           ? `<a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/details?date=${dateKey}">Cancel edit</a>`
@@ -12736,7 +12842,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   <div class="rud-layout">
     <div class="rud-main">
       <div class="rud-card-grid">
-        <article class="rud-card rud-card-stay">
+        <article class="rud-card rud-card-stay${stayCardHighlightClass}" ${booking && highlightBookingId === booking.id ? 'data-highlight-booking="1"' : ""}>
           <h3 class="rud-card-title">Stay summary</h3>
           <dl class="rud-dl">
             <div><dt>Unit</dt><dd>${escapeHtml(unit.name)}</dd></div>
@@ -13111,6 +13217,26 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   </div>
 </div>
 
+<div id="rud-checkout-modal" class="rud-drawer" style="display:none" role="dialog" aria-modal="true" aria-labelledby="rud-checkout-title" aria-hidden="true">
+  <div class="rud-drawer-sheet">
+    <div class="rud-drawer-head">
+      <div>
+        <p class="rud-drawer-kicker muted">Front desk</p>
+        <h3 id="rud-checkout-title" class="rud-drawer-title">Confirm guest checkout</h3>
+      </div>
+      <button type="button" class="rud-drawer-close" id="rud-checkout-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="rud-drawer-scroll">
+      <p id="rud-checkout-block-reason" class="badge alert" style="display:none;margin:0 0 10px"></p>
+      <dl class="rud-checkout-grid" id="rud-checkout-summary"></dl>
+    </div>
+    <div class="rud-checkout-actions" style="padding:12px 18px;border-top:1px solid #e2e8f0;background:#fff">
+      <button type="button" class="rud-checkout-primary" id="rud-checkout-confirm" disabled>Complete checkout</button>
+      <button type="button" class="btn-link" id="rud-checkout-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
   var unitId = ${JSON.stringify(unit.id)};
@@ -13142,8 +13268,10 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   function closeAllDrawers() {
     var ch = document.getElementById("folio-charge-modal");
     var pay = document.getElementById("folio-payment-modal");
+    var co = document.getElementById("rud-checkout-modal");
     if (ch) { ch.style.display = "none"; ch.setAttribute("aria-hidden", "true"); }
     if (pay) { pay.style.display = "none"; pay.setAttribute("aria-hidden", "true"); }
+    if (co) { co.style.display = "none"; co.setAttribute("aria-hidden", "true"); }
     openBackdrop(false);
   }
   function openChargeDrawer() {
@@ -13443,6 +13571,143 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       });
     });
   });
+
+  (function checkoutGuestUi() {
+    var elig = ${checkoutEligibilityJson};
+    var bookingCheckoutId = ${booking ? JSON.stringify(booking.id) : '""'};
+    var openBtn = document.getElementById("rud-open-checkout");
+    var modal = document.getElementById("rud-checkout-modal");
+    var summaryEl = document.getElementById("rud-checkout-summary");
+    var blockEl = document.getElementById("rud-checkout-block-reason");
+    var confirmBtn = document.getElementById("rud-checkout-confirm");
+    var cancelBtn = document.getElementById("rud-checkout-cancel");
+    var closeBtn = document.getElementById("rud-checkout-close");
+    if (!openBtn || !modal || !summaryEl || !confirmBtn) return;
+
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+    function fmtMoney(n, cur) {
+      var x = Number(n);
+      if (!isFinite(x)) x = 0;
+      return x.toFixed(3) + " " + esc(cur || currency);
+    }
+    function fmtDate(d) {
+      if (!d) return "—";
+      try {
+        var dt = new Date(d);
+        if (isNaN(dt.getTime())) return esc(String(d));
+        return esc(dt.toISOString().slice(0, 10));
+      } catch (e) {
+        return "—";
+      }
+    }
+    function renderSummary() {
+      summaryEl.innerHTML = "";
+      if (!elig || !elig.ok) {
+        if (blockEl) {
+          blockEl.style.display = "block";
+          blockEl.textContent = elig && elig.message ? elig.message : "Checkout is not available.";
+        }
+        confirmBtn.disabled = true;
+        return;
+      }
+      if (blockEl) blockEl.style.display = "none";
+      var b = elig.booking;
+      var f = elig.folio;
+      var rows = [
+        ["Guest name", esc(b.guestName)],
+        ["Room", esc(b.roomUnitName || "—")],
+        ["Reservation", esc(b.referenceDisplay)],
+        ["Check-in", fmtDate(b.checkIn)],
+        ["Check-out", fmtDate(b.checkOut)],
+        ["Total charges", fmtMoney(f.totalCharges, f.currency)],
+        ["Amount paid", fmtMoney(elig.paidAmount, f.currency)],
+        ["Outstanding", fmtMoney(f.outstandingBalance, f.currency)]
+      ];
+      rows.forEach(function (pair) {
+        var dt = document.createElement("dt");
+        dt.textContent = pair[0];
+        var dd = document.createElement("dd");
+        dd.innerHTML = pair[1];
+        summaryEl.appendChild(dt);
+        summaryEl.appendChild(dd);
+      });
+      confirmBtn.disabled = false;
+    }
+    function openModal() {
+      closeAllDrawers();
+      renderSummary();
+      modal.style.display = "block";
+      modal.setAttribute("aria-hidden", "false");
+      openBackdrop(true);
+    }
+    function closeModal() {
+      modal.style.display = "none";
+      modal.setAttribute("aria-hidden", "true");
+      openBackdrop(false);
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Complete checkout";
+    }
+    openBtn.addEventListener("click", openModal);
+    if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+    if (closeBtn) closeBtn.addEventListener("click", closeModal);
+    confirmBtn.addEventListener("click", function () {
+      if (!bookingCheckoutId || confirmBtn.disabled) return;
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = "Processing…";
+      fetch("/admin/bookings/" + encodeURIComponent(bookingCheckoutId) + "/checkout", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({})
+      })
+        .then(function (r) {
+          return r.json().then(function (j) {
+            return { ok: r.ok, j: j };
+          });
+        })
+        .then(function (x) {
+          if (x.j && x.j.ok) {
+            closeModal();
+            window.location.href =
+              "/admin/room-board/unit/" +
+              encodeURIComponent(unitId) +
+              "/details?date=" +
+              encodeURIComponent(dateKey) +
+              "&highlightBooking=" +
+              encodeURIComponent(bookingCheckoutId) +
+              "&checkoutSuccess=1";
+          } else {
+            showToast((x.j && (x.j.error || x.j.message)) || "Checkout failed.", true);
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = "Complete checkout";
+          }
+        })
+        .catch(function () {
+          showToast("Checkout request failed.", true);
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = "Complete checkout";
+        });
+    });
+    var hi = ${JSON.stringify(highlightBookingId)};
+    if (hi && bookingCheckoutId && hi === bookingCheckoutId) {
+      var stay = document.querySelector("[data-highlight-booking]");
+      if (stay && stay.scrollIntoView) stay.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  })();
+
+  try {
+    if (new URLSearchParams(window.location.search).get("checkoutSuccess") === "1") {
+      showToast("Guest checked out successfully. Room marked for housekeeping.", false);
+    }
+  } catch (e) {
+    /* ignore */
+  }
 })();
 </script>
 
@@ -21091,6 +21356,116 @@ adminRouter.get("/bookings/:id/invoice-print", requirePermission("BOOKINGS", "VI
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
   res.send(invoicePdf);
+});
+
+adminRouter.post("/bookings/:id/checkout", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
+  try {
+    const hotel = await prisma.hotel.findFirst({
+      where: { slug: activeHotelSlug() },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const bookingId = String(req.params.id ?? "").trim();
+    if (!bookingId) {
+      res.status(400).json({ ok: false, error: "Reservation reference is missing." });
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const departureDateRaw = String(body.departureDate ?? "").trim();
+    const departureTimeRaw = String(body.departureTime ?? "").trim();
+    const departureReason = String(body.departureReason ?? "").trim().slice(0, 2000);
+    const discountParsed = parseFloat(String(body.discountAmount ?? ""));
+    const discountRequested = Number.isFinite(discountParsed) && discountParsed > 0 ? discountParsed : 0;
+
+    const bookingRow = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id },
+      select: { checkOut: true }
+    });
+    if (!bookingRow) {
+      res.status(404).json({ ok: false, error: "Reservation was not found for this hotel." });
+      return;
+    }
+    const departureDate = departureDateRaw
+      ? startOfDay(parseDateInput(departureDateRaw, startOfDay(new Date())))
+      : startOfDay(bookingRow.checkOut);
+
+    const staffSession = getSession(req);
+    const executedByEmail = staffSession?.email ?? "unknown";
+
+    const result = await performGuestCheckout(prisma, {
+      hotelId: hotel.id,
+      bookingId,
+      departureDate,
+      departureTimeRaw,
+      departureReason,
+      discountRequested,
+      executedByEmail,
+      staffId: staffSession?.staffId ?? null,
+      ensureHkTask: ensureHousekeepingTaskForCleaningTx
+    });
+    if (!result.ok) {
+      res.status(400).json({ ok: false, error: result.message });
+      return;
+    }
+    await logAudit({
+      hotelId: hotel.id,
+      action: "MANUAL_FRONT_DESK_CHECK_OUT",
+      entityType: result.auditBookingId ? "Booking" : "RoomUnit",
+      entityId: result.auditBookingId ?? result.roomUnitId,
+      metadata: {
+        roomUnitId: result.roomUnitId,
+        bookingId: result.auditBookingId,
+        departureDate: result.departureDateKey,
+        departureTime: departureTimeRaw || undefined,
+        departureReason: departureReason || undefined,
+        discountRequested,
+        executedByEmail,
+        path: "booking_json_checkout"
+      }
+    });
+    if (result.hkFromCheckout.created && result.hkFromCheckout.taskId) {
+      const unitLabel = await prisma.roomUnit.findUnique({
+        where: { id: result.roomUnitId },
+        select: { name: true, roomType: { select: { name: true } } }
+      });
+      const label = unitLabel ? `${unitLabel.name} (${unitLabel.roomType.name})` : result.roomUnitId;
+      await notifyHousekeepingStaff({
+        hotelId: hotel.id,
+        type: "HK_TASK_NEW",
+        title: "Checkout — room needs cleaning",
+        body: `${label} — task created after manual check-out.`,
+        payloadJson: JSON.stringify({
+          taskId: result.hkFromCheckout.taskId,
+          roomUnitId: result.roomUnitId,
+          bookingId: result.auditBookingId
+        })
+      });
+    }
+    if (result.auditBookingId) {
+      sendInvoicePdfForBooking({
+        hotelId: hotel.id,
+        bookingId: result.auditBookingId,
+        trigger: "FRONT_DESK_CHECKOUT",
+        force: true
+      }).catch((err) =>
+        console.error(
+          `[booking-checkout] auto invoice send failed booking=${result.auditBookingId}:`,
+          err instanceof Error ? err.message : String(err)
+        )
+      );
+    }
+    res.json({
+      ok: true,
+      message: "Guest checked out successfully. Room marked for housekeeping.",
+      roomUnitId: result.roomUnitId,
+      departureDateKey: result.departureDateKey
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Checkout failed" });
+  }
 });
 
 adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
