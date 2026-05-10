@@ -116,6 +116,23 @@ import {
   listKnowledgeEntries,
   listPolicies
 } from "../core/propertyKnowledge";
+import {
+  ONBOARDING_TOTAL_STEPS,
+  STANDARD_ROOM_TYPE_PRESETS,
+  completionPercent,
+  createOnboardingDraft,
+  loadOnboardingDraftByToken,
+  markOnboardingDraftComplete,
+  progressPercent,
+  saveOnboardingDraftStep,
+  setOnboardingPlan,
+  type OnboardingDraftPayload,
+  type OnboardingDraftRecord,
+  type OnboardingFaqEntry,
+  type OnboardingMealPlanRow,
+  type OnboardingRoomTypePayload,
+  type OnboardingStaffInvite
+} from "../core/onboardingDraft";
 import { buildBookingInvoicePdf, type GuestDocumentKind } from "../core/invoicePdf";
 import { aiIntentDisplayLabel } from "../core/operationalLabels";
 import { guestChatbotResumeMessage, guestReceptionistHandoffMessage } from "../whatsapp/guestNotifications";
@@ -4650,39 +4667,98 @@ adminRouter.get("/login", async (req, res) => {
   );
 });
 
-adminRouter.get("/onboard", async (req, res) => {
-  const session = getSession(req);
-  if (session && !isPlatformAcquisitionSession(session)) {
-    res.redirect("/admin/profile");
-    return;
-  }
-  const err = typeof req.query.error === "string" ? String(req.query.error) : "";
-  const leadId = typeof req.query.leadId === "string" ? String(req.query.leadId) : "";
-  const errHtml = err ? `<p class="badge alert">${escapeHtml(err)}</p>` : "";
-  const requestedPlan = String(req.query.plan ?? "growth").trim().toLowerCase();
-  const planCode = ["starter", "growth", "pro"].includes(requestedPlan) ? requestedPlan : "growth";
-  const planFeatures = getPlanFeatures(planCode);
-  const lead = leadId
-    ? await prisma.lead.findFirst({
-        where: { id: leadId },
-        select: { id: true, hotelName: true, contactEmail: true, contactName: true, location: true }
-      })
-    : null;
-  const propertyNameVal = escapeHtml(String(req.query.propertyName ?? lead?.hotelName ?? ""));
-  const cityVal = escapeHtml(String(req.query.city ?? lead?.location ?? ""));
-  const emailVal = escapeHtml(String(req.query.email ?? lead?.contactEmail ?? ""));
-  const ownerNameVal = escapeHtml(String(req.query.ownerName ?? lead?.contactName ?? ""));
-  const planCards = (["starter", "growth", "pro"] as const)
-    .map((code) => {
-      const features = getPlanFeatures(code);
-      const active = code === planCode;
-      return `<a class="onboard-plan ${active ? "active" : ""}" href="/admin/onboard?plan=${encodeURIComponent(code)}${leadId ? `&leadId=${encodeURIComponent(leadId)}` : ""}">
-        <strong>${escapeHtml(features.label)}</strong>
-        <span>${features.maxRoomUnits} rooms · ${features.maxStaffUsers} staff · ${features.restaurantModule ? "Restaurant included" : "Basic PMS"}</span>
-      </a>`;
+// === Partner onboarding wizard (multi-step, save-and-resume from any device) ===
+
+const ONBOARDING_STEP_TITLES: Record<number, string> = {
+  1: "Property basics",
+  2: "Branding & photos",
+  3: "Rooms & units",
+  4: "Rates & seasons",
+  5: "Meal plans",
+  6: "Policies",
+  7: "Services & restaurant",
+  8: "WhatsApp knowledge bank",
+  9: "Staff invites",
+  10: "Review & create"
+};
+
+const ONBOARDING_STEP_HINTS: Record<number, string> = {
+  1: "Tell us the basics about your property — name, location, contact, and operating hours.",
+  2: "Help guests recognize your brand on the public profile and inside WhatsApp.",
+  3: "Add the room types you sell and the actual rooms / units inside each one.",
+  4: "Set base, low, and high season nightly rates per room type.",
+  5: "Choose which meal plans guests can book and how they're priced.",
+  6: "Capture the policies guests need to know — cancellation, check-in, payment, ID.",
+  7: "Tell guests about your activities, restaurant, and extra services.",
+  8: "Pre-load your WhatsApp assistant with welcome messages and FAQs.",
+  9: "Add the people who'll log in alongside you. Owner stays at step 10.",
+  10: "Review everything and create your hotel workspace."
+};
+
+const ONBOARDING_STAFF_ROLES = [
+  { value: "MANAGER", label: "Manager" },
+  { value: "FRONTDESK", label: "Front desk" },
+  { value: "HOUSEKEEPING", label: "Housekeeping" },
+  { value: "RESTAURANT", label: "Restaurant" },
+  { value: "FINANCE", label: "Finance" },
+  { value: "STAFF", label: "Staff" }
+];
+
+const ONBOARDING_HOTEL_TYPES = [
+  "Resort",
+  "Beach Resort",
+  "City Hotel",
+  "Boutique Hotel",
+  "Apartments",
+  "Villa",
+  "Chalet",
+  "Guesthouse",
+  "Hostel",
+  "Other"
+];
+
+function buildOnboardResumeUrl(token: string, step: number): string {
+  return `/admin/onboard/step/${step}?draft=${encodeURIComponent(token)}`;
+}
+
+function escapeAttr(value: unknown): string {
+  return escapeHtml(value === null || value === undefined ? "" : String(value));
+}
+
+function renderOnboardProgressBar(percent: number, currentStep: number): string {
+  const dots = Array.from({ length: ONBOARDING_TOTAL_STEPS })
+    .map((_, idx) => {
+      const n = idx + 1;
+      const cls = n < currentStep ? "done" : n === currentStep ? "current" : "future";
+      return `<span class="ob-dot ${cls}" title="${escapeHtml(ONBOARDING_STEP_TITLES[n] ?? "")}">${n}</span>`;
     })
     .join("");
-  const moduleList = [
+  return `<div class="ob-progress">
+  <div class="ob-progress-track"><div class="ob-progress-fill" style="width:${percent}%"></div></div>
+  <div class="ob-progress-meta"><strong>${percent}%</strong> complete · Step ${currentStep} of ${ONBOARDING_TOTAL_STEPS}</div>
+</div>
+<div class="ob-stepper">${dots}</div>`;
+}
+
+function renderOnboardResumePanel(
+  draft: OnboardingDraftRecord,
+  planFeatures: PlanFeatureSet,
+  request: Request
+): string {
+  const baseHost = `${request.protocol}://${request.get("host") ?? "localhost"}`;
+  const resumeUrl = `${baseHost}${buildOnboardResumeUrl(draft.token, draft.lastStep)}`;
+  const planLink = (code: string) =>
+    `<a class="ob-plan-pill ${draft.planCode === code ? "active" : ""}" href="${buildOnboardResumeUrl(draft.token, draft.lastStep)}&plan=${encodeURIComponent(code)}">${escapeHtml(getPlanFeatures(code).label)}</a>`;
+  const completedSteps = draft.payload.completedSteps ?? [];
+  const summaryItems: Array<[keyof PlanFeatureSet, string]> = [
+    ["maxProperties", "Properties"],
+    ["maxRoomUnits", "Rooms"],
+    ["maxStaffUsers", "Staff"]
+  ];
+  const summary = summaryItems
+    .map(([key, label]) => `<div><strong>${planFeatures[key]}</strong><span>${label}</span></div>`)
+    .join("");
+  const moduleRows: Array<[string, boolean]> = [
     ["Basic PMS", true],
     ["WhatsApp booking", true],
     ["Restaurant / café", planFeatures.restaurantModule],
@@ -4690,558 +4766,1189 @@ adminRouter.get("/onboard", async (req, res) => {
     ["Advanced reports", planFeatures.advancedReports],
     ["AI concierge", planFeatures.aiConcierge],
     ["Marketplace visibility", planFeatures.marketplaceVisibility]
-  ]
-    .map(([label, enabled]) => `<li class="${enabled ? "ok" : "locked"}">${enabled ? "Included" : "Locked"} — ${escapeHtml(String(label))}</li>`)
+  ];
+  const moduleHtml = moduleRows
+    .map(([label, enabled]) => `<li class="${enabled ? "ok" : "locked"}">${enabled ? "Included" : "Locked"} — ${escapeHtml(label)}</li>`)
     .join("");
-  const content = `
-<style>
-  .onboard-shell{display:grid;gap:18px}
-  .onboard-hero{position:relative;overflow:hidden;border-radius:28px;padding:34px;background:linear-gradient(135deg,#053b34,#0c7a6e 56%,#25d366 145%);color:#fff;box-shadow:0 26px 70px -18px rgba(7,68,58,.38)}
-  .onboard-hero::before{content:"";position:absolute;right:-80px;top:-80px;width:260px;height:260px;border-radius:999px;background:rgba(255,255,255,.12)}
-  .onboard-hero::after{content:"";position:absolute;right:76px;bottom:26px;width:88px;height:58px;border-radius:24px 24px 24px 8px;background:rgba(255,255,255,.13);box-shadow:-70px -26px 0 -20px rgba(255,255,255,.18),-34px 42px 0 -26px rgba(255,255,255,.16)}
-  .onboard-hero>*{position:relative;z-index:1}
-  .onboard-hero h1{margin:0 0 10px;font-size:clamp(30px,4.8vw,52px);letter-spacing:-.055em;line-height:1.02}
-  .onboard-hero p{margin:0;max-width:780px;opacity:.94;font-size:16px;line-height:1.65}
-  .onboard-progress{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:18px}
-  .onboard-progress span{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.22);padding:9px 10px;border-radius:999px;font-size:12px;font-weight:900;text-align:center;backdrop-filter:blur(8px)}
-  .onboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
-  .onboard-card{background:linear-gradient(180deg,#fff 0%,#f8fffb 100%);border:1px solid rgba(220,232,227,.92);border-radius:22px;padding:20px;box-shadow:0 16px 44px -18px rgba(15,44,38,.18)}
-  .onboard-card h3{margin:0 0 8px;letter-spacing:-.02em}
-  .onboard-card .hint{margin:-2px 0 14px;color:#64736f;font-size:13px;line-height:1.55}
-  .onboard-card label{display:grid;gap:6px;font-weight:800;color:#0b1f1c}
-  .onboard-card input,.onboard-card textarea,.onboard-card select{width:100%;padding:12px 13px;border:1px solid #d8dee6;border-radius:13px;font:inherit;background:#fff;transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}
-  .onboard-card input:focus,.onboard-card textarea:focus,.onboard-card select:focus{outline:0;border-color:#25d366;box-shadow:0 0 0 4px rgba(37,211,102,.16)}
-  .onboard-card textarea{resize:vertical}
-  .onboard-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
-  .onboard-step-title{display:flex;align-items:center;gap:10px}
-  .onboard-step-title span{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:11px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:900}
-  .onboard-plans{display:grid;gap:10px}
-  .onboard-plan{display:grid;gap:3px;text-decoration:none;color:#0b1f1c;border:1px solid #dce8e3;border-radius:16px;padding:13px;background:#f8fafc;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}
-  .onboard-plan:hover{transform:translateY(-1px);box-shadow:0 12px 28px -18px rgba(15,44,38,.28)}
-  .onboard-plan.active{border-color:#25d366;background:#ecfff5;box-shadow:0 0 0 3px rgba(37,211,102,.16)}
-  .onboard-plan span{color:#64736f;font-size:12px}
-  .onboard-modules{list-style:none;margin:0;padding:0;display:grid;gap:8px}
-  .onboard-modules li{padding:8px 10px;border-radius:12px;font-size:13px;font-weight:800}
-  .onboard-modules .ok{background:#dcfce7;color:#166534}
-  .onboard-modules .locked{background:#fff7ed;color:#9a3412}
-  .onboard-submit{border:0;border-radius:16px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:950;padding:15px 20px;cursor:pointer;box-shadow:0 16px 32px -16px rgba(37,211,102,.65);transition:transform .16s ease,box-shadow .16s ease}
-  .onboard-submit:hover{transform:translateY(-1px);box-shadow:0 20px 42px -18px rgba(37,211,102,.75)}
-  .onboard-submit:disabled{cursor:wait;opacity:.72;transform:none}
-  .onboard-side{position:sticky;top:18px}
-  .onboard-mini{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}
-  .onboard-mini div{padding:10px;border-radius:14px;background:#f8fafc;border:1px solid #e5edf0;text-align:center}
-  .onboard-mini strong{display:block;color:#064e46;font-size:18px}
-  .onboard-mini span{font-size:11px;color:#64736f;font-weight:800}
-  .onboard-security{margin-top:12px;padding:12px;border-radius:16px;background:#f8fafc;border:1px dashed #b7d7cd;color:#64736f;font-size:12.5px;line-height:1.55}
-  .onboard-login-note{display:flex;gap:10px;align-items:flex-start;margin-top:12px;padding:12px;border-radius:16px;background:#ecfff5;color:#064e46;font-weight:800;font-size:13px}
-  @media(max-width:880px){.onboard-grid{grid-template-columns:1fr}}
-</style>
-<div class="onboard-shell">
-<section class="onboard-hero">
-  <p class="badge ok" style="background:rgba(255,255,255,.18);color:#fff;border-color:rgba(255,255,255,.22)">14-day free trial · ${escapeHtml(planFeatures.label)} plan</p>
-  <h1>Set up your hotel on ChatAstay</h1>
-  <p>This is the real partner setup: create your login, property profile, rooms, policies, and WhatsApp knowledge bank. When you sign in, the PMS will already match what your subscription includes.</p>
-  <div class="onboard-progress"><span>1. Property</span><span>2. Branding</span><span>3. Rooms</span><span>4. Policies</span><span>5. Knowledge bank</span><span>6. Login</span></div>
-</section>
-${errHtml}
-<div class="onboard-grid">
-<form method="post" action="/admin/onboard" style="display:grid; gap:16px">
-  <input type="hidden" name="leadId" value="${escapeHtml(lead?.id ?? leadId)}" />
-  <input type="hidden" name="planCode" value="${escapeHtml(planCode)}" />
-  <section class="onboard-card">
-    <h3 class="onboard-step-title"><span>1</span> Subscription &amp; property</h3>
-    <p class="hint">This creates the hotel tenant and the first active property inside it.</p>
-    <div class="onboard-two">
-      <label>Hotel / property name
-        <input name="propertyName" required placeholder="Example Beach Resort" value="${propertyNameVal}" />
-      </label>
-      <label>City / destination
-        <input name="city" required placeholder="Muscat" value="${cityVal}" />
-      </label>
-      <label>Address
-        <input name="addressLine1" placeholder="Street, area, country" />
-      </label>
-      <label>Contact WhatsApp
-        <input name="whatsappPhone" placeholder="+968..." />
-      </label>
-    </div>
-  </section>
-  <section class="onboard-card">
-    <h3 class="onboard-step-title"><span>2</span> Branding &amp; public website</h3>
-    <p class="hint">These details power the public hotel page and the first WhatsApp introduction.</p>
-    <div class="onboard-two">
-      <label>Website / Instagram
-        <input name="websiteUrl" inputmode="url" placeholder="https:// or @hotel" />
-      </label>
-      <label>Cover image URL
-        <input name="coverImageUrl" inputmode="url" placeholder="https://..." />
-      </label>
-    </div>
-    <label>Property description
-      <textarea name="publicDescription" rows="4" placeholder="Describe the hotel, location, rooms, and guest experience."></textarea>
-    </label>
-    <label>Amenities (comma-separated)
-      <input name="amenities" placeholder="WiFi, Pool, Breakfast, Parking, Beach access" />
-    </label>
-  </section>
-  <section class="onboard-card">
-    <h3 class="onboard-step-title"><span>3</span> Rooms &amp; rates</h3>
-    <p class="hint">Start with one main room type. Owners can add the rest after login if the plan limit allows it.</p>
-    <div class="onboard-two">
-      <label>Main room type name
-        <input name="roomTypeName" value="Standard Room" />
-      </label>
-      <label>Rooms / units
-        <input type="number" name="units" min="1" max="${planFeatures.maxRoomUnits}" value="${Math.min(12, planFeatures.maxRoomUnits)}" required />
-      </label>
-      <label>Base nightly rate
-        <input type="number" name="baseNightlyRate" min="0" step="0.01" value="35" />
-      </label>
-      <label>Currency
-        <input name="currency" value="OMR" maxlength="8" />
-      </label>
-    </div>
-  </section>
-  <section class="onboard-card">
-    <h3 class="onboard-step-title"><span>4</span> Policies</h3>
-    <p class="hint">These become guest-facing policy cards and WhatsApp answers, not internal notes.</p>
-    <label>Cancellation / no-show policy
-      <textarea name="cancellationPolicy" rows="3" placeholder="Example: Free cancellation until 48 hours before arrival..."></textarea>
-    </label>
-    <label>Check-in / checkout policy
-      <textarea name="checkInPolicy" rows="3" placeholder="Example: Check-in from 2pm, checkout by 12pm..."></textarea>
-    </label>
-    <label>Payment / deposit policy
-      <textarea name="paymentPolicy" rows="3" placeholder="Example: Deposit required to confirm high-season bookings..."></textarea>
-    </label>
-  </section>
-  <section class="onboard-card">
-    <h3 class="onboard-step-title"><span>5</span> WhatsApp assistant knowledge bank</h3>
-    <p class="muted">This is what the guest assistant will use for FAQs, directions, policies, services, restaurant info, and preferred responses.</p>
-    <label>Knowledge bank
-      <textarea name="knowledgeBank" rows="8" placeholder="Add FAQs and answers. Example:&#10;Do you have airport pickup? | Yes, airport pickup is available with advance notice.&#10;Do you allow pets? | Pets are not allowed except service animals."></textarea>
-    </label>
-  </section>
-  <section class="onboard-card">
-    <h3 class="onboard-step-title"><span>6</span> Owner login</h3>
-    <p class="hint">This owner account is scoped only to the new hotel workspace.</p>
-    <div class="onboard-two">
-      <label>Owner full name
-        <input name="ownerName" required placeholder="Property Owner" value="${ownerNameVal}" />
-      </label>
-      <label>Login email
-        <input type="email" name="email" required placeholder="owner@property.com" value="${emailVal}" />
-      </label>
-      <label>Password
-        <input type="password" name="password" required minlength="8" placeholder="At least 8 characters" />
-      </label>
-      <label>Default language
-        <select name="defaultLanguage"><option value="en">English</option><option value="ar">Arabic</option></select>
-      </label>
-    </div>
-  </section>
-  <button class="onboard-submit" type="submit">Create my hotel workspace</button>
-</form>
-<aside class="onboard-card onboard-side">
-  <h3 style="margin-top:0">${escapeHtml(planFeatures.label)} plan preview</h3>
-  <div class="onboard-plans">${planCards}</div>
-  <div class="onboard-mini">
-    <div><strong>${planFeatures.maxProperties}</strong><span>properties</span></div>
-    <div><strong>${planFeatures.maxRoomUnits}</strong><span>rooms</span></div>
-    <div><strong>${planFeatures.maxStaffUsers}</strong><span>staff</span></div>
-  </div>
+  const expiresOn = draft.expiresAt.toISOString().slice(0, 10);
+  return `<aside class="ob-resume">
+  <h4>Plan</h4>
+  <div class="ob-plan-pills">${planLink("starter")}${planLink("growth")}${planLink("pro")}</div>
+  <div class="ob-plan-summary">${summary}</div>
   <h4>What your workspace will include</h4>
-  <ul class="onboard-modules">${moduleList}</ul>
-  <div class="onboard-login-note"><span>→</span><span>After setup, we send you to the hotel login with your new hotel already selected.</span></div>
-  <div class="onboard-security">Guest-facing pages and WhatsApp answers are created from this hotel&apos;s own data only. Other hotels cannot see or edit it.</div>
-</aside>
+  <ul class="ob-modules">${moduleHtml}</ul>
+  <h4>Save & continue any time</h4>
+  <p class="muted">Bookmark or email yourself this link. Your draft is saved automatically each step.</p>
+  <input class="ob-resume-link" type="text" readonly value="${escapeAttr(resumeUrl)}" onclick="this.select()" />
+  <p class="muted" style="margin-top:8px">${completedSteps.length}/${ONBOARDING_TOTAL_STEPS} steps saved · Draft expires ${expiresOn}</p>
+</aside>`;
+}
+
+function renderOnboardForm(
+  token: string,
+  step: number,
+  innerHtml: string,
+  opts: { saveLabel?: string; nextLabel?: string; isFinal?: boolean } = {}
+): string {
+  const saveLabel = opts.saveLabel ?? "Save & resume later";
+  const nextLabel = opts.nextLabel ?? (opts.isFinal ? "Create my hotel workspace" : "Save & continue");
+  const backHref = step > 1 ? buildOnboardResumeUrl(token, step - 1) : "/admin/onboard";
+  const action = opts.isFinal ? "/admin/onboard/finalize" : `/admin/onboard/step/${step}`;
+  return `<form method="post" action="${action}" style="display:grid;gap:14px">
+  <input type="hidden" name="draft" value="${escapeAttr(token)}" />
+  <input type="hidden" name="step" value="${step}" />
+  ${innerHtml}
+  <div class="ob-actions">
+    <a class="ob-back" href="${backHref}">${step === 1 ? "Cancel" : "Back"}</a>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      ${opts.isFinal ? "" : `<button class="ob-back" type="submit" name="action" value="save_resume">${saveLabel}</button>`}
+      <button class="ob-next" type="submit" name="action" value="continue">${nextLabel}</button>
+    </div>
+  </div>
+</form>`;
+}
+
+function renderOnboardShell(
+  request: Request,
+  draft: OnboardingDraftRecord,
+  step: number,
+  body: string,
+  notice?: string,
+  errorMessage?: string
+): string {
+  const planFeatures = getPlanFeatures(draft.planCode);
+  const percent = progressPercent(draft.lastStep);
+  const noticeHtml = notice ? `<p class="badge ok">${escapeHtml(notice)}</p>` : "";
+  const errorHtml = errorMessage ? `<p class="badge alert">${escapeHtml(errorMessage)}</p>` : "";
+  return `<style>
+  .ob-shell{display:grid;gap:18px}
+  .ob-hero{position:relative;overflow:hidden;border-radius:28px;padding:30px;background:linear-gradient(135deg,#053b34,#0c7a6e 56%,#25d366 145%);color:#fff;box-shadow:0 26px 70px -18px rgba(7,68,58,.36)}
+  .ob-hero::before{content:"";position:absolute;right:-90px;top:-80px;width:280px;height:280px;border-radius:999px;background:rgba(255,255,255,.12)}
+  .ob-hero>*{position:relative;z-index:1}
+  .ob-hero h1{margin:0 0 6px;font-size:clamp(28px,4vw,44px);letter-spacing:-.045em;line-height:1.04}
+  .ob-hero p{margin:0;max-width:780px;opacity:.94;font-size:15px;line-height:1.55}
+  .ob-progress{margin:18px 0 8px}
+  .ob-progress-track{height:10px;border-radius:999px;background:rgba(255,255,255,.18);overflow:hidden}
+  .ob-progress-fill{height:100%;background:linear-gradient(90deg,#a7f3d0,#25d366);transition:width .35s ease;border-radius:999px}
+  .ob-progress-meta{margin-top:8px;font-weight:800;font-size:13px;letter-spacing:.04em;text-transform:uppercase;opacity:.95}
+  .ob-stepper{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+  .ob-dot{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.22);font-weight:900;font-size:12px}
+  .ob-dot.done{background:#25d366;color:#063d31;border-color:#25d366}
+  .ob-dot.current{background:#fff;color:#063d31;border-color:#fff}
+  .ob-dot.future{opacity:.7}
+  .ob-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;align-items:start}
+  .ob-card{background:linear-gradient(180deg,#fff 0%,#f8fffb 100%);border:1px solid rgba(220,232,227,.92);border-radius:22px;padding:22px;box-shadow:0 16px 44px -18px rgba(15,44,38,.18)}
+  .ob-card h3{margin:0 0 6px;letter-spacing:-.02em}
+  .ob-card .hint{margin:-2px 0 14px;color:#64736f;font-size:13px;line-height:1.55}
+  .ob-card label{display:grid;gap:6px;font-weight:700;color:#0b1f1c;font-size:13.5px}
+  .ob-card input,.ob-card textarea,.ob-card select{width:100%;padding:11px 12px;border:1px solid #d8dee6;border-radius:12px;font:inherit;background:#fff;transition:border-color .16s ease,box-shadow .16s ease}
+  .ob-card input:focus,.ob-card textarea:focus,.ob-card select:focus{outline:0;border-color:#25d366;box-shadow:0 0 0 4px rgba(37,211,102,.16)}
+  .ob-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+  .ob-three{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .ob-resume{position:sticky;top:14px;background:linear-gradient(180deg,#fff 0%,#f4fbf7 100%);border:1px solid #dce8e3;border-radius:22px;padding:18px;box-shadow:0 14px 38px -18px rgba(15,44,38,.18)}
+  .ob-resume h4{margin:14px 0 6px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#475569}
+  .ob-resume h4:first-of-type{margin-top:0}
+  .ob-plan-pills{display:flex;gap:6px;flex-wrap:wrap}
+  .ob-plan-pill{padding:7px 11px;border-radius:999px;background:#f8fafc;border:1px solid #dce8e3;color:#0b1f1c;text-decoration:none;font-weight:800;font-size:12px}
+  .ob-plan-pill.active{background:#dcfce7;border-color:#25d366;color:#064e46}
+  .ob-plan-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}
+  .ob-plan-summary div{padding:9px 6px;border-radius:12px;background:#f8fafc;border:1px solid #e5edf0;text-align:center}
+  .ob-plan-summary strong{display:block;color:#064e46;font-size:18px}
+  .ob-plan-summary span{font-size:10.5px;color:#64736f;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+  .ob-modules{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+  .ob-modules li{padding:7px 10px;border-radius:10px;font-size:12.5px;font-weight:700}
+  .ob-modules .ok{background:#dcfce7;color:#166534}
+  .ob-modules .locked{background:#fff7ed;color:#9a3412}
+  .ob-resume-link{font-size:12px;background:#f8fafc;color:#0b1f1c;cursor:text}
+  .ob-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;align-items:center;margin-top:6px}
+  .ob-back{font-weight:800;color:#064e46;text-decoration:none;background:#f4fbf7;border:1px solid #dce8e3;padding:11px 16px;border-radius:14px;cursor:pointer}
+  .ob-back:hover{background:#dcfce7}
+  .ob-next{border:0;border-radius:14px;background:linear-gradient(135deg,#25d366,#7df0ad);color:#063d31;font-weight:950;padding:13px 20px;cursor:pointer;box-shadow:0 16px 32px -16px rgba(37,211,102,.65);transition:transform .16s ease,box-shadow .16s ease}
+  .ob-next:hover{transform:translateY(-1px);box-shadow:0 20px 42px -18px rgba(37,211,102,.75)}
+  .ob-row{display:grid;gap:10px;padding:14px;border:1px dashed #cbd5d2;border-radius:18px;background:#fdfffd;margin-bottom:10px}
+  .ob-row .ob-row-head{display:flex;justify-content:space-between;align-items:center}
+  .ob-row .ob-row-head strong{font-size:14px;color:#064e46}
+  .ob-add-btn{border:1px dashed #25d366;background:#ecfff5;color:#064e46;font-weight:900;padding:11px 16px;border-radius:14px;cursor:pointer}
+  .ob-remove-btn{background:transparent;border:0;color:#9a3412;font-weight:800;cursor:pointer}
+  .ob-locked{padding:18px;border:1px dashed #f59e0b;background:#fff7ed;border-radius:18px;color:#7c2d12;font-weight:700}
+  @media(max-width:880px){.ob-grid{grid-template-columns:1fr}.ob-resume{position:static}}
+</style>
+<div class="ob-shell">
+<section class="ob-hero">
+  <p class="badge ok" style="background:rgba(255,255,255,.18);color:#fff;border-color:rgba(255,255,255,.22)">14-day free trial · ${escapeHtml(planFeatures.label)} plan</p>
+  <h1>${escapeHtml(ONBOARDING_STEP_TITLES[step] ?? "Set up your hotel")}</h1>
+  <p>${escapeHtml(ONBOARDING_STEP_HINTS[step] ?? "")}</p>
+  ${renderOnboardProgressBar(percent, step)}
+</section>
+${noticeHtml}
+${errorHtml}
+<div class="ob-grid">
+${body}
+${renderOnboardResumePanel(draft, planFeatures, request)}
 </div>
-<p class="muted" style="margin-top:12px">${session ? '<a class="inline-link" href="/admin/profile">Back to profile</a>' : '<a href="/admin/login">Back to login</a>'}</p>
-<script>
+</div>`;
+}
+
+function renderOnboardStep1(draft: OnboardingDraftRecord): string {
+  const b = draft.payload.basics ?? {};
+  const hotelTypeOptions = ONBOARDING_HOTEL_TYPES.map(
+    (label) => `<option value="${escapeAttr(label)}"${b.hotelType === label ? " selected" : ""}>${escapeHtml(label)}</option>`
+  ).join("");
+  const card = `<section class="ob-card">
+    <h3>1. Property basics</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[1])}</p>
+    <div class="ob-two">
+      <label>Hotel / property name<input name="propertyName" required maxlength="120" value="${escapeAttr(b.propertyName)}" placeholder="Example Beach Resort" /></label>
+      <label>Hotel type<select name="hotelType"><option value="">Select…</option>${hotelTypeOptions}</select></label>
+      <label>Star rating (0–5)<input type="number" min="0" max="5" step="0.5" name="starRating" value="${escapeAttr(b.starRating)}" /></label>
+      <label>City / destination<input name="city" required maxlength="80" value="${escapeAttr(b.city)}" placeholder="Muscat" /></label>
+      <label>Country (ISO code)<input name="country" maxlength="2" value="${escapeAttr(b.country ?? "OM")}" /></label>
+      <label>Address<input name="addressLine1" maxlength="240" value="${escapeAttr(b.addressLine1)}" placeholder="Street, area, postal code" /></label>
+      <label>Google Maps URL<input name="googleMapsUrl" inputmode="url" value="${escapeAttr(b.googleMapsUrl)}" placeholder="https://maps.google.com/..." /></label>
+      <label>Phone<input name="phone" value="${escapeAttr(b.phone)}" placeholder="+968..." /></label>
+      <label>WhatsApp number<input name="whatsappPhone" value="${escapeAttr(b.whatsappPhone)}" placeholder="+968..." /></label>
+      <label>Contact email<input type="email" name="contactEmail" value="${escapeAttr(b.contactEmail)}" placeholder="hello@property.com" /></label>
+      <label>Website / Instagram<input name="websiteUrl" value="${escapeAttr(b.websiteUrl)}" placeholder="https:// or @hotel" /></label>
+      <label>Currency (3 letters)<input name="currency" maxlength="3" value="${escapeAttr(b.currency ?? "OMR")}" /></label>
+      <label>Timezone<input name="timezone" value="${escapeAttr(b.timezone ?? "Asia/Muscat")}" /></label>
+      <label>Check-in time<input name="checkInTime" value="${escapeAttr(b.checkInTime ?? "14:00")}" placeholder="14:00" /></label>
+      <label>Checkout time<input name="checkOutTime" value="${escapeAttr(b.checkOutTime ?? "12:00")}" placeholder="12:00" /></label>
+    </div>
+  </section>`;
+  return renderOnboardForm(draft.token, 1, card);
+}
+
+function renderOnboardStep2(draft: OnboardingDraftRecord): string {
+  const br = draft.payload.branding ?? {};
+  const photos = (br.photoUrls ?? []).join("\n");
+  const amenities = (br.amenities ?? []).join(", ");
+  const card = `<section class="ob-card">
+    <h3>2. Branding & photos</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[2])}</p>
+    <div class="ob-two">
+      <label>Logo URL<input name="logoUrl" inputmode="url" value="${escapeAttr(br.logoUrl)}" placeholder="https://..." /></label>
+      <label>Brand primary color<input type="color" name="primaryColor" value="${escapeAttr(br.primaryColor ?? "#25d366")}" /></label>
+      <label>Cover image URL<input name="coverImageUrl" inputmode="url" value="${escapeAttr(br.coverImageUrl)}" placeholder="https://..." /></label>
+    </div>
+    <label>Gallery image URLs (one per line)<textarea name="photoUrls" rows="3" placeholder="https://...">${escapeHtml(photos)}</textarea></label>
+    <label>English description<textarea name="descriptionEn" rows="3" maxlength="1800">${escapeHtml(br.descriptionEn ?? "")}</textarea></label>
+    <label>Arabic description (optional)<textarea name="descriptionAr" rows="3" maxlength="1800">${escapeHtml(br.descriptionAr ?? "")}</textarea></label>
+    <label>Amenities (comma-separated)<input name="amenities" value="${escapeAttr(amenities)}" placeholder="WiFi, Pool, Breakfast, Parking, Beach access" /></label>
+  </section>`;
+  return renderOnboardForm(draft.token, 2, card);
+}
+
+function renderOnboardRoomTypeRow(idx: number, type: OnboardingRoomTypePayload): string {
+  const presetOptions = STANDARD_ROOM_TYPE_PRESETS.map(
+    (p) => `<option value="${p.code}"${p.code === (type.presetCode ?? "STANDARD") ? " selected" : ""}>${escapeHtml(p.label)}</option>`
+  ).join("");
+  const unitsText = (type.units ?? []).map((u) => u.name).join("\n");
+  const removeBtn = idx === 0 ? "" : `<button type="button" class="ob-remove-btn" data-remove="${idx}">Remove</button>`;
+  return `<div class="ob-row" data-room-row="${idx}">
+    <div class="ob-row-head"><strong>Room type ${idx + 1}</strong>${removeBtn}</div>
+    <div class="ob-two">
+      <label>Type preset<select name="rooms[${idx}][presetCode]">${presetOptions}</select></label>
+      <label>Display name<input name="rooms[${idx}][name]" value="${escapeAttr(type.name)}" placeholder="Sea View Chalet" required /></label>
+      <label>Bed config<input name="rooms[${idx}][bedConfig]" value="${escapeAttr(type.bedConfig)}" placeholder="1 KING + 2 SINGLES" /></label>
+      <label>Capacity (total)<input type="number" min="1" max="20" name="rooms[${idx}][capacity]" value="${escapeAttr(type.capacity ?? 2)}" /></label>
+      <label>Max adults<input type="number" min="1" max="20" name="rooms[${idx}][maxAdults]" value="${escapeAttr(type.maxAdults ?? 2)}" /></label>
+      <label>Max children<input type="number" min="0" max="20" name="rooms[${idx}][maxChildren]" value="${escapeAttr(type.maxChildren ?? 0)}" /></label>
+      <label>Room size (sqm)<input type="number" min="0" step="0.5" name="rooms[${idx}][roomSizeSqm]" value="${escapeAttr(type.roomSizeSqm)}" /></label>
+      <label>Smoking allowed<select name="rooms[${idx}][smokingAllowed]"><option value="false"${!type.smokingAllowed ? " selected" : ""}>No</option><option value="true"${type.smokingAllowed ? " selected" : ""}>Yes</option></select></label>
+      <label>Base nightly rate<input type="number" min="0" step="0.01" name="rooms[${idx}][baseNightlyRate]" value="${escapeAttr(type.baseNightlyRate ?? 35)}" required /></label>
+    </div>
+    <label>Description (shown on public profile)<textarea name="rooms[${idx}][description]" rows="2">${escapeHtml(type.description ?? "")}</textarea></label>
+    <label>Room numbers / units (one per line)<textarea name="rooms[${idx}][unitsText]" rows="3" placeholder="101&#10;102&#10;103">${escapeHtml(unitsText)}</textarea></label>
+  </div>`;
+}
+
+function renderOnboardStep3(draft: OnboardingDraftRecord): string {
+  const planFeatures = getPlanFeatures(draft.planCode);
+  const types = draft.payload.rooms?.types && draft.payload.rooms.types.length > 0
+    ? draft.payload.rooms.types
+    : [{ presetCode: "STANDARD", name: "Standard Room", capacity: 2, maxAdults: 2, maxChildren: 0, baseNightlyRate: 35, units: [] }];
+  const rows = types.map((t, idx) => renderOnboardRoomTypeRow(idx, t)).join("");
+  const card = `<section class="ob-card">
+    <h3>3. Rooms & units</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[3])} Plan limit: ${planFeatures.maxRoomTypes} room types · ${planFeatures.maxRoomUnits} total rooms.</p>
+    <div id="ob-room-rows">${rows}</div>
+    <button type="button" class="ob-add-btn" id="ob-add-room">+ Add another room type</button>
+    <p class="muted">Use any of the standard names from the dropdown or rename the room to your own custom label.</p>
+  </section>`;
+  const script = `<script>
 (() => {
-  const form = document.querySelector('form[action="/admin/onboard"]');
-  if (!form) return;
-  const button = form.querySelector(".onboard-submit");
-  form.addEventListener("submit", () => {
-    if (!(button instanceof HTMLButtonElement)) return;
-    button.disabled = true;
-    button.textContent = "Creating your hotel workspace...";
+  const wrap = document.getElementById('ob-room-rows');
+  const addBtn = document.getElementById('ob-add-room');
+  const limit = ${planFeatures.maxRoomTypes};
+  function nextIndex() { return wrap.querySelectorAll('[data-room-row]').length; }
+  if (addBtn) addBtn.addEventListener('click', () => {
+    if (nextIndex() >= limit) {
+      alert('Plan limit reached. Upgrade to add more room types.');
+      return;
+    }
+    const idx = nextIndex();
+    const clone = wrap.firstElementChild.cloneNode(true);
+    clone.setAttribute('data-room-row', String(idx));
+    clone.querySelectorAll('[name]').forEach((el) => {
+      const name = el.getAttribute('name');
+      if (name) el.setAttribute('name', name.replace(/rooms\\[\\d+\\]/, 'rooms[' + idx + ']'));
+      if (el.tagName === 'INPUT' && el.type !== 'number' && el.type !== 'color') el.value = '';
+      if (el.tagName === 'TEXTAREA') el.value = '';
+    });
+    const head = clone.querySelector('.ob-row-head strong');
+    if (head) head.textContent = 'Room type ' + (idx + 1);
+    const removeWrap = clone.querySelector('.ob-row-head');
+    if (removeWrap && !removeWrap.querySelector('[data-remove]')) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ob-remove-btn';
+      btn.dataset.remove = String(idx);
+      btn.textContent = 'Remove';
+      removeWrap.appendChild(btn);
+    }
+    wrap.appendChild(clone);
+  });
+  wrap.addEventListener('click', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.dataset.remove !== undefined) {
+      const row = target.closest('[data-room-row]');
+      if (row && wrap.querySelectorAll('[data-room-row]').length > 1) row.remove();
+    }
   });
 })();
-</script>
-</div>`;
-  res.type("html").send(renderLayout(content, Boolean(session)));
-});
+</script>`;
+  return renderOnboardForm(draft.token, 3, card + script);
+}
 
-adminRouter.post("/onboard", async (req, res) => {
+function renderOnboardStep4(draft: OnboardingDraftRecord): string {
+  const types = draft.payload.rooms?.types ?? [];
+  const extraBedRate = draft.payload.rates?.extraBedRate ?? "";
+  if (types.length === 0) {
+    const empty = `<section class="ob-card"><h3>4. Rates & seasons</h3><p class="hint">Please go back to step 3 and add at least one room type before setting seasonal rates.</p></section>`;
+    return renderOnboardForm(draft.token, 4, empty);
+  }
+  const rows = types.map((t, idx) => `<div class="ob-row">
+    <div class="ob-row-head"><strong>${escapeHtml(t.name || `Room type ${idx + 1}`)}</strong></div>
+    <div class="ob-three">
+      <label>Base nightly<input type="number" min="0" step="0.01" name="rates[${idx}][base]" value="${escapeAttr(t.baseNightlyRate ?? "")}" /></label>
+      <label>Low season<input type="number" min="0" step="0.01" name="rates[${idx}][low]" value="${escapeAttr(t.lowSeasonRate ?? "")}" /></label>
+      <label>High season<input type="number" min="0" step="0.01" name="rates[${idx}][high]" value="${escapeAttr(t.highSeasonRate ?? "")}" /></label>
+    </div>
+  </div>`).join("");
+  const card = `<section class="ob-card">
+    <h3>4. Rates & seasons</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[4])}</p>
+    ${rows}
+    <label style="max-width:240px">Extra bed rate (per night)<input type="number" min="0" step="0.01" name="extraBedRate" value="${escapeAttr(extraBedRate)}" /></label>
+  </section>`;
+  return renderOnboardForm(draft.token, 4, card);
+}
+
+function renderOnboardStep5(draft: OnboardingDraftRecord): string {
+  const m = draft.payload.mealPlans ?? {};
+  const row = (key: "breakfast" | "halfBoard" | "fullBoard", label: string) => {
+    const r: OnboardingMealPlanRow = (m[key] ?? {}) as OnboardingMealPlanRow;
+    return `<div class="ob-row">
+      <div class="ob-row-head"><strong>${escapeHtml(label)}</strong></div>
+      <div class="ob-three">
+        <label>Available<select name="meal[${key}][enabled]"><option value="true"${r.enabled !== false ? " selected" : ""}>Yes</option><option value="false"${r.enabled === false ? " selected" : ""}>No</option></select></label>
+        <label>Price per person<input type="number" min="0" step="0.01" name="meal[${key}][pricePerPerson]" value="${escapeAttr(r.pricePerPerson)}" /></label>
+        <label>Price per room<input type="number" min="0" step="0.01" name="meal[${key}][pricePerRoom]" value="${escapeAttr(r.pricePerRoom)}" /></label>
+      </div>
+      <label>Service window<input name="meal[${key}][serviceWindow]" value="${escapeAttr(r.serviceWindow)}" placeholder="07:30 – 10:30" /></label>
+      <label>Notes<input name="meal[${key}][notes]" value="${escapeAttr(r.notes)}" placeholder="Buffet, fixed menu, dietary options..." /></label>
+    </div>`;
+  };
+  const card = `<section class="ob-card">
+    <h3>5. Meal plans</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[5])}</p>
+    ${row("breakfast", "Breakfast")}
+    ${row("halfBoard", "Half-board")}
+    ${row("fullBoard", "Full-board")}
+  </section>`;
+  return renderOnboardForm(draft.token, 5, card);
+}
+
+function renderOnboardStep6(draft: OnboardingDraftRecord): string {
+  const p = draft.payload.policies ?? {};
+  const ta = (key: keyof typeof p, label: string, placeholder = "") =>
+    `<label>${escapeHtml(label)}<textarea name="${String(key)}" rows="2" maxlength="1600" placeholder="${escapeAttr(placeholder)}">${escapeHtml(p[key] ?? "")}</textarea></label>`;
+  const card = `<section class="ob-card">
+    <h3>6. Policies</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[6])}</p>
+    ${ta("cancellation", "Cancellation / no-show", "Free cancellation until 48h before arrival; later cancellations charged 1 night...")}
+    ${ta("checkIn", "Check-in / checkout", "Check-in from 14:00, checkout by 12:00. Late checkout subject to availability.")}
+    ${ta("payment", "Payment / deposit", "Deposit may be requested for high-season bookings. Settled at check-out.")}
+    ${ta("child", "Child policy", "Children under 6 stay free, 6–12 pay 50%, 12+ standard rate.")}
+    ${ta("smoking", "Smoking policy", "Smoking allowed only in designated outdoor areas.")}
+    ${ta("pets", "Pet policy", "Service animals only, with prior notification.")}
+    ${ta("idRequirement", "ID requirement", "Valid passport or national ID required at check-in.")}
+  </section>`;
+  return renderOnboardForm(draft.token, 6, card);
+}
+
+function renderOnboardStep7(draft: OnboardingDraftRecord): string {
+  const planFeatures = getPlanFeatures(draft.planCode);
+  const s = draft.payload.services ?? {};
+  const restaurantBlock = planFeatures.restaurantModule
+    ? `<div class="ob-three">
+        <label>Restaurant on-site<select name="hasRestaurant"><option value="false"${!s.hasRestaurant ? " selected" : ""}>No</option><option value="true"${s.hasRestaurant ? " selected" : ""}>Yes</option></select></label>
+        <label>Coffee shop on-site<select name="hasCoffeeShop"><option value="false"${!s.hasCoffeeShop ? " selected" : ""}>No</option><option value="true"${s.hasCoffeeShop ? " selected" : ""}>Yes</option></select></label>
+        <label>Room service<select name="hasRoomService"><option value="false"${!s.hasRoomService ? " selected" : ""}>No</option><option value="true"${s.hasRoomService ? " selected" : ""}>Yes</option></select></label>
+       </div>
+       <label>Restaurant operating hours<input name="restaurantHours" value="${escapeAttr(s.restaurantHours)}" placeholder="07:00 – 23:00" /></label>`
+    : `<div class="ob-locked">Restaurant module is not in the ${escapeHtml(planFeatures.label)} plan. Upgrade to Growth or Pro to enable on-site dining workflows.</div>`;
+  const card = `<section class="ob-card">
+    <h3>7. Services & restaurant</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[7])}</p>
+    ${restaurantBlock}
+    <label>Activities (one per line)<textarea name="activities" rows="3">${escapeHtml(s.activities ?? "")}</textarea></label>
+    <label>Rentals (boats, bikes, cars…)<textarea name="rentals" rows="2">${escapeHtml(s.rentals ?? "")}</textarea></label>
+    <label>Other extra services<textarea name="extraServices" rows="2">${escapeHtml(s.extraServices ?? "")}</textarea></label>
+  </section>`;
+  return renderOnboardForm(draft.token, 7, card);
+}
+
+function renderOnboardStep8(draft: OnboardingDraftRecord): string {
+  const k = draft.payload.knowledge ?? {};
+  const faqs: OnboardingFaqEntry[] = k.faqs && k.faqs.length > 0
+    ? k.faqs
+    : [{ question: "", answer: "", locale: "en", category: "general" }];
+  const faqsRendered = faqs.map((faq, idx) => `<div class="ob-row">
+    <div class="ob-row-head"><strong>FAQ ${idx + 1}</strong>${idx === 0 ? "" : `<button type="button" class="ob-remove-btn" data-remove="${idx}">Remove</button>`}</div>
+    <div class="ob-two">
+      <label>Question<input name="faqs[${idx}][question]" value="${escapeAttr(faq.question)}" /></label>
+      <label>Locale<select name="faqs[${idx}][locale]"><option value="en"${(faq.locale ?? "en") === "en" ? " selected" : ""}>English</option><option value="ar"${faq.locale === "ar" ? " selected" : ""}>Arabic</option></select></label>
+    </div>
+    <label>Answer<textarea name="faqs[${idx}][answer]" rows="2" maxlength="2000">${escapeHtml(faq.answer ?? "")}</textarea></label>
+  </div>`).join("");
+  const card = `<section class="ob-card">
+    <h3>8. WhatsApp knowledge bank</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[8])}</p>
+    <label>Welcome message (English)<textarea name="welcomeEn" rows="3" maxlength="1000">${escapeHtml(k.welcomeEn ?? "")}</textarea></label>
+    <label>Welcome message (Arabic) — optional<textarea name="welcomeAr" rows="3" maxlength="1000">${escapeHtml(k.welcomeAr ?? "")}</textarea></label>
+    <h4 style="margin:12px 0 6px">FAQs</h4>
+    <div id="ob-faq-rows">${faqsRendered}</div>
+    <button type="button" class="ob-add-btn" id="ob-add-faq">+ Add another FAQ</button>
+  </section>`;
+  const script = `<script>
+(() => {
+  const wrap = document.getElementById('ob-faq-rows');
+  const addBtn = document.getElementById('ob-add-faq');
+  function nextIdx() { return wrap.querySelectorAll('.ob-row').length; }
+  if (addBtn) addBtn.addEventListener('click', () => {
+    const idx = nextIdx();
+    const clone = wrap.firstElementChild.cloneNode(true);
+    clone.querySelectorAll('[name]').forEach((el) => {
+      const n = el.getAttribute('name');
+      if (n) el.setAttribute('name', n.replace(/faqs\\[\\d+\\]/, 'faqs[' + idx + ']'));
+      if (el.tagName === 'INPUT') el.value = '';
+      if (el.tagName === 'TEXTAREA') el.value = '';
+    });
+    const head = clone.querySelector('.ob-row-head strong');
+    if (head) head.textContent = 'FAQ ' + (idx + 1);
+    wrap.appendChild(clone);
+  });
+  wrap.addEventListener('click', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.dataset.remove !== undefined) {
+      const row = target.closest('.ob-row');
+      if (row && wrap.querySelectorAll('.ob-row').length > 1) row.remove();
+    }
+  });
+})();
+</script>`;
+  return renderOnboardForm(draft.token, 8, card + script);
+}
+
+function renderOnboardStep9(draft: OnboardingDraftRecord): string {
+  const planFeatures = getPlanFeatures(draft.planCode);
+  const remainingSeats = Math.max(0, planFeatures.maxStaffUsers - 1);
+  if (remainingSeats <= 0) {
+    const locked = `<section class="ob-card"><h3>9. Staff invites</h3><div class="ob-locked">Your ${escapeHtml(planFeatures.label)} plan only allows the owner login during onboarding. Upgrade to invite more staff.</div></section>`;
+    return renderOnboardForm(draft.token, 9, locked);
+  }
+  const invites = draft.payload.staff?.invites && draft.payload.staff.invites.length > 0
+    ? draft.payload.staff.invites
+    : [{ fullName: "", email: "", role: "MANAGER" }];
+  const rows = invites.slice(0, remainingSeats).map((inv, idx) => `<div class="ob-row">
+    <div class="ob-row-head"><strong>Staff invite ${idx + 1}</strong>${idx === 0 ? "" : `<button type="button" class="ob-remove-btn" data-remove="${idx}">Remove</button>`}</div>
+    <div class="ob-two">
+      <label>Full name<input name="staff[${idx}][fullName]" value="${escapeAttr(inv.fullName)}" /></label>
+      <label>Login email<input type="email" name="staff[${idx}][email]" value="${escapeAttr(inv.email)}" /></label>
+    </div>
+    <label>Role<select name="staff[${idx}][role]">${ONBOARDING_STAFF_ROLES.map((r) => `<option value="${r.value}"${(inv.role || "MANAGER").toUpperCase() === r.value ? " selected" : ""}>${escapeHtml(r.label)}</option>`).join("")}</select></label>
+  </div>`).join("");
+  const card = `<section class="ob-card">
+    <h3>9. Staff invites</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[9])} You can add up to ${remainingSeats} additional staff seat${remainingSeats === 1 ? "" : "s"} on the ${escapeHtml(planFeatures.label)} plan. Leave empty to skip.</p>
+    <div id="ob-staff-rows">${rows}</div>
+    <button type="button" class="ob-add-btn" id="ob-add-staff">+ Add another staff member</button>
+  </section>`;
+  const script = `<script>
+(() => {
+  const wrap = document.getElementById('ob-staff-rows');
+  const addBtn = document.getElementById('ob-add-staff');
+  const seatLimit = ${remainingSeats};
+  function nextIdx() { return wrap.querySelectorAll('.ob-row').length; }
+  if (addBtn) addBtn.addEventListener('click', () => {
+    if (nextIdx() >= seatLimit) {
+      alert('Plan limit reached. Upgrade to add more staff.');
+      return;
+    }
+    const idx = nextIdx();
+    const clone = wrap.firstElementChild.cloneNode(true);
+    clone.querySelectorAll('[name]').forEach((el) => {
+      const n = el.getAttribute('name');
+      if (n) el.setAttribute('name', n.replace(/staff\\[\\d+\\]/, 'staff[' + idx + ']'));
+      if (el.tagName === 'INPUT') el.value = '';
+    });
+    const head = clone.querySelector('.ob-row-head strong');
+    if (head) head.textContent = 'Staff invite ' + (idx + 1);
+    wrap.appendChild(clone);
+  });
+  wrap.addEventListener('click', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.dataset.remove !== undefined) {
+      const row = target.closest('.ob-row');
+      if (row && wrap.querySelectorAll('.ob-row').length > 1) row.remove();
+    }
+  });
+})();
+</script>`;
+  return renderOnboardForm(draft.token, 9, card + script);
+}
+
+function renderOnboardStep10(draft: OnboardingDraftRecord): string {
+  const planFeatures = getPlanFeatures(draft.planCode);
+  const o = draft.payload.owner ?? {};
+  const summary: string[] = [];
+  const b = draft.payload.basics ?? {};
+  if (b.propertyName) summary.push(`<strong>Property:</strong> ${escapeHtml(b.propertyName)}${b.city ? `, ${escapeHtml(b.city)}` : ""}`);
+  const types = draft.payload.rooms?.types ?? [];
+  const totalUnits = types.reduce((sum, t) => sum + (t.units?.length ?? 0), 0);
+  summary.push(`<strong>Rooms:</strong> ${types.length} type${types.length === 1 ? "" : "s"} · ${totalUnits} total units`);
+  const mp = draft.payload.mealPlans ?? {};
+  const labelMap: Record<string, string> = { breakfast: "Breakfast", halfBoard: "Half-board", fullBoard: "Full-board" };
+  const enabledPlans = (Object.keys(labelMap) as Array<keyof typeof labelMap>)
+    .filter((k) => (mp[k as keyof typeof mp] as OnboardingMealPlanRow | undefined)?.enabled !== false)
+    .map((k) => labelMap[k])
+    .join(", ");
+  if (enabledPlans) summary.push(`<strong>Meal plans:</strong> ${escapeHtml(enabledPlans)}`);
+  const faqCount = (draft.payload.knowledge?.faqs ?? []).filter((f) => f.answer && f.answer.trim().length > 0).length;
+  if (faqCount > 0) summary.push(`<strong>WhatsApp FAQs:</strong> ${faqCount}`);
+  const inviteCount = (draft.payload.staff?.invites ?? []).filter((i) => i.email && i.email.trim().length > 0).length;
+  if (inviteCount > 0) summary.push(`<strong>Staff invites:</strong> ${inviteCount}`);
+  const summaryHtml = summary.map((line) => `<li>${line}</li>`).join("");
+  const ownerEmail = o.email ?? draft.payload.basics?.contactEmail ?? "";
+  const card = `<section class="ob-card">
+    <h3>10. Review &amp; create</h3>
+    <p class="hint">${escapeHtml(ONBOARDING_STEP_HINTS[10])} Plan: <strong>${escapeHtml(planFeatures.label)}</strong>.</p>
+    <ul style="margin:0 0 14px;padding-left:18px">${summaryHtml}</ul>
+    <h4 style="margin:0 0 8px">Owner login</h4>
+    <div class="ob-two">
+      <label>Owner full name<input name="ownerName" required value="${escapeAttr(o.fullName)}" /></label>
+      <label>Login email<input type="email" name="email" required value="${escapeAttr(ownerEmail)}" /></label>
+      <label>Password<input type="password" name="password" required minlength="8" placeholder="At least 8 characters" /></label>
+      <label>Default language<select name="defaultLanguage"><option value="en"${(o.defaultLanguage ?? "en") === "en" ? " selected" : ""}>English</option><option value="ar"${o.defaultLanguage === "ar" ? " selected" : ""}>Arabic</option></select></label>
+    </div>
+  </section>`;
+  return renderOnboardForm(draft.token, 10, card, { isFinal: true });
+}
+
+function parseOnboardStep1(body: Record<string, unknown>): OnboardingDraftPayload {
+  const get = (k: string) => String(body[k] ?? "").trim();
+  const num = (k: string) => {
+    const n = Number(body[k]);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  return {
+    basics: {
+      propertyName: get("propertyName").slice(0, 120),
+      hotelType: get("hotelType").slice(0, 60) || undefined,
+      starRating: num("starRating"),
+      city: get("city").slice(0, 80),
+      country: (get("country") || "OM").slice(0, 2).toUpperCase(),
+      addressLine1: get("addressLine1").slice(0, 240) || undefined,
+      googleMapsUrl: normalizeOnboardingUrl(body.googleMapsUrl) || undefined,
+      phone: get("phone").slice(0, 40) || undefined,
+      whatsappPhone: get("whatsappPhone").slice(0, 40) || undefined,
+      contactEmail: get("contactEmail").toLowerCase().slice(0, 120) || undefined,
+      websiteUrl: normalizeOnboardingUrl(body.websiteUrl) || undefined,
+      currency: (get("currency") || "OMR").toUpperCase().slice(0, 3),
+      timezone: get("timezone").slice(0, 64) || "Asia/Muscat",
+      checkInTime: get("checkInTime").slice(0, 5) || "14:00",
+      checkOutTime: get("checkOutTime").slice(0, 5) || "12:00"
+    }
+  };
+}
+
+function parseOnboardStep2(body: Record<string, unknown>): OnboardingDraftPayload {
+  const get = (k: string) => String(body[k] ?? "").trim();
+  const photos = String(body.photoUrls ?? "")
+    .split(/\r?\n/)
+    .map((line) => normalizeOnboardingUrl(line))
+    .filter((s) => Boolean(s))
+    .slice(0, 12);
+  return {
+    branding: {
+      logoUrl: normalizeOnboardingUrl(body.logoUrl) || undefined,
+      primaryColor: get("primaryColor").slice(0, 16) || undefined,
+      coverImageUrl: normalizeOnboardingUrl(body.coverImageUrl) || undefined,
+      photoUrls: photos,
+      descriptionEn: get("descriptionEn").slice(0, 1800) || undefined,
+      descriptionAr: get("descriptionAr").slice(0, 1800) || undefined,
+      amenities: parseOnboardingList(body.amenities)
+    }
+  };
+}
+
+function parseOnboardStep3(
+  body: Record<string, unknown>,
+  planFeatures: PlanFeatureSet
+): { patch: OnboardingDraftPayload; error?: string } {
+  const map: Record<number, OnboardingRoomTypePayload & { unitsText?: string }> = {};
+  for (const key of Object.keys(body)) {
+    const m = /^rooms\[(\d+)\]\[([a-zA-Z]+)\]$/.exec(key);
+    if (!m) continue;
+    const idx = Number(m[1]);
+    const field = m[2];
+    map[idx] = map[idx] ?? { name: "" };
+    const str = String(body[key] ?? "");
+    switch (field) {
+      case "presetCode": map[idx].presetCode = str.toUpperCase().slice(0, 16); break;
+      case "name": map[idx].name = str.trim().slice(0, 120); break;
+      case "bedConfig": map[idx].bedConfig = str.trim().slice(0, 80); break;
+      case "capacity": map[idx].capacity = Math.max(1, Math.min(20, Number(str) || 2)); break;
+      case "maxAdults": map[idx].maxAdults = Math.max(1, Math.min(20, Number(str) || 2)); break;
+      case "maxChildren": map[idx].maxChildren = Math.max(0, Math.min(20, Number(str) || 0)); break;
+      case "roomSizeSqm": {
+        const n = Number(str);
+        if (Number.isFinite(n) && n > 0) map[idx].roomSizeSqm = n;
+        break;
+      }
+      case "smokingAllowed": map[idx].smokingAllowed = str === "true"; break;
+      case "baseNightlyRate": {
+        const n = Number(str);
+        map[idx].baseNightlyRate = Number.isFinite(n) && n >= 0 ? n : 0;
+        break;
+      }
+      case "description": map[idx].description = str.trim().slice(0, 1200) || undefined; break;
+      case "unitsText": map[idx].unitsText = str; break;
+    }
+  }
+  const types: OnboardingRoomTypePayload[] = [];
+  let totalUnits = 0;
+  for (const idx of Object.keys(map).map(Number).sort((a, b) => a - b)) {
+    const t = map[idx];
+    if (!t.name) continue;
+    const units = String(t.unitsText ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 200)
+      .map((name) => ({ name: name.slice(0, 40) }));
+    delete (t as Partial<OnboardingRoomTypePayload> & { unitsText?: string }).unitsText;
+    t.units = units;
+    totalUnits += units.length;
+    types.push(t);
+  }
+  if (types.length === 0) {
+    return { patch: { rooms: { types: [] } }, error: "Please add at least one room type with a name." };
+  }
+  if (types.length > planFeatures.maxRoomTypes) {
+    return { patch: {}, error: `The ${planFeatures.label} plan supports up to ${planFeatures.maxRoomTypes} room types.` };
+  }
+  if (totalUnits > planFeatures.maxRoomUnits) {
+    return { patch: {}, error: `The ${planFeatures.label} plan supports up to ${planFeatures.maxRoomUnits} rooms across all types.` };
+  }
+  return { patch: { rooms: { types } } };
+}
+
+function parseOnboardStep4(body: Record<string, unknown>, current: OnboardingDraftPayload): OnboardingDraftPayload {
+  const types = current.rooms?.types ? current.rooms.types.map((t) => ({ ...t })) : [];
+  for (const key of Object.keys(body)) {
+    const m = /^rates\[(\d+)\]\[(base|low|high)\]$/.exec(key);
+    if (!m) continue;
+    const idx = Number(m[1]);
+    if (!types[idx]) continue;
+    const n = Number(body[key]);
+    if (!Number.isFinite(n) || n < 0) continue;
+    if (m[2] === "base") types[idx].baseNightlyRate = n;
+    if (m[2] === "low") types[idx].lowSeasonRate = n;
+    if (m[2] === "high") types[idx].highSeasonRate = n;
+  }
+  const extraBedRateRaw = Number(body.extraBedRate);
+  const extraBedRate = Number.isFinite(extraBedRateRaw) && extraBedRateRaw >= 0 ? extraBedRateRaw : undefined;
+  return {
+    rooms: { types },
+    rates: { confirmed: true, ...(extraBedRate !== undefined ? { extraBedRate } : {}) }
+  };
+}
+
+function parseOnboardStep5(body: Record<string, unknown>): OnboardingDraftPayload {
+  const buildRow = (k: "breakfast" | "halfBoard" | "fullBoard"): OnboardingMealPlanRow => {
+    const enabledRaw = String(body[`meal[${k}][enabled]`] ?? "true").trim();
+    const ppp = Number(body[`meal[${k}][pricePerPerson]`]);
+    const ppr = Number(body[`meal[${k}][pricePerRoom]`]);
+    return {
+      enabled: enabledRaw !== "false",
+      pricePerPerson: Number.isFinite(ppp) && ppp >= 0 ? ppp : null,
+      pricePerRoom: Number.isFinite(ppr) && ppr >= 0 ? ppr : null,
+      serviceWindow: String(body[`meal[${k}][serviceWindow]`] ?? "").trim().slice(0, 80),
+      notes: String(body[`meal[${k}][notes]`] ?? "").trim().slice(0, 500)
+    };
+  };
+  return {
+    mealPlans: {
+      breakfast: buildRow("breakfast"),
+      halfBoard: buildRow("halfBoard"),
+      fullBoard: buildRow("fullBoard")
+    }
+  };
+}
+
+function parseOnboardStep6(body: Record<string, unknown>): OnboardingDraftPayload {
+  const get = (k: string) => String(body[k] ?? "").trim().slice(0, 1600);
+  return {
+    policies: {
+      cancellation: get("cancellation"),
+      checkIn: get("checkIn"),
+      payment: get("payment"),
+      child: get("child"),
+      smoking: get("smoking"),
+      pets: get("pets"),
+      idRequirement: get("idRequirement")
+    }
+  };
+}
+
+function parseOnboardStep7(body: Record<string, unknown>): OnboardingDraftPayload {
+  const get = (k: string) => String(body[k] ?? "").trim();
+  return {
+    services: {
+      activities: get("activities").slice(0, 2000) || undefined,
+      rentals: get("rentals").slice(0, 1200) || undefined,
+      extraServices: get("extraServices").slice(0, 1200) || undefined,
+      hasRestaurant: get("hasRestaurant") === "true",
+      hasCoffeeShop: get("hasCoffeeShop") === "true",
+      hasRoomService: get("hasRoomService") === "true",
+      restaurantHours: get("restaurantHours").slice(0, 80) || undefined
+    }
+  };
+}
+
+function parseOnboardStep8(body: Record<string, unknown>): OnboardingDraftPayload {
+  const seen: Record<number, OnboardingFaqEntry> = {};
+  for (const key of Object.keys(body)) {
+    const m = /^faqs\[(\d+)\]\[(question|answer|locale|category)\]$/.exec(key);
+    if (!m) continue;
+    const idx = Number(m[1]);
+    seen[idx] = seen[idx] ?? { answer: "" };
+    const v = String(body[key] ?? "").trim();
+    if (m[2] === "question") seen[idx].question = v.slice(0, 240);
+    if (m[2] === "answer") seen[idx].answer = v.slice(0, 2000);
+    if (m[2] === "locale") seen[idx].locale = v === "ar" ? "ar" : "en";
+    if (m[2] === "category") seen[idx].category = v.toLowerCase().slice(0, 32);
+  }
+  const faqs: OnboardingFaqEntry[] = [];
+  for (const idx of Object.keys(seen).map(Number).sort((a, b) => a - b)) {
+    if (seen[idx].answer && seen[idx].answer.trim().length > 0) faqs.push(seen[idx]);
+  }
+  const get = (k: string) => String(body[k] ?? "").trim().slice(0, 1000);
+  return {
+    knowledge: {
+      welcomeEn: get("welcomeEn") || undefined,
+      welcomeAr: get("welcomeAr") || undefined,
+      faqs
+    }
+  };
+}
+
+function parseOnboardStep9(
+  body: Record<string, unknown>,
+  planFeatures: PlanFeatureSet
+): { patch: OnboardingDraftPayload; error?: string } {
+  const map: Record<number, OnboardingStaffInvite> = {};
+  for (const key of Object.keys(body)) {
+    const m = /^staff\[(\d+)\]\[(fullName|email|role)\]$/.exec(key);
+    if (!m) continue;
+    const idx = Number(m[1]);
+    map[idx] = map[idx] ?? { fullName: "", email: "", role: "MANAGER" };
+    const v = String(body[key] ?? "").trim();
+    if (m[2] === "fullName") map[idx].fullName = v.slice(0, 120);
+    if (m[2] === "email") map[idx].email = v.toLowerCase().slice(0, 120);
+    if (m[2] === "role") map[idx].role = v.toUpperCase().slice(0, 24) || "MANAGER";
+  }
+  const invites: OnboardingStaffInvite[] = [];
+  for (const idx of Object.keys(map).map(Number).sort((a, b) => a - b)) {
+    const inv = map[idx];
+    if (!inv.email) continue;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inv.email)) continue;
+    invites.push(inv);
+  }
+  const remainingSeats = Math.max(0, planFeatures.maxStaffUsers - 1);
+  if (invites.length > remainingSeats) {
+    return {
+      patch: {},
+      error: `The ${planFeatures.label} plan only allows ${remainingSeats} additional staff seat${remainingSeats === 1 ? "" : "s"} during onboarding.`
+    };
+  }
+  return { patch: { staff: { invites } } };
+}
+
+adminRouter.get("/onboard", async (req, res) => {
   const session = getSession(req);
-  if (session && !isPlatformAcquisitionSession(session)) {
+  if (session) {
     res.redirect("/admin/profile");
     return;
   }
-  const propertyName = String(req.body.propertyName ?? "").trim();
-  const city = String(req.body.city ?? "").trim();
-  const email = String(req.body.email ?? "").trim().toLowerCase();
-  const ownerName = String(req.body.ownerName ?? "").trim();
-  const password = String(req.body.password ?? "");
-  const requestedPlanCode = String(req.body.planCode ?? "growth").trim().toLowerCase();
-  const planCode = ["starter", "growth", "pro"].includes(requestedPlanCode) ? requestedPlanCode : "growth";
-  const addressLine1 = String(req.body.addressLine1 ?? "").trim().slice(0, 300) || null;
-  const publicDescription = String(req.body.publicDescription ?? "").trim().slice(0, 1800) || `${propertyName} in ${city}.`;
-  const coverImageUrl = normalizeOnboardingUrl(req.body.coverImageUrl) || null;
-  const websiteUrl = normalizeOnboardingUrl(req.body.websiteUrl);
-  const amenities = parseOnboardingList(req.body.amenities);
-  const amenitiesJson = JSON.stringify(amenities);
-  const roomTypeName = String(req.body.roomTypeName ?? "Standard Room").trim() || "Standard Room";
-  const baseNightlyRateRaw = Number(req.body.baseNightlyRate);
-  const baseNightlyRate = Number.isFinite(baseNightlyRateRaw) ? Math.max(0, baseNightlyRateRaw) : 35;
-  const currencyRaw = String(req.body.currency ?? "OMR").trim().toUpperCase();
-  const currency = /^[A-Z]{3}$/.test(currencyRaw) ? currencyRaw : "OMR";
-  const cancellationPolicy = String(req.body.cancellationPolicy ?? "").trim().slice(0, 1600);
-  const checkInPolicy = String(req.body.checkInPolicy ?? "").trim().slice(0, 1600);
-  const paymentPolicy = String(req.body.paymentPolicy ?? "").trim().slice(0, 1600);
-  const knowledgeBank = String(req.body.knowledgeBank ?? "").trim().slice(0, 12000);
-  const unitsRaw = parseInt(String(req.body.units ?? "12"), 10);
-  const units = Number.isFinite(unitsRaw) ? Math.max(1, Math.min(500, unitsRaw)) : 12;
-  const defaultLanguage = String(req.body.defaultLanguage ?? "en") === "ar" ? "ar" : "en";
-  const whatsappPhone = String(req.body.whatsappPhone ?? "").trim().slice(0, 40);
-  const leadId = String(req.body.leadId ?? "").trim();
-
-  const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-  if (!propertyName || !city || !emailLooksValid || !ownerName || password.length < 8) {
-    res.redirect(`/admin/onboard?plan=${encodeURIComponent(planCode)}&error=Please+complete+all+required+fields`);
-    return;
-  }
-  if (knowledgeBank.length < 20) {
-    res.redirect(
-      `/admin/onboard?plan=${encodeURIComponent(planCode)}&error=${encodeURIComponent("Please add a short WhatsApp knowledge bank so guests get property-specific answers.")}`
-    );
-    return;
-  }
-  if (units > getPlanFeatures(planCode).maxRoomUnits) {
-    res.redirect(
-      `/admin/onboard?plan=${encodeURIComponent(planCode)}&error=${encodeURIComponent(`The ${getPlanFeatures(planCode).label} plan supports up to ${getPlanFeatures(planCode).maxRoomUnits} rooms during onboarding.`)}`
-    );
-    return;
-  }
-
-  if (!session) {
-    const plan = await ensurePlanForOnboarding(planCode);
-    const features = getPlanFeatures(planCode);
-    try {
-      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxProperties", 1, "Property");
-      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxRoomTypes", 1, "Room type");
-      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxRoomUnits", units, "Room unit");
-      assertWithinLimit({ hotelId: "new", planCode, planName: features.label, features }, "maxStaffUsers", 1, "Staff user");
-    } catch (limitErr) {
-      res.redirect(`/admin/onboard?plan=${encodeURIComponent(planCode)}&error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Plan limit reached."))}`);
+  const requestedPlan = String(req.query.plan ?? "growth").trim().toLowerCase();
+  const planCode = ["starter", "growth", "pro"].includes(requestedPlan) ? requestedPlan : "growth";
+  const existingToken = String(req.query.draft ?? "").trim();
+  if (existingToken) {
+    const existing = await loadOnboardingDraftByToken(prisma, existingToken);
+    if (existing) {
+      const reqPlan = String(req.query.plan ?? "").trim().toLowerCase();
+      if (reqPlan && ["starter", "growth", "pro"].includes(reqPlan) && reqPlan !== existing.planCode) {
+        await setOnboardingPlan(prisma, existing.token, reqPlan);
+      }
+      res.redirect(buildOnboardResumeUrl(existing.token, existing.lastStep));
       return;
     }
+  }
+  const draft = await createOnboardingDraft(prisma, { planCode });
+  res.redirect(buildOnboardResumeUrl(draft.token, 1));
+});
 
-    const hotelSlug = await uniqueHotelSlug(propertyName);
-    const propertyCode = (slugifyName(propertyName).replace(/-/g, "_") || "property").toUpperCase().slice(0, 10);
-    const ownerPasswordHash = await hashSecret(password);
-    const now = new Date();
-    const created = await prisma.$transaction(async (tx) => {
-      const newHotel = await tx.hotel.create({
-        data: {
-          slug: hotelSlug,
-          legalName: propertyName,
-          displayName: propertyName,
-          city,
-          country: "OM",
-          timezone: "Asia/Muscat",
-          currency,
-          whatsappPhone: whatsappPhone || null,
-          isActive: true,
-          subscriptionPlanCode: plan.code,
-          subscriptionStatusCached: "TRIALING",
-          trialEndsAt: addDays(now, 14),
-          description: publicDescription,
-          coverImageUrl,
-          amenitiesJson
-        }
-      });
-      await tx.subscription.create({
-        data: {
-          hotelId: newHotel.id,
-          planId: plan.id,
-          status: "TRIALING",
-          startedAt: now,
-          currentPeriodStart: now,
-          currentPeriodEnd: addDays(now, 14)
-        }
-      });
-      const property = await tx.property.create({
-        data: {
-          hotelId: newHotel.id,
-          name: propertyName,
-          city,
-          addressLine1,
-          checkInTime: "14:00",
-          checkOutTime: "12:00",
-          description: publicDescription,
-          coverImageUrl,
-          amenitiesJson
-        }
-      });
+adminRouter.get("/onboard/step/:n", async (req, res) => {
+  const session = getSession(req);
+  if (session) {
+    res.redirect("/admin/profile");
+    return;
+  }
+  const stepRaw = parseInt(String(req.params.n ?? "1"), 10);
+  const step = Number.isFinite(stepRaw) && stepRaw >= 1 && stepRaw <= ONBOARDING_TOTAL_STEPS ? stepRaw : 1;
+  const token = String(req.query.draft ?? "").trim();
+  if (!token) {
+    res.redirect("/admin/onboard");
+    return;
+  }
+  const draft = await loadOnboardingDraftByToken(prisma, token);
+  if (!draft) {
+    res.redirect("/admin/onboard?error=" + encodeURIComponent("Your saved setup expired. Please start again."));
+    return;
+  }
+  const accessibleStep = Math.min(step, draft.lastStep);
+  if (accessibleStep !== step) {
+    res.redirect(buildOnboardResumeUrl(draft.token, accessibleStep));
+    return;
+  }
+  const errorMessage = typeof req.query.error === "string" ? String(req.query.error) : "";
+  const notice = typeof req.query.notice === "string" ? String(req.query.notice) : "";
+  let body = "";
+  switch (step) {
+    case 1: body = renderOnboardStep1(draft); break;
+    case 2: body = renderOnboardStep2(draft); break;
+    case 3: body = renderOnboardStep3(draft); break;
+    case 4: body = renderOnboardStep4(draft); break;
+    case 5: body = renderOnboardStep5(draft); break;
+    case 6: body = renderOnboardStep6(draft); break;
+    case 7: body = renderOnboardStep7(draft); break;
+    case 8: body = renderOnboardStep8(draft); break;
+    case 9: body = renderOnboardStep9(draft); break;
+    case 10: body = renderOnboardStep10(draft); break;
+    default: body = renderOnboardStep1(draft);
+  }
+  const html = renderOnboardShell(req, draft, step, body, notice || undefined, errorMessage || undefined);
+  res.type("html").send(renderLayout(html, false));
+});
+
+adminRouter.post("/onboard/step/:n", async (req, res) => {
+  const session = getSession(req);
+  if (session) {
+    res.redirect("/admin/profile");
+    return;
+  }
+  const stepRaw = parseInt(String(req.params.n ?? "1"), 10);
+  const step = Number.isFinite(stepRaw) && stepRaw >= 1 && stepRaw <= ONBOARDING_TOTAL_STEPS ? stepRaw : 1;
+  const token = String(req.body.draft ?? "").trim();
+  if (!token) {
+    res.redirect("/admin/onboard");
+    return;
+  }
+  const current = await loadOnboardingDraftByToken(prisma, token);
+  if (!current) {
+    res.redirect("/admin/onboard?error=" + encodeURIComponent("Your saved setup expired. Please start again."));
+    return;
+  }
+  let patch: OnboardingDraftPayload = {};
+  let error: string | undefined;
+  const planFeatures = getPlanFeatures(current.planCode);
+  switch (step) {
+    case 1: {
+      const parsed = parseOnboardStep1(req.body);
+      const b = parsed.basics ?? {};
+      if (!b.propertyName || !b.city) error = "Please fill in property name and city.";
+      patch = parsed;
+      break;
+    }
+    case 2: patch = parseOnboardStep2(req.body); break;
+    case 3: {
+      const r = parseOnboardStep3(req.body, planFeatures);
+      patch = r.patch;
+      error = r.error;
+      break;
+    }
+    case 4: patch = parseOnboardStep4(req.body, current.payload); break;
+    case 5: patch = parseOnboardStep5(req.body); break;
+    case 6: patch = parseOnboardStep6(req.body); break;
+    case 7: patch = parseOnboardStep7(req.body); break;
+    case 8: patch = parseOnboardStep8(req.body); break;
+    case 9: {
+      const r = parseOnboardStep9(req.body, planFeatures);
+      patch = r.patch;
+      error = r.error;
+      break;
+    }
+    default: patch = {};
+  }
+  if (error) {
+    res.redirect(buildOnboardResumeUrl(current.token, step) + "&error=" + encodeURIComponent(error));
+    return;
+  }
+  const updated = await saveOnboardingDraftStep(prisma, current.token, step, patch);
+  const action = String(req.body.action ?? "continue");
+  if (action === "save_resume") {
+    res.redirect(buildOnboardResumeUrl(updated.token, step) + "&notice=" + encodeURIComponent("Saved. Bookmark this page or copy the resume link in the sidebar to come back later."));
+    return;
+  }
+  const nextStep = Math.min(ONBOARDING_TOTAL_STEPS, step + 1);
+  res.redirect(buildOnboardResumeUrl(updated.token, nextStep));
+});
+
+adminRouter.post("/onboard/finalize", async (req, res) => {
+  const session = getSession(req);
+  if (session) {
+    res.redirect("/admin/profile");
+    return;
+  }
+  const token = String(req.body.draft ?? "").trim();
+  if (!token) {
+    res.redirect("/admin/onboard");
+    return;
+  }
+  const draft = await loadOnboardingDraftByToken(prisma, token);
+  if (!draft) {
+    res.redirect("/admin/onboard?error=" + encodeURIComponent("Your saved setup expired. Please start again."));
+    return;
+  }
+  const ownerName = String(req.body.ownerName ?? "").trim().slice(0, 120);
+  const email = String(req.body.email ?? "").trim().toLowerCase().slice(0, 120);
+  const password = String(req.body.password ?? "");
+  const defaultLanguage = String(req.body.defaultLanguage ?? "en") === "ar" ? "ar" : "en";
+  const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  if (!ownerName || !emailLooksValid || password.length < 8) {
+    res.redirect(buildOnboardResumeUrl(draft.token, 10) + "&error=" + encodeURIComponent("Please fill in owner name, a valid email, and a password of at least 8 characters."));
+    return;
+  }
+  await saveOnboardingDraftStep(prisma, draft.token, 10, {
+    owner: { fullName: ownerName, email, password, defaultLanguage }
+  });
+  const refreshed = await loadOnboardingDraftByToken(prisma, draft.token);
+  if (!refreshed) {
+    res.redirect("/admin/onboard?error=" + encodeURIComponent("Your saved setup expired. Please start again."));
+    return;
+  }
+  const planFeatures = getPlanFeatures(refreshed.planCode);
+  const basics = refreshed.payload.basics ?? {};
+  const branding = refreshed.payload.branding ?? {};
+  const rooms = refreshed.payload.rooms?.types ?? [];
+  const totalUnits = rooms.reduce((sum, t) => sum + (t.units?.length ?? 0), 0);
+  if (!basics.propertyName || !basics.city) {
+    res.redirect(buildOnboardResumeUrl(draft.token, 1) + "&error=" + encodeURIComponent("Property basics are missing. Please complete step 1."));
+    return;
+  }
+  if (rooms.length === 0 || totalUnits === 0) {
+    res.redirect(buildOnboardResumeUrl(draft.token, 3) + "&error=" + encodeURIComponent("Please add at least one room type with at least one room unit before finishing."));
+    return;
+  }
+  const knowledgeFaqs = (refreshed.payload.knowledge?.faqs ?? []).filter((f) => f.answer && f.answer.trim().length > 0);
+  if (!refreshed.payload.knowledge?.welcomeEn && knowledgeFaqs.length === 0) {
+    res.redirect(buildOnboardResumeUrl(draft.token, 8) + "&error=" + encodeURIComponent("Please add a welcome message or at least one FAQ for the WhatsApp assistant."));
+    return;
+  }
+  const existingByEmail = await prisma.hotelUser.findFirst({ where: { email } });
+  if (existingByEmail) {
+    res.redirect(buildOnboardResumeUrl(draft.token, 10) + "&error=" + encodeURIComponent("An account with this email already exists. Please use a different email or sign in."));
+    return;
+  }
+  const plan = await ensurePlanForOnboarding(refreshed.planCode);
+  const hotelSlug = await uniqueHotelSlug(basics.propertyName);
+  const propertyCode = (slugifyName(basics.propertyName).replace(/-/g, "_") || "property").toUpperCase().slice(0, 10);
+  const ownerPasswordHash = await hashSecret(password);
+  const now = new Date();
+  const created = await prisma.$transaction(async (tx) => {
+    const newHotel = await tx.hotel.create({
+      data: {
+        slug: hotelSlug,
+        legalName: basics.propertyName!,
+        displayName: basics.propertyName!,
+        city: basics.city ?? null,
+        country: (basics.country ?? "OM").slice(0, 2).toUpperCase(),
+        timezone: basics.timezone ?? "Asia/Muscat",
+        currency: (basics.currency ?? "OMR").toUpperCase().slice(0, 3),
+        whatsappPhone: basics.whatsappPhone ?? null,
+        isActive: true,
+        subscriptionPlanCode: plan.code,
+        subscriptionStatusCached: "TRIALING",
+        trialEndsAt: addDays(now, 14),
+        description: branding.descriptionEn ?? `${basics.propertyName} in ${basics.city ?? ""}.`,
+        coverImageUrl: branding.coverImageUrl ?? null,
+        photoUrlsJson: branding.photoUrls && branding.photoUrls.length ? JSON.stringify(branding.photoUrls) : null,
+        amenitiesJson: branding.amenities && branding.amenities.length ? JSON.stringify(branding.amenities) : null,
+        starRating: typeof basics.starRating === "number" && basics.starRating >= 0 && basics.starRating <= 5 ? basics.starRating : null,
+        logoUrl: branding.logoUrl ?? null,
+        brandPrimaryColor: branding.primaryColor ?? null,
+        googleMapsUrl: basics.googleMapsUrl ?? null,
+        hotelType: basics.hotelType ?? null
+      }
+    });
+    await tx.subscription.create({
+      data: {
+        hotelId: newHotel.id,
+        planId: plan.id,
+        status: "TRIALING",
+        startedAt: now,
+        currentPeriodStart: now,
+        currentPeriodEnd: addDays(now, 14)
+      }
+    });
+    const property = await tx.property.create({
+      data: {
+        hotelId: newHotel.id,
+        name: basics.propertyName!,
+        city: basics.city ?? null,
+        addressLine1: basics.addressLine1 ?? null,
+        checkInTime: basics.checkInTime ?? "14:00",
+        checkOutTime: basics.checkOutTime ?? "12:00",
+        description: branding.descriptionEn ?? null,
+        coverImageUrl: branding.coverImageUrl ?? null,
+        photoUrlsJson: branding.photoUrls && branding.photoUrls.length ? JSON.stringify(branding.photoUrls) : null,
+        amenitiesJson: branding.amenities && branding.amenities.length ? JSON.stringify(branding.amenities) : null
+      }
+    });
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    const yearEnd = new Date(now.getFullYear(), 11, 31);
+    for (const [idx, t] of rooms.entries()) {
+      const code = `${propertyCode}_${(t.presetCode ?? "STD").replace(/[^A-Z0-9]/g, "").slice(0, 6) || "STD"}_${idx + 1}`.slice(0, 24);
       const roomType = await tx.roomType.create({
         data: {
           hotelId: newHotel.id,
           propertyId: property.id,
-          name: roomTypeName,
-          code: `${propertyCode}_STD`,
-          capacity: 2,
-          baseNightlyRate,
-          totalInventory: units,
-          isActive: true
+          name: t.name,
+          code,
+          capacity: t.capacity ?? 2,
+          baseNightlyRate: t.baseNightlyRate ?? 35,
+          totalInventory: t.units?.length ?? 0,
+          isActive: true,
+          description: t.description ?? null,
+          bedConfig: t.bedConfig ?? null,
+          maxAdults: t.maxAdults ?? 2,
+          maxChildren: t.maxChildren ?? 0,
+          roomSizeSqm: typeof t.roomSizeSqm === "number" && t.roomSizeSqm > 0 ? t.roomSizeSqm : null,
+          smokingAllowed: Boolean(t.smokingAllowed),
+          extraBedAvailable: typeof refreshed.payload.rates?.extraBedRate === "number",
+          extraBedRate: typeof refreshed.payload.rates?.extraBedRate === "number" ? refreshed.payload.rates.extraBedRate : null,
+          lowSeasonRate: typeof t.lowSeasonRate === "number" ? t.lowSeasonRate : null,
+          highSeasonRate: typeof t.highSeasonRate === "number" ? t.highSeasonRate : null
         }
       });
-      await tx.roomUnit.createMany({
-        data: Array.from({ length: units }).map((_, idx) => ({
-          hotelId: newHotel.id,
-          roomTypeId: roomType.id,
-          name: `${propertyCode}-${String(idx + 1).padStart(3, "0")}`,
-          sortOrder: idx
-        }))
-      });
-      const owner = await tx.hotelUser.create({
-        data: {
-          hotelId: newHotel.id,
-          fullName: ownerName,
-          email,
-          username: slugifyName(ownerName).slice(0, 30) || "owner",
-          passwordHash: ownerPasswordHash,
-          role: UserRole.OWNER,
-          isActive: true
-        }
-      });
-      const policyRows = [
-        cancellationPolicy ? { type: "cancellation", title: "Cancellation / no-show policy", body: cancellationPolicy } : null,
-        checkInPolicy ? { type: "check_in", title: "Check-in / checkout policy", body: checkInPolicy } : null,
-        paymentPolicy ? { type: "payment", title: "Payment / deposit policy", body: paymentPolicy } : null
-      ].filter((row): row is { type: string; title: string; body: string } => Boolean(row));
-      if (policyRows.length) {
-        await tx.propertyPolicy.createMany({
-          data: policyRows.map((row) => ({
+      if (t.units && t.units.length) {
+        await tx.roomUnit.createMany({
+          data: t.units.map((u, uIdx) => ({
             hotelId: newHotel.id,
-            propertyId: property.id,
-            type: row.type,
-            title: row.title,
-            body: row.body,
-            locale: defaultLanguage
+            roomTypeId: roomType.id,
+            name: u.name || `${propertyCode}-${idx + 1}-${String(uIdx + 1).padStart(3, "0")}`,
+            sortOrder: uIdx,
+            floor: u.floor ?? null,
+            building: u.building ?? null
           }))
         });
       }
-      const knowledgeRows = knowledgeBank
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .slice(0, 40)
-        .map((line) => {
-          const [q, ...rest] = line.split("|");
-          const answer = (rest.join("|").trim() || line).slice(0, 2400);
-          return {
-            hotelId: newHotel.id,
-            propertyId: property.id,
-            category: "general",
-            question: rest.length ? q.trim().slice(0, 500) : null,
-            answer,
-            locale: defaultLanguage,
-            source: "ONBOARDING"
-          };
-        });
-      if (knowledgeRows.length) {
-        await tx.propertyKnowledgeEntry.createMany({ data: knowledgeRows });
-      }
-      if (websiteUrl) {
-        await tx.propertyKnowledgeEntry.create({
+      if (typeof t.lowSeasonRate === "number" && t.lowSeasonRate > 0) {
+        await tx.seasonalRate.create({
           data: {
             hotelId: newHotel.id,
-            propertyId: property.id,
-            category: "contacts",
-            question: "What is the hotel website or social page?",
-            answer: websiteUrl,
-            locale: defaultLanguage,
-            source: "ONBOARDING"
+            roomTypeId: roomType.id,
+            label: "Low season",
+            startDate: yearStart,
+            endDate: yearEnd,
+            nightlyRate: t.lowSeasonRate,
+            priority: 1
           }
         });
       }
-      await tx.propertyOnboardingProgress.create({
+      if (typeof t.highSeasonRate === "number" && t.highSeasonRate > 0) {
+        await tx.seasonalRate.create({
+          data: {
+            hotelId: newHotel.id,
+            roomTypeId: roomType.id,
+            label: "High season",
+            startDate: yearStart,
+            endDate: yearEnd,
+            nightlyRate: t.highSeasonRate,
+            priority: 2
+          }
+        });
+      }
+    }
+    const mp = refreshed.payload.mealPlans ?? {};
+    const mealRows: Array<{ code: string; row?: OnboardingMealPlanRow }> = [
+      { code: "BREAKFAST", row: mp.breakfast },
+      { code: "HALF_BOARD", row: mp.halfBoard },
+      { code: "FULL_BOARD", row: mp.fullBoard }
+    ];
+    for (const r of mealRows) {
+      if (!r.row) continue;
+      await tx.mealPlanOption.create({
         data: {
           hotelId: newHotel.id,
-          currentStep: "COMPLETE",
-          completedSteps: JSON.stringify(["BASIC_INFO", "BRANDING", "ROOMS", "POLICIES", "KNOWLEDGE", "STAFF"]),
-          completedAt: now
+          propertyId: property.id,
+          code: r.code,
+          enabled: r.row.enabled !== false,
+          pricePerPerson: typeof r.row.pricePerPerson === "number" ? r.row.pricePerPerson : null,
+          pricePerRoom: typeof r.row.pricePerRoom === "number" ? r.row.pricePerRoom : null,
+          serviceWindow: r.row.serviceWindow ?? null,
+          notes: r.row.notes ?? null
         }
-      });
-      await tx.auditLog.create({
-        data: {
-          hotelId: newHotel.id,
-          actorUserId: owner.id,
-          actorEmail: email,
-          action: "PARTNER_TENANT_ONBOARDING_COMPLETED",
-          entityType: "Hotel",
-          entityId: newHotel.id,
-          metadataJson: JSON.stringify({ planCode: plan.code, propertyName, city, units })
-        }
-      });
-      return { hotelId: newHotel.id, hotelSlug: newHotel.slug, propertyId: property.id };
-    });
-
-    res.redirect(`/admin/login?onboard=1&hotel=${encodeURIComponent(created.hotelSlug)}`);
-    return;
-  }
-
-  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
-  if (!hotel) {
-    res.redirect("/admin/onboard?error=Platform+hotel+is+not+configured");
-    return;
-  }
-  const existingUser = await prisma.hotelUser.findUnique({
-    where: { hotelId_email: { hotelId: hotel.id, email } },
-    select: { id: true }
-  });
-  if (existingUser) {
-    res.redirect("/admin/onboard?error=Email+already+exists+for+this+platform");
-    return;
-  }
-
-  const planCtx = await loadHotelPlanContext(prisma, hotel.id);
-  const [currentProperties, currentRoomTypes, currentRoomUnits, currentStaff] = await Promise.all([
-    prisma.property.count({ where: { hotelId: hotel.id } }),
-    prisma.roomType.count({ where: { hotelId: hotel.id, isActive: true } }),
-    prisma.roomUnit.count({ where: { hotelId: hotel.id, isActive: true } }),
-    prisma.hotelUser.count({ where: { hotelId: hotel.id, isActive: true } })
-  ]);
-  try {
-    assertWithinLimit(planCtx, "maxProperties", currentProperties + 1, "Property");
-    assertWithinLimit(planCtx, "maxRoomTypes", currentRoomTypes + 1, "Room type");
-    assertWithinLimit(planCtx, "maxRoomUnits", currentRoomUnits + units, "Room unit");
-    assertWithinLimit(planCtx, "maxStaffUsers", currentStaff + 1, "Staff user");
-  } catch (limitErr) {
-    res.redirect(`/admin/onboard?error=${encodeURIComponent(upgradeMessage(limitErr instanceof Error ? limitErr.message : "Plan limit reached."))}`);
-    return;
-  }
-
-  const propertyCode = await uniquePropertyCode(hotel.id, propertyName);
-  const ownerPasswordHash = await hashSecret(password);
-
-  const created = await prisma.$transaction(async (tx) => {
-    const property = await tx.property.create({
-      data: {
-        hotelId: hotel.id,
-        name: propertyName,
-        city,
-        addressLine1: null,
-        checkInTime: "14:00",
-        checkOutTime: "11:00"
-      }
-    });
-    const roomType = await tx.roomType.create({
-      data: {
-        hotelId: hotel.id,
-        propertyId: property.id,
-        name: "Standard Room",
-        code: `${propertyCode}_STD`,
-        capacity: 2,
-        baseNightlyRate: 35,
-        totalInventory: units,
-        isActive: true
-      }
-    });
-    if (units > 0) {
-      await tx.roomUnit.createMany({
-        data: Array.from({ length: units }).map((_, idx) => ({
-          hotelId: hotel.id,
-          roomTypeId: roomType.id,
-          name: `${propertyCode}-${String(idx + 1).padStart(3, "0")}`,
-          sortOrder: idx
-        }))
       });
     }
     const owner = await tx.hotelUser.create({
       data: {
-        hotelId: hotel.id,
+        hotelId: newHotel.id,
         fullName: ownerName,
         email,
-        username: slugifyName(`${ownerName}-${propertyCode}`).slice(0, 30) || `owner_${propertyCode.toLowerCase()}`,
+        username: slugifyName(ownerName).slice(0, 30) || "owner",
         passwordHash: ownerPasswordHash,
         role: UserRole.OWNER,
         isActive: true
       }
     });
+    const staffInvites = refreshed.payload.staff?.invites ?? [];
+    for (const inv of staffInvites) {
+      if (!inv.email) continue;
+      const exists = await tx.hotelUser.findUnique({ where: { hotelId_email: { hotelId: newHotel.id, email: inv.email } } });
+      if (exists) continue;
+      const tempPassword = crypto.randomBytes(12).toString("hex");
+      const tempHash = await hashSecret(tempPassword);
+      const allowedRoles = Object.values(UserRole) as string[];
+      const role = (allowedRoles.includes(inv.role) ? inv.role : UserRole.MANAGER) as UserRole;
+      await tx.hotelUser.create({
+        data: {
+          hotelId: newHotel.id,
+          fullName: inv.fullName || inv.email,
+          email: inv.email,
+          username: slugifyName(inv.fullName || inv.email).slice(0, 30) || inv.email.split("@")[0].slice(0, 30),
+          passwordHash: tempHash,
+          role,
+          isActive: true
+        }
+      });
+    }
+    const policies = refreshed.payload.policies ?? {};
+    const policyRows: Array<{ type: string; title: string; body: string }> = [];
+    if (policies.cancellation) policyRows.push({ type: "cancellation", title: "Cancellation / no-show policy", body: policies.cancellation });
+    if (policies.checkIn) policyRows.push({ type: "check_in", title: "Check-in / checkout policy", body: policies.checkIn });
+    if (policies.payment) policyRows.push({ type: "payment", title: "Payment / deposit policy", body: policies.payment });
+    if (policies.child) policyRows.push({ type: "child", title: "Child policy", body: policies.child });
+    if (policies.smoking) policyRows.push({ type: "smoking", title: "Smoking policy", body: policies.smoking });
+    if (policies.pets) policyRows.push({ type: "pets", title: "Pet policy", body: policies.pets });
+    if (policies.idRequirement) policyRows.push({ type: "id", title: "ID requirement", body: policies.idRequirement });
+    if (policyRows.length) {
+      await tx.propertyPolicy.createMany({
+        data: policyRows.map((row) => ({
+          hotelId: newHotel.id,
+          propertyId: property.id,
+          type: row.type,
+          title: row.title,
+          body: row.body,
+          locale: defaultLanguage
+        }))
+      });
+    }
+    const knowledge = refreshed.payload.knowledge ?? {};
+    const knowledgeRows: Array<{ category: string; question: string | null; answer: string; locale: string }> = [];
+    if (knowledge.welcomeEn) knowledgeRows.push({ category: "general", question: "Welcome message", answer: knowledge.welcomeEn, locale: "en" });
+    if (knowledge.welcomeAr) knowledgeRows.push({ category: "general", question: "Welcome message", answer: knowledge.welcomeAr, locale: "ar" });
+    for (const faq of knowledgeFaqs) {
+      knowledgeRows.push({
+        category: (faq.category && faq.category.trim()) || "general",
+        question: faq.question?.trim() || null,
+        answer: faq.answer.trim(),
+        locale: faq.locale === "ar" ? "ar" : "en"
+      });
+    }
+    const services = refreshed.payload.services ?? {};
+    if (services.activities) knowledgeRows.push({ category: "activities", question: "What activities are available?", answer: services.activities, locale: "en" });
+    if (services.rentals) knowledgeRows.push({ category: "services", question: "What rentals are available?", answer: services.rentals, locale: "en" });
+    if (services.extraServices) knowledgeRows.push({ category: "services", question: "What extra services are available?", answer: services.extraServices, locale: "en" });
+    if (services.restaurantHours) knowledgeRows.push({ category: "restaurant", question: "Restaurant operating hours?", answer: services.restaurantHours, locale: "en" });
+    if (basics.googleMapsUrl) knowledgeRows.push({ category: "directions", question: "Where is the property located?", answer: basics.googleMapsUrl, locale: "en" });
+    if (basics.websiteUrl) knowledgeRows.push({ category: "contacts", question: "Hotel website / social", answer: basics.websiteUrl, locale: "en" });
+    if (knowledgeRows.length) {
+      await tx.propertyKnowledgeEntry.createMany({
+        data: knowledgeRows.map((row) => ({
+          hotelId: newHotel.id,
+          propertyId: property.id,
+          category: row.category,
+          question: row.question,
+          answer: row.answer,
+          locale: row.locale,
+          source: "ONBOARDING"
+        }))
+      });
+    }
+    await tx.propertyOnboardingProgress.create({
+      data: {
+        hotelId: newHotel.id,
+        currentStep: "COMPLETE",
+        completedSteps: JSON.stringify([
+          "BASIC_INFO",
+          "BRANDING",
+          "ROOMS",
+          "RATES",
+          "MEALPLANS",
+          "POLICIES",
+          "SERVICES",
+          "KNOWLEDGE",
+          "STAFF"
+        ]),
+        completedAt: now
+      }
+    });
     await tx.auditLog.create({
       data: {
-        hotelId: hotel.id,
+        hotelId: newHotel.id,
         actorUserId: owner.id,
         actorEmail: email,
-        action: "PARTNER_ONBOARDING_COMPLETED",
-        entityType: "Property",
-        entityId: property.id,
+        action: "PARTNER_TENANT_ONBOARDING_COMPLETED",
+        entityType: "Hotel",
+        entityId: newHotel.id,
         metadataJson: JSON.stringify({
-          propertyName,
-          city,
-          units,
-          defaultLanguage,
-          whatsappPhone
+          planCode: plan.code,
+          propertyName: basics.propertyName,
+          city: basics.city,
+          roomTypes: rooms.length,
+          totalUnits,
+          staffInvites: staffInvites.length
         })
       }
     });
-    await tx.propertyOnboardingProgress.upsert({
-      where: { hotelId: hotel.id },
-      update: {
-        currentStep: "KNOWLEDGE",
-        completedSteps: JSON.stringify(["BASIC_INFO", "ROOMS", "STAFF"])
-      },
-      create: {
-        hotelId: hotel.id,
-        currentStep: "KNOWLEDGE",
-        completedSteps: JSON.stringify(["BASIC_INFO", "ROOMS", "STAFF"])
-      }
-    });
-    return { propertyId: property.id };
+    return { hotelId: newHotel.id, hotelSlug: newHotel.slug };
   });
-
-  const cfg = loadPartnerSetupConfig(hotel.id);
-  cfg.hotelDescription = `${propertyName} in ${city}.`;
-  cfg.whatsappPhoneNumberId = cfg.whatsappPhoneNumberId || "";
-  if (whatsappPhone) cfg.outletRestaurantWhatsAppE164 = cfg.outletRestaurantWhatsAppE164 || whatsappPhone;
-  cfg.aiEnabled = true;
-  savePartnerSetupConfig(cfg, hotel.id);
-
-  await prisma.hotel.update({
-    where: { id: hotel.id },
-    data: { whatsappPhone: whatsappPhone || hotel.whatsappPhone, isActive: true }
-  });
-  await prisma.property.update({
-    where: { id: created.propertyId },
-    data: { city }
-  });
-  if (leadId) {
-    await prisma.lead
-      .updateMany({
-        where: { id: leadId, hotelId: hotel.id },
-        data: {
-          status: "converted",
-          convertedPropertyId: created.propertyId
-        }
-      })
-      .catch(() => undefined);
-    await trackDecisionEventSafe({
-      hotelId: hotel.id,
-      propertyId: created.propertyId,
-      eventType: "lead_converted",
-      source: "onboarding",
-      dedupeKey: `lead_converted:${leadId}:${created.propertyId}`,
-      metadata: { leadId, propertyId: created.propertyId, propertyName }
-    });
-  }
-  if (session && isPlatformAcquisitionSession(session)) {
-    res.redirect("/admin/profile?propertyOnboarded=1");
-    return;
-  }
-  res.redirect("/admin/login?onboard=1");
+  await markOnboardingDraftComplete(prisma, refreshed.token);
+  res.redirect(`/admin/login?onboard=1&hotel=${encodeURIComponent(created.hotelSlug)}`);
 });
 
 async function createPasswordResetForEmail(email: string, req: Request): Promise<void> {

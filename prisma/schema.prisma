@@ -337,12 +337,20 @@ model Hotel {
   starRating             Float?
   latitude               Float?
   longitude              Float?
+  /// Brand assets captured during partner onboarding (used by public hotel page).
+  logoUrl                String?
+  brandPrimaryColor      String?
+  googleMapsUrl          String?
+  /// Free-text hotel category (Resort, Boutique Hotel, Apartments, Guesthouse, Villa, etc.).
+  hotelType              String?
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   users                  HotelUser[]
   properties             Property[]
   roomTypes              RoomType[]
   roomUnits              RoomUnit[]
+  seasonalRates          SeasonalRate[]
+  mealPlanOptions        MealPlanOption[]
   inventories            Inventory[]
   guests                 Guest[]
   conversations          Conversation[]
@@ -543,6 +551,7 @@ model Property {
   messages         Message[]
   knowledgeEntries PropertyKnowledgeEntry[]
   propertyPolicies PropertyPolicy[]
+  mealPlanOptions  MealPlanOption[]
 
   @@unique([hotelId, name])
 }
@@ -661,6 +670,20 @@ model RoomType {
   photoUrlsJson     String?
   /// Free-text bed configuration, e.g. "1 KING" or "2 TWIN".
   bedConfig         String?
+  /// Onboarding-collected room operational fields (all nullable / defaulted; legacy rows unaffected).
+  maxAdults             Int     @default(2)
+  maxChildren           Int     @default(0)
+  roomSizeSqm           Float?
+  smokingAllowed        Boolean @default(false)
+  extraBedAvailable     Boolean @default(false)
+  extraBedRate          Float?
+  lowSeasonRate         Float?
+  highSeasonRate        Float?
+  breakfastIncludedRate Float?
+  halfBoardSurcharge    Float?
+  fullBoardSurcharge    Float?
+  /// FLEXIBLE | MODERATE | STRICT | NON_REFUNDABLE
+  cancellationRule      String?
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   inventory         Inventory[]
@@ -668,8 +691,68 @@ model RoomType {
   roomUnits         RoomUnit[]
   channelMappings   ChannelMapping[]
   folioTransactions FolioTransaction[]
+  seasonalRates     SeasonalRate[]
 
   @@unique([propertyId, code])
+}
+
+model SeasonalRate {
+  id          String   @id @default(cuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  roomTypeId  String
+  roomType    RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  /// Free-text label (e.g. "Low season", "High season", "Eid week").
+  label       String
+  startDate   DateTime
+  endDate     DateTime
+  nightlyRate Float
+  /// Higher priority wins when overlapping seasons match the same date.
+  priority    Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([hotelId, roomTypeId])
+  @@index([hotelId, startDate, endDate])
+}
+
+model MealPlanOption {
+  id             String   @id @default(cuid())
+  hotelId        String
+  hotel          Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  propertyId     String
+  property       Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  /// BREAKFAST | HALF_BOARD | FULL_BOARD (matches Booking.mealPlan strings).
+  code           String
+  enabled        Boolean  @default(true)
+  pricePerPerson Float?
+  pricePerRoom   Float?
+  /// Free-text service window, e.g. "07:30 – 10:30".
+  serviceWindow  String?
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([hotelId, propertyId, code])
+}
+
+/// Server-side draft for the partner onboarding wizard. Token is in the URL so the
+/// partner can save and continue from any device. Drafts auto-expire so we never
+/// keep stale partial signups around forever.
+model OnboardingDraft {
+  id          String    @id @default(cuid())
+  token       String    @unique
+  planCode    String    @default("growth")
+  ownerEmail  String?
+  payloadJson String    @default("{}")
+  lastStep    Int       @default(1)
+  completedAt DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([expiresAt])
 }
 
 model Inventory {
@@ -1309,6 +1392,9 @@ model RoomUnit {
   roomTypeId        String
   roomType          RoomType           @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
   name              String
+  /// Optional floor / building / area metadata captured during onboarding.
+  floor             String?
+  building          String?
   sortOrder         Int?
   isActive          Boolean            @default(true)
   notes             String?
