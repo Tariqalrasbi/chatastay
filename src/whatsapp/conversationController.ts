@@ -2177,7 +2177,15 @@ function buildWhatsAppBookingQuoteBundle(params: {
   currency: string;
   roomStaySubtotal: number | null | undefined;
   mealPlan: MealPlanCode;
-  prebookLine: string | null;
+  /**
+   * Pre-booked F&B estimate (OMR/USD/etc. — same currency as the booking).
+   * When > 0 the quote shows a separate "Pre-booked F&B" line plus an honest
+   * "Estimated total at check-out" so guests can see the all-in figure.
+   * Either pass the number directly OR a legacy pre-formatted line.
+   */
+  prebookEstimate?: number | null;
+  /** @deprecated Pass `prebookEstimate` instead. Kept for older callers. */
+  prebookLine?: string | null;
   upsellBlock: string;
 }): { quoteBody: string; stayTotal: number; roomTotal: number; mealPart: number } {
   const rooms = Math.max(1, params.rooms);
@@ -2200,6 +2208,11 @@ function buildWhatsAppBookingQuoteBundle(params: {
     rooms,
     currency: params.currency
   });
+  const hasMealPlan = mealPart > 0 && params.mealPlan !== "NONE";
+  const bookingTotalLabel = hasMealPlan ? "Booking total (room + meal plan)" : "Booking total";
+  const prebookEstimateRaw = Number(params.prebookEstimate ?? 0);
+  const prebookEstimate =
+    Number.isFinite(prebookEstimateRaw) && prebookEstimateRaw > 0 ? prebookEstimateRaw : 0;
   const lines: string[] = [
     "Here is your quote:",
     `Room type: ${params.roomTypeName}`,
@@ -2210,19 +2223,26 @@ function buildWhatsAppBookingQuoteBundle(params: {
     `Check-out: ${params.checkOut}`,
     `Rate: ${nightlyPerRoom.toFixed(2)} ${params.currency} per room per night`,
     `Room stay total: ${rooms} room(s) × ${nights} night(s) × ${nightlyPerRoom.toFixed(2)} = ${roomTotal.toFixed(2)} ${params.currency}`,
-    mealExpl
+    mealExpl,
+    `${bookingTotalLabel}: ${stayTotal.toFixed(2)} ${params.currency}`
   ];
-  if (params.prebookLine) lines.push(params.prebookLine);
-  lines.push(`Grand total (room + meal plan): ${stayTotal.toFixed(2)} ${params.currency}`);
+  if (prebookEstimate > 0) {
+    lines.push(
+      `Pre-booked F&B (folio, paid at check-out): ~${prebookEstimate.toFixed(2)} ${params.currency}`,
+      `Estimated total at check-out (booking + F&B): ~${(stayTotal + prebookEstimate).toFixed(2)} ${params.currency}`
+    );
+  } else if (params.prebookLine) {
+    // Legacy caller still passing a pre-formatted line — show it after the
+    // booking total so we don't break older code paths.
+    lines.push(params.prebookLine);
+  }
   if (params.upsellBlock.trim()) lines.push("", params.upsellBlock.trim());
   return { quoteBody: lines.join("\n"), stayTotal, roomTotal, mealPart };
 }
 
 function formatWhatsAppPrebookFolioEstimateLine(currency: string, estimatedTotal: number): string | null {
   if (!Number.isFinite(estimatedTotal) || estimatedTotal <= 0) return null;
-  return `Estimated pre-booked F&B (folio): ~${estimatedTotal.toFixed(
-    2
-  )} ${currency} — not included in booking total below`;
+  return `Pre-booked F&B (folio, paid at check-out): ~${estimatedTotal.toFixed(2)} ${currency}`;
 }
 
 async function sendFoodFlowOutbounds(params: {
@@ -3708,7 +3728,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       const rooms = persisted.roomCount ?? 1;
       const guestCount = persisted.guestCount ?? adults + children;
       const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-      const prebookLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, nextPrebook.estimatedTotal);
+      const prebookEstimate = Number(nextPrebook.estimatedTotal ?? 0);
       const { stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
         roomStaySubtotal: persisted.totalAmount,
         mealPlan: mp,
@@ -3743,7 +3763,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         currency: hotel.currency,
         roomStaySubtotal: persisted.totalAmount,
         mealPlan: mp,
-        prebookLine,
+        prebookEstimate,
         upsellBlock
       });
       try {
@@ -5122,10 +5142,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     const rooms = persisted.roomCount ?? 1;
     const guestCount = persisted.guestCount ?? adults + children;
     const mp = whatsAppMealPlanToPricingCode(persisted.bookingMealPlanCode ?? null);
-    const prebookLine = formatWhatsAppPrebookFolioEstimateLine(
-      hotel.currency,
-      persisted.pendingPrebookOrder?.estimatedTotal ?? 0
-    );
+    const prebookEstimate = Number(persisted.pendingPrebookOrder?.estimatedTotal ?? 0);
     const { stayTotal } = computeWhatsAppStayTotalsFromRoomSubtotal({
       roomStaySubtotal: persisted.totalAmount,
       mealPlan: mp,
@@ -5160,7 +5177,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       currency: hotel.currency,
       roomStaySubtotal: persisted.totalAmount,
       mealPlan: mp,
-      prebookLine,
+      prebookEstimate,
       upsellBlock
     });
     try {
@@ -6799,7 +6816,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           currency: hotel.currency,
           roomStaySubtotal: persisted.totalAmount,
           mealPlan: mp,
-          prebookLine: null,
+          prebookEstimate: 0,
           upsellBlock
         });
         try {
@@ -6982,7 +6999,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           currency: hotel.currency,
           roomStaySubtotal: persisted.totalAmount,
           mealPlan: mp,
-          prebookLine: null,
+          prebookEstimate: 0,
           upsellBlock
         });
         try {
@@ -7406,6 +7423,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     );
 
     let prebookSummaryLine: string | null = null;
+    let prebookEstimateTotal = 0;
     if (persisted.pendingPrebookOrder && persisted.pendingPrebookOrder.lines.length > 0) {
       const po = persisted.pendingPrebookOrder;
       const notes = `[WhatsApp pre-book] Requested: ${po.timeNote} · ${
@@ -7420,13 +7438,22 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           notes,
           lines: po.lines.map((l) => ({ menuItemId: l.menuItemId, qty: l.qty }))
         });
-        prebookSummaryLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, po.estimatedTotal);
+        prebookEstimateTotal = Number(po.estimatedTotal ?? 0);
+        prebookSummaryLine = formatWhatsAppPrebookFolioEstimateLine(hotel.currency, prebookEstimateTotal);
       } catch (err) {
         console.error("Pre-book F&B on confirm failed:", err instanceof Error ? err.message : String(err));
         prebookSummaryLine =
           "Pre-booked F&B could not be posted automatically — please contact reception with your order.";
       }
     }
+    const estimatedCheckoutTotal =
+      prebookEstimateTotal > 0
+        ? Number((combinedStayTotal + prebookEstimateTotal).toFixed(2))
+        : null;
+    const estimatedCheckoutTotalLine =
+      estimatedCheckoutTotal !== null
+        ? `Estimated total at check-out (booking + F&B): ~${estimatedCheckoutTotal.toFixed(2)} ${hotel.currency}`
+        : null;
 
     let paymentLink: string | null = null;
     let paymentLinkError: string | null = null;
@@ -7516,8 +7543,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             mealPart > 0
               ? `إضافة الوجبات (${mpCode}): ${booking.roomCount} غرفة × ${booking.nights} ليلة = +${mealPart.toFixed(2)} ${hotel.currency}`
               : "خطة الوجبات: بدون",
+            `إجمالي الحجز${mealPart > 0 ? " (غرفة + وجبات)" : ""}: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
             prebookSummaryLine,
-            `الإجمالي النهائي: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
+            estimatedCheckoutTotalLine,
             `رقم الحجز: ${booking.bookingId}`,
             ...multiRoomLinesAr,
             paymentLink
@@ -7542,8 +7570,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             mealPart > 0
               ? `Meal plan (${mpCode}): ${booking.roomCount} room(s) × ${booking.nights} night(s) = +${mealPart.toFixed(2)} ${hotel.currency}`
               : "Meal plan: none",
+            `Booking total${mealPart > 0 ? " (room + meal plan)" : ""}: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
             prebookSummaryLine,
-            `Booking total: ${combinedStayTotal.toFixed(2)} ${hotel.currency}`,
+            estimatedCheckoutTotalLine,
             `Booking ID: ${booking.bookingId}`,
             ...multiRoomLinesEn,
             paymentLink

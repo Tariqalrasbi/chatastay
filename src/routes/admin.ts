@@ -12649,7 +12649,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     : "No linked booking on this date. Use the form to enter guest details manually.";
 
   const cur = booking?.currency ?? hotel.currency;
-  const [folioRows, menuItemsFolio, folioSummary] = await Promise.all([
+  const [folioRows, menuItemsFolio, folioSummary, fbOrdersForLedger] = await Promise.all([
     booking
       ? prisma.folioTransaction.findMany({
           where: { hotelId: hotel.id, bookingId: booking.id },
@@ -12671,7 +12671,14 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       currency: cur,
       booking: booking ? { id: booking.id, totalAmount: booking.totalAmount, paymentStatus: booking.paymentStatus } : null,
       paymentIntentsSucceededTotal: paidAmount
-    })
+    }),
+    booking
+      ? prisma.fbOrder.findMany({
+          where: { hotelId: hotel.id, bookingId: booking.id, status: FbOrderStatus.POSTED },
+          orderBy: { createdAt: "desc" },
+          include: { lines: { orderBy: { id: "asc" } } }
+        })
+      : Promise.resolve([])
   ]);
   const effectivePaymentAmount = manualDetails?.paymentAmount ?? (booking ? folioSummary.totalPaid : null);
   const effectiveBalanceAmount = manualDetails?.balanceAmount ?? (booking ? folioSummary.outstandingBalance : null);
@@ -12753,56 +12760,64 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       </tr>`
     : "";
 
-  const folioActivityRows =
-    roomLedgerRow +
-    folioRows
-      .map((r) => {
-        const voided = Boolean(r.voidedAt);
-        const staff = r.createdBy?.fullName ?? r.createdBy?.email ?? "—";
-        const kind = rudLedgerFilter(r);
-        const lineTotal =
-          r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
-            ? r.grossAmount
-            : r.netAmount;
-        const search = [
-          r.itemName,
-          r.description,
-          r.outletCategory,
-          rudTypeLabel(r.transactionType),
-          staff,
-          r.referenceNumber,
-          r.folioPaymentMethod,
-          r.notes
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        const payMethodCell =
-          r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
-            ? escapeHtml(r.folioPaymentMethod ?? "—")
-            : "—";
-        const refNoteParts: string[] = [];
-        if (r.referenceNumber) refNoteParts.push(`Ref: ${escapeHtml(r.referenceNumber)}`);
-        if (r.notes) refNoteParts.push(`<span class="muted">${escapeHtml(r.notes.length > 100 ? `${r.notes.slice(0, 100)}…` : r.notes)}</span>`);
-        if (r.parentTransactionId && r.parentTransaction) {
-          refNoteParts.push(
-            `<span class="muted" title="Linked parent line">↩ ${escapeHtml(rudTypeLabel(r.parentTransaction.transactionType))} · ${escapeHtml(r.parentTransaction.itemName.slice(0, 40))}</span>`
-          );
-        }
-        const refNoteCell = refNoteParts.length ? refNoteParts.join("<br/>") : "—";
-        const voidBtn =
-          !voided && booking
-            ? `<button type="button" class="btn-link rud-void-btn" data-txn-id="${escapeHtml(r.id)}">Void transaction</button>`
-            : voided
-              ? `<span class="muted" title="${escapeHtml(r.voidReason ?? "")}">—</span>`
-              : "—";
-        const postHuman =
-          r.postingTarget === "GUEST_FOLIO"
-            ? "Guest folio"
-            : r.postingTarget === "ROOM_ACCOUNT"
-              ? "Room account"
-              : "Booking folio";
-        return `<tr class="rud-ledger-row${voided ? " rud-ledger-voided" : ""}" data-ledger-kind="${escapeHtml(kind)}" data-ledger-search="${escapeHtml(search)}">
+  type MergedLedgerEntry = {
+    sortDate: Date;
+    html: string;
+    recent?: { amount: number; type: string; label: string };
+  };
+
+  const folioRowEntries: MergedLedgerEntry[] = folioRows.map((r) => {
+    const voided = Boolean(r.voidedAt);
+    const staff = r.createdBy?.fullName ?? r.createdBy?.email ?? "—";
+    const kind = rudLedgerFilter(r);
+    const lineTotal =
+      r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
+        ? r.grossAmount
+        : r.netAmount;
+    const search = [
+      r.itemName,
+      r.description,
+      r.outletCategory,
+      rudTypeLabel(r.transactionType),
+      staff,
+      r.referenceNumber,
+      r.folioPaymentMethod,
+      r.notes
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const payMethodCell =
+      r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
+        ? escapeHtml(r.folioPaymentMethod ?? "—")
+        : "—";
+    const refNoteParts: string[] = [];
+    if (r.referenceNumber) refNoteParts.push(`Ref: ${escapeHtml(r.referenceNumber)}`);
+    if (r.notes) refNoteParts.push(`<span class="muted">${escapeHtml(r.notes.length > 100 ? `${r.notes.slice(0, 100)}…` : r.notes)}</span>`);
+    if (r.parentTransactionId && r.parentTransaction) {
+      refNoteParts.push(
+        `<span class="muted" title="Linked parent line">↩ ${escapeHtml(rudTypeLabel(r.parentTransaction.transactionType))} · ${escapeHtml(r.parentTransaction.itemName.slice(0, 40))}</span>`
+      );
+    }
+    const refNoteCell = refNoteParts.length ? refNoteParts.join("<br/>") : "—";
+    const voidBtn =
+      !voided && booking
+        ? `<button type="button" class="btn-link rud-void-btn" data-txn-id="${escapeHtml(r.id)}">Void transaction</button>`
+        : voided
+          ? `<span class="muted" title="${escapeHtml(r.voidReason ?? "")}">—</span>`
+          : "—";
+    const postHuman =
+      r.postingTarget === "GUEST_FOLIO"
+        ? "Guest folio"
+        : r.postingTarget === "ROOM_ACCOUNT"
+          ? "Room account"
+          : "Booking folio";
+    return {
+      sortDate: r.chargeDate,
+      recent: voided
+        ? undefined
+        : { amount: lineTotal, type: rudTypeLabel(r.transactionType), label: r.itemName },
+      html: `<tr class="rud-ledger-row${voided ? " rud-ledger-voided" : ""}" data-ledger-kind="${escapeHtml(kind)}" data-ledger-search="${escapeHtml(search)}">
         <td>${formatDateTime(r.chargeDate)}</td>
         <td><span class="rud-badge rud-badge-type">${escapeHtml(rudTypeLabel(r.transactionType))}</span></td>
         <td>${escapeHtml(outletLabel(r.outletCategory))}</td>
@@ -12816,13 +12831,71 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <td>${escapeHtml(postHuman)}</td>
         <td>${escapeHtml(staff)}</td>
         <td>${voidBtn}</td>
-      </tr>`;
-      })
-      .join("");
+      </tr>`
+    };
+  });
 
-  const recentLines = folioRows.filter((r) => !r.voidedAt).slice(0, 3);
+  // F&B menu postings (FbOrder/FbOrderLine) are NOT in FolioTransaction but
+  // ARE part of the guest's bill (Financial summary already counts them as
+  // "Menu posted"). Render them as ledger rows tagged kind="fnb" so the
+  // ledger and the Financial summary stay in sync.
+  const fbOrderRowEntries: MergedLedgerEntry[] = fbOrdersForLedger.flatMap((order) => {
+    const outletText = order.outletType === FbOutletType.COFFEE_SHOP ? "Café" : "Restaurant";
+    const modeText = order.serviceMode === FbServiceMode.ROOM_SERVICE ? "Room service" : "Dining in";
+    const orderRef = order.id.slice(-8).toUpperCase();
+    const trimmedNotes = order.notes
+      ? order.notes.length > 80
+        ? `${order.notes.slice(0, 80)}…`
+        : order.notes
+      : "";
+    return order.lines.map((ln) => {
+      const search = [
+        ln.itemNameSnap,
+        outletText,
+        modeText,
+        "F&B",
+        "Menu",
+        `order ${orderRef}`,
+        order.notes ?? ""
+      ]
+        .join(" ")
+        .toLowerCase();
+      const descCell = `<strong>${escapeHtml(ln.itemNameSnap)}</strong> <span class="muted" style="font-size:12px">· ${escapeHtml(modeText)}${
+        trimmedNotes ? ` · ${escapeHtml(trimmedNotes)}` : ""
+      }</span>`;
+      return {
+        sortDate: order.createdAt,
+        recent: { amount: ln.lineTotal, type: "F&B", label: ln.itemNameSnap },
+        html: `<tr class="rud-ledger-row" data-ledger-kind="fnb" data-ledger-search="${escapeHtml(search)}">
+        <td>${formatDateTime(order.createdAt)}</td>
+        <td><span class="rud-badge rud-badge-type">F&amp;B</span></td>
+        <td>${escapeHtml(outletText)}</td>
+        <td>${descCell}</td>
+        <td style="text-align:right">${ln.quantity}</td>
+        <td style="text-align:right">${formatMoney(ln.unitPrice, cur)}</td>
+        <td style="text-align:right;font-weight:700">${formatMoney(ln.lineTotal, cur)}</td>
+        <td><span class="rud-badge rud-badge-neutral" title="Posted to guest folio, settled at check-out">On folio</span></td>
+        <td class="muted">—</td>
+        <td style="font-size:12px;max-width:200px">Order ${escapeHtml(orderRef)}</td>
+        <td>Booking folio</td>
+        <td class="muted">—</td>
+        <td class="muted">—</td>
+      </tr>`
+      };
+    });
+  });
+
+  const mergedLedgerEntries = [...folioRowEntries, ...fbOrderRowEntries].sort(
+    (a, b) => b.sortDate.getTime() - a.sortDate.getTime()
+  );
+  const folioActivityRows = roomLedgerRow + mergedLedgerEntries.map((e) => e.html).join("");
+
+  const recentEntries = mergedLedgerEntries
+    .map((e) => e.recent)
+    .filter((r): r is { amount: number; type: string; label: string } => Boolean(r))
+    .slice(0, 3);
   const recentSnapshotHtml =
-    recentLines.length === 0 && !booking
+    recentEntries.length === 0 && !booking
       ? `<p class="muted" style="margin:0;font-size:13px">No recent folio lines yet.</p>`
       : `<ul class="rud-recent-list">
       ${
@@ -12830,14 +12903,11 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
           ? `<li><span class="rud-recent-amt">${formatMoney(booking.totalAmount, cur)}</span> <span class="rud-recent-meta">Room · Accommodation</span></li>`
           : ""
       }
-      ${recentLines
-        .map((r) => {
-          const amt =
-            r.transactionType === FolioTransactionType.PAYMENT || r.transactionType === FolioTransactionType.REFUND
-              ? r.grossAmount
-              : r.netAmount;
-          return `<li><span class="rud-recent-amt">${formatMoney(amt, cur)}</span> <span class="rud-recent-meta">${escapeHtml(rudTypeLabel(r.transactionType))} · ${escapeHtml(r.itemName)}</span></li>`;
-        })
+      ${recentEntries
+        .map(
+          (r) =>
+            `<li><span class="rud-recent-amt">${formatMoney(r.amount, cur)}</span> <span class="rud-recent-meta">${escapeHtml(r.type)} · ${escapeHtml(r.label)}</span></li>`
+        )
         .join("")}
     </ul>`;
 
@@ -12857,7 +12927,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     ? `${escapeHtml(formatDate(booking.checkIn))} → ${escapeHtml(formatDate(booking.checkOut))}`
     : "—";
   const stayNights = booking ? String(booking.nights) : "—";
-  const ledgerTbodyEmpty = !booking && folioRows.length === 0;
+  const ledgerTbodyEmpty = !booking && folioRows.length === 0 && fbOrdersForLedger.length === 0;
   const stayCardHighlightClass =
     booking && highlightBookingId && highlightBookingId === booking.id ? " rud-card-stay-highlight" : "";
   const checkoutEligibilityJson = JSON.stringify(checkoutEligibility).replace(/</g, "\\u003c");
