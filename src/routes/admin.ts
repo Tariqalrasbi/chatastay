@@ -8570,7 +8570,11 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
               ? "room-board-red"
               : card.status === "CLEANING"
                 ? "room-board-yellow"
-                : "room-board-purple";
+                : card.status === "NO_SHOW"
+                  ? "room-board-orange"
+                  : card.status === "CANCELLED"
+                    ? "room-board-slate"
+                    : "room-board-purple";
       const detailHref = card.unitId
         ? `/admin/room-board/unit/${encodeURIComponent(card.unitId)}/details?date=${formatDateForInput(dayStart)}${
             card.bookingId ? `&highlightBooking=${encodeURIComponent(card.bookingId)}` : ""
@@ -8745,7 +8749,14 @@ ${profilePropertyOnboarded}
   res.type("html").send(renderLayout(content, true));
 });
 
-type RoomBoardStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
+type RoomBoardStatus =
+  | "AVAILABLE"
+  | "RESERVED"
+  | "OCCUPIED"
+  | "CLEANING"
+  | "MAINTENANCE"
+  | "NO_SHOW"
+  | "CANCELLED";
 
 type RoomBoardCardRow = {
   unitId: string | null;
@@ -8882,7 +8893,15 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
   const inventoryByRoomType = new Map(inventoryRows.map((r) => [r.roomTypeId, r]));
 
   const cards: RoomBoardCardRow[] = [];
-  const statusCounts = { AVAILABLE: 0, RESERVED: 0, OCCUPIED: 0, CLEANING: 0, MAINTENANCE: 0 };
+  const statusCounts: Record<RoomBoardStatus, number> = {
+    AVAILABLE: 0,
+    RESERVED: 0,
+    OCCUPIED: 0,
+    CLEANING: 0,
+    MAINTENANCE: 0,
+    NO_SHOW: 0,
+    CANCELLED: 0
+  };
 
   for (const roomType of roomTypes) {
     const inv = inventoryByRoomType.get(roomType.id);
@@ -8913,12 +8932,20 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
       const firstBooking = bookingsForUnit[0] ?? null;
       const hasConfirmed = bookingsForUnit.some((b) => b.status === "CONFIRMED" || b.status === "CHECKED_IN");
       const hasPending = bookingsForUnit.some((b) => b.status === "PENDING");
+      const hasNoShow = bookingsForUnit.some((b) => b.status === "NO_SHOW");
+      const hasCancelled = bookingsForUnit.some((b) => b.status === "CANCELLED");
       const manualStatus = parseManualRoomStatusFromNotes(unit.notes);
       const activeIndex = activeUnits.findIndex((u) => u.id === unit.id);
       const beyondInventoryCap = unit.isActive && activeIndex >= 0 && activeIndex >= bookableTotal;
 
       let status: RoomBoardStatus;
-      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus });
+      const fromBooking = roomBoardStatusFromBookingOverlap({
+        hasConfirmed,
+        hasPending,
+        hasNoShow,
+        hasCancelled,
+        manualStatus
+      });
       if (fromBooking !== null) {
         status = fromBooking;
       } else if (closedOut) {
@@ -8960,8 +8987,16 @@ async function loadRoomBoardViewData(req: Request, opts?: RoomBoardLoadViewOpts)
     for (const b of unassignedForType) {
       const hasConfirmed = b.status === "CONFIRMED" || b.status === "CHECKED_IN";
       const hasPending = b.status === "PENDING";
+      const hasNoShow = b.status === "NO_SHOW";
+      const hasCancelled = b.status === "CANCELLED";
       let status: RoomBoardStatus;
-      const fromBooking = roomBoardStatusFromBookingOverlap({ hasConfirmed, hasPending, manualStatus: null });
+      const fromBooking = roomBoardStatusFromBookingOverlap({
+        hasConfirmed,
+        hasPending,
+        hasNoShow,
+        hasCancelled,
+        manualStatus: null
+      });
       if (fromBooking !== null) {
         status = fromBooking;
       } else {
@@ -9460,7 +9495,22 @@ function getRoomBoardStatusClass(status: RoomBoardStatus): string {
     case "OCCUPIED": return "room-status-occupied";
     case "CLEANING": return "room-status-cleaning";
     case "MAINTENANCE": return "room-status-maintenance";
+    case "NO_SHOW": return "room-status-no-show";
+    case "CANCELLED": return "room-status-cancelled";
     default: return "room-status-available";
+  }
+}
+
+function getRoomBoardStatusLabel(status: RoomBoardStatus): string {
+  switch (status) {
+    case "AVAILABLE": return "Available";
+    case "RESERVED": return "Reserved";
+    case "OCCUPIED": return "Occupied";
+    case "CLEANING": return "Cleaning";
+    case "MAINTENANCE": return "Maintenance";
+    case "NO_SHOW": return "No-show";
+    case "CANCELLED": return "Cancelled";
+    default: return String(status);
   }
 }
 
@@ -9516,9 +9566,22 @@ function formatRoomBoardStayDetailHtml(params: {
 function roomBoardStatusFromBookingOverlap(params: {
   hasConfirmed: boolean;
   hasPending: boolean;
+  hasNoShow?: boolean;
+  hasCancelled?: boolean;
   manualStatus: RoomBoardStatus | null;
 }): RoomBoardStatus | null {
-  if (!params.hasConfirmed && !params.hasPending) return null;
+  // Manual NO_SHOW / CANCELLED always wins so front desk can flag a unit
+  // regardless of what the booking row says (or doesn't say) on the date.
+  if (params.manualStatus === "NO_SHOW") return "NO_SHOW";
+  if (params.manualStatus === "CANCELLED") return "CANCELLED";
+  if (!params.hasConfirmed && !params.hasPending) {
+    // No active booking on the day — but if the only booking for this unit
+    // was a no-show or cancellation, surface that on the board so front desk
+    // can see why the room is sitting empty.
+    if (params.hasNoShow) return "NO_SHOW";
+    if (params.hasCancelled) return "CANCELLED";
+    return null;
+  }
   if (params.manualStatus === "OCCUPIED") return "OCCUPIED";
   if (params.manualStatus === "CLEANING" || params.manualStatus === "MAINTENANCE") {
     return params.manualStatus;
@@ -9528,12 +9591,12 @@ function roomBoardStatusFromBookingOverlap(params: {
 
 function parseManualRoomStatusFromNotes(notes: string | null | undefined): RoomBoardStatus | null {
   if (!notes) return null;
-  const match = notes.match(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/);
+  const match = notes.match(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE|NO_SHOW|CANCELLED)\]/);
   return (match?.[1] as RoomBoardStatus | undefined) ?? null;
 }
 
 function writeManualRoomStatusToNotes(notes: string | null | undefined, status: RoomBoardStatus): string {
-  const cleaned = (notes ?? "").replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/g, "").trim();
+  const cleaned = (notes ?? "").replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE|NO_SHOW|CANCELLED)\]/g, "").trim();
   return `${cleaned ? `${cleaned} ` : ""}[status:${status}]`.trim();
 }
 
@@ -9564,6 +9627,8 @@ function roomBoardStatusFormHtml(opts: {
       <option value="OCCUPIED" ${s === "OCCUPIED" ? "selected" : ""}>Occupied</option>
       <option value="CLEANING" ${s === "CLEANING" ? "selected" : ""}>Cleaning</option>
       <option value="MAINTENANCE" ${s === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+      <option value="NO_SHOW" ${s === "NO_SHOW" ? "selected" : ""}>No-show</option>
+      <option value="CANCELLED" ${s === "CANCELLED" ? "selected" : ""}>Cancelled</option>
     </select>
     <button type="submit" style="padding:${btnPad};border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700;white-space:nowrap">Set</button>
   </form>
@@ -9753,7 +9818,7 @@ adminRouter.post("/room-board/unit/:unitId/status", requirePermission("ROOMS", "
   const unitId = String(req.params.unitId ?? "");
   const statusInput = String(req.body.status ?? "").trim().toUpperCase();
   const returnTo = safeAdminReturnToPath(req.body.returnTo, "");
-  const validStatuses: RoomBoardStatus[] = ["AVAILABLE", "RESERVED", "OCCUPIED", "CLEANING", "MAINTENANCE"];
+  const validStatuses: RoomBoardStatus[] = ["AVAILABLE", "RESERVED", "OCCUPIED", "CLEANING", "MAINTENANCE", "NO_SHOW", "CANCELLED"];
   const status = validStatuses.includes(statusInput as RoomBoardStatus) ? (statusInput as RoomBoardStatus) : "AVAILABLE";
   const boardDate = parseDateInput(req.body.date, startOfDay(new Date()));
   const unit = await prisma.roomUnit.findFirst({
@@ -10352,7 +10417,7 @@ adminRouter.get("/hk/room-board", requireAuth, requireHousekeepingPortal, requir
       });
       return `<div class="room-board-card ${statusClass}" style="display:flex;flex-direction:column;min-width:0;max-width:100%;overflow-x:clip;align-items:stretch;border-radius:10px; padding:10px; border:2px solid currentColor; contain:layout;" data-room-unit-id="${escapeHtml(c.unitId!)}">
   <div style="font-weight:800; font-size:1rem;">${escapeHtml(c.unitName)}</div>
-  <div style="margin-top:6px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
+  <div style="margin-top:6px;"><span class="room-board-badge ${statusClass}">${escapeHtml(getRoomBoardStatusLabel(c.status))}</span></div>
   ${statusForm}
 </div>`;
     })
@@ -10373,6 +10438,8 @@ ${updatedNotice}
   <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Occupied</strong><div>${statusCounts.OCCUPIED}</div></div>
   <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Cleaning</strong><div>${statusCounts.CLEANING}</div></div>
   <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Maintenance</strong><div>${statusCounts.MAINTENANCE}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>No-show</strong><div>${statusCounts.NO_SHOW}</div></div>
+  <div style="border:1px solid #d8dee6;border-radius:10px;padding:8px;"><strong>Cancelled</strong><div>${statusCounts.CANCELLED}</div></div>
 </div>
 <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px; align-items:stretch;">
   ${roomCardsHtml || '<p class="muted">No rooms.</p>'}
@@ -10386,6 +10453,8 @@ ${updatedNotice}
   .room-status-occupied { background:#fee2e2; color:#991b1b; }
   .room-status-cleaning { background:#fef9c3; color:#854d0e; }
   .room-status-maintenance { background:#f3e8ff; color:#6b21a8; }
+  .room-status-no-show { background:#ffedd5; color:#9a3412; }
+  .room-status-cancelled { background:#e2e8f0; color:#334155; text-decoration:line-through; }
 </style>`;
   res.type("html").send(renderHkLayout({ title: "Room board", active: "board", content }));
 });
@@ -10464,7 +10533,7 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
         return `<div class="room-board-card ${statusClass}" style="display:flex;flex-direction:column;min-width:0;max-width:100%;overflow-x:clip;align-items:stretch;border-radius:10px; padding:8px; border:2px solid currentColor; min-height:72px; contain:layout;"${unitAttr}>
   <div style="font-weight:700; font-size:0.92rem; margin-bottom:2px;">${escapeHtml(c.unitName)}${c.isUnassignedBooking ? ' <span class="badge pending" style="font-size:10px">no unit</span>' : ""}</div>
   <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">${escapeHtml(c.name)}</div>
-  <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(c.status)}</span></div>
+  <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(getRoomBoardStatusLabel(c.status))}</span></div>
   ${c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
   ${stayDetailHtml}
   ${c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
@@ -10506,6 +10575,8 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
     <option value="OCCUPIED" ${filterStatus === "OCCUPIED" ? "selected" : ""}>Occupied</option>
     <option value="CLEANING" ${filterStatus === "CLEANING" ? "selected" : ""}>Cleaning</option>
     <option value="MAINTENANCE" ${filterStatus === "MAINTENANCE" ? "selected" : ""}>Maintenance</option>
+    <option value="NO_SHOW" ${filterStatus === "NO_SHOW" ? "selected" : ""}>No-show</option>
+    <option value="CANCELLED" ${filterStatus === "CANCELLED" ? "selected" : ""}>Cancelled</option>
   </select></label>
   <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
 </form>
@@ -10516,8 +10587,10 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
   <article class="stat" style="border-left-color:#ef4444"><h3>Occupied</h3><p>${statusCounts.OCCUPIED}</p></article>
   <article class="stat" style="border-left-color:#eab308"><h3>Cleaning</h3><p>${statusCounts.CLEANING}</p></article>
   <article class="stat" style="border-left-color:#a855f7"><h3>Maintenance</h3><p>${statusCounts.MAINTENANCE}</p></article>
+  <article class="stat" style="border-left-color:#f97316"><h3>No-show</h3><p>${statusCounts.NO_SHOW}</p></article>
+  <article class="stat" style="border-left-color:#64748b"><h3>Cancelled</h3><p>${statusCounts.CANCELLED}</p></article>
 </div>
-<p class="muted" style="margin-bottom:8px">Legend: <span class="room-board-badge room-status-available">Available</span> <span class="room-board-badge room-status-reserved">Reserved</span> <span class="room-board-badge room-status-occupied">Occupied</span> <span class="room-board-badge room-status-cleaning">Cleaning</span> <span class="room-board-badge room-status-maintenance">Maintenance</span></p>
+<p class="muted" style="margin-bottom:8px">Legend: <span class="room-board-badge room-status-available">Available</span> <span class="room-board-badge room-status-reserved">Reserved</span> <span class="room-board-badge room-status-occupied">Occupied</span> <span class="room-board-badge room-status-cleaning">Cleaning</span> <span class="room-board-badge room-status-maintenance">Maintenance</span> <span class="room-board-badge room-status-no-show">No-show</span> <span class="room-board-badge room-status-cancelled">Cancelled</span></p>
 <div class="room-board-grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:8px; align-items:stretch;">
   ${roomCardsHtml || '<p class="muted">No rooms match the filter.</p>'}
 </div>
@@ -10549,6 +10622,8 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
   .room-status-occupied { background:#fee2e2; color:#991b1b; border-color:#ef4444; }
   .room-status-cleaning { background:#fef9c3; color:#854d0e; border-color:#eab308; }
   .room-status-maintenance { background:#f3e8ff; color:#6b21a8; border-color:#a855f7; }
+  .room-status-no-show { background:#ffedd5; color:#9a3412; border-color:#f97316; }
+  .room-status-cancelled { background:#e2e8f0; color:#334155; border-color:#64748b; text-decoration:line-through; }
   @media (max-width: 900px) { .room-board-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); } }
   @media (max-width: 640px) {
     .room-board-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap:6px; }
@@ -13718,6 +13793,8 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   .room-status-occupied { background:#fee2e2; color:#991b1b; border-color:#ef4444; }
   .room-status-cleaning { background:#fef9c3; color:#854d0e; border-color:#eab308; }
   .room-status-maintenance { background:#f3e8ff; color:#6b21a8; border-color:#a855f7; }
+  .room-status-no-show { background:#ffedd5; color:#9a3412; border-color:#f97316; }
+  .room-status-cancelled { background:#e2e8f0; color:#334155; border-color:#64748b; text-decoration:line-through; }
   body.rud-drawer-open { overflow:hidden; }
   .rud-page { max-width:1280px; margin:0 auto; padding-bottom:48px; }
   .rud-page-head { margin-bottom:8px; }
@@ -16043,13 +16120,34 @@ adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async
           OR: (() => {
             const or: Prisma.BookingWhereInput[] = [];
             if (qRaw.length >= 2) {
+              // Internal CUID (legacy/admin use).
               or.push({ id: { contains: qRaw } });
+              // Guest-facing reference code (e.g. WA-260512-001). This is what
+              // staff actually copy/paste from invoices, WhatsApp, and the
+              // booking page, so we search both the original casing and the
+              // upper-cased variant because SQLite `contains` is case-sensitive.
+              or.push({ referenceCode: { contains: qRaw } });
+              const qUpper = qRaw.toUpperCase();
+              if (qUpper !== qRaw) {
+                or.push({ referenceCode: { contains: qUpper } });
+                or.push({ id: { contains: qUpper } });
+              }
               or.push({ guest: { fullName: { contains: qRaw } } });
+              // Email lookup — many channel-imported bookings carry the guest
+              // email but no phone, so searching by email gets them found.
+              if (qRaw.includes("@") || qRaw.includes(".")) {
+                or.push({ guest: { email: { contains: qRaw } } });
+              }
             }
             if (digitsOnly.length >= 3) {
               or.push({ guest: { phoneE164: { contains: digitsOnly } } });
               if (!qRaw.includes("+") && digitsOnly.length >= 8) {
                 or.push({ guest: { phoneE164: { contains: `+${digitsOnly}` } } });
+              }
+              // Reference codes end with `-NNN` — typing just the sequence
+              // (e.g. "012") should still surface today's matching bookings.
+              if (digitsOnly.length >= 3 && digitsOnly.length <= 6) {
+                or.push({ referenceCode: { contains: digitsOnly } });
               }
             }
             return or;
@@ -16084,9 +16182,14 @@ adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async
       : "";
 
   const rows = bookings
-    .map(
-      (b) => `<tr>
-      <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(b.id)}</a></td>
+    .map((b) => {
+      const reference = displayBookingReference(b);
+      const showCuid = reference !== b.id;
+      return `<tr>
+      <td>
+        <a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(reference)}</a>
+        ${showCuid ? `<div class="muted" style="font-size:11px">${escapeHtml(b.id)}</div>` : ""}
+      </td>
       <td>${b.guest.isVip ? '<span class="badge" style="background:#d97706;color:#fff;border:0;font-weight:700" title="VIP">VIP</span> ' : ""}${escapeHtml(b.guest.fullName ?? "—")}</td>
       <td>${escapeHtml(b.guest.phoneE164)}</td>
       <td>${escapeHtml(b.roomType.name)}</td>
@@ -16096,29 +16199,29 @@ adminRouter.get("/bookings/search", requirePermission("BOOKINGS", "VIEW"), async
       <td><span class="badge ${getBadgeClass(b.status)}">${escapeHtml(b.status)}</span></td>
       <td><span class="badge ${getBadgeClass(b.paymentStatus)}">${escapeHtml(b.paymentStatus)}</span></td>
       <td><a class="btn-link primary" style="padding:6px 10px;font-size:13px" href="/admin/bookings/${encodeURIComponent(b.id)}">Open details</a></td>
-    </tr>`
-    )
+    </tr>`;
+    })
     .join("");
 
   const content = `
 <h2>Find booking</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — Search by <strong>booking / reservation ID</strong>, <strong>guest name</strong>, or <strong>phone</strong>. A single match opens the booking page automatically.</p>
+<p class="muted">${escapeHtml(hotel.displayName)} — Search by <strong>booking reference</strong> (e.g. <code>WA-260512-001</code>), <strong>internal booking ID</strong>, <strong>guest name</strong>, <strong>phone</strong>, or <strong>email</strong>. A single match opens the booking page automatically.</p>
 ${errMsg}${noResults}${multiHint}
 <form method="get" action="/admin/bookings/search" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:16px; max-width:640px">
   <label style="flex:1; min-width:220px">Search
-    <input type="search" name="q" value="${escapeHtml(qRaw)}" autocomplete="off" placeholder="e.g. WS-…, guest name, or phone" style="width:100%; margin-top:4px; padding:10px 12px; border:1px solid #d8dee6; border-radius:10px" autofocus />
+    <input type="search" name="q" value="${escapeHtml(qRaw)}" autocomplete="off" placeholder="WA-260512-001, guest name, phone, or email" style="width:100%; margin-top:4px; padding:10px 12px; border:1px solid #d8dee6; border-radius:10px" autofocus />
   </label>
   <button type="submit" style="padding:10px 18px; border:0; border-radius:10px; background:#128c7e; color:#fff; font-weight:700">Search</button>
 </form>
 ${
   queryOk && bookings.length > 0
     ? `<table>
-  <thead><tr><th>Booking ID</th><th>Guest</th><th>Phone</th><th>Room type</th><th>Unit</th><th>Check-in</th><th>Check-out</th><th>Booking</th><th>Payment</th><th></th></tr></thead>
+  <thead><tr><th>Booking reference</th><th>Guest</th><th>Phone</th><th>Room type</th><th>Unit</th><th>Check-in</th><th>Check-out</th><th>Booking</th><th>Payment</th><th></th></tr></thead>
   <tbody>${rows}</tbody>
 </table>`
     : queryOk
       ? ""
-      : '<p class="muted">Tip: paste the ChatStay booking ID, type part of the guest name, or enter mobile digits (with or without country code).</p>'
+      : '<p class="muted">Tip: paste the booking reference (e.g. <code>WA-260512-001</code>), the internal booking ID, part of the guest name, mobile digits (with or without country code), or an email address.</p>'
 }`;
   res.type("html").send(renderLayout(content, true));
 });

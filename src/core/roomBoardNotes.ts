@@ -1,15 +1,26 @@
 /** Room board manual status stored in `RoomUnit.notes` as `[status:OCCUPIED]` etc. */
 
-export type ManualRoomBoardStatus = "AVAILABLE" | "RESERVED" | "OCCUPIED" | "CLEANING" | "MAINTENANCE";
+export type ManualRoomBoardStatus =
+  | "AVAILABLE"
+  | "RESERVED"
+  | "OCCUPIED"
+  | "CLEANING"
+  | "MAINTENANCE"
+  | "NO_SHOW"
+  | "CANCELLED";
+
+// Single regex source-of-truth — extend here when adding new manual statuses.
+const STATUS_TAG_RE = /\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE|NO_SHOW|CANCELLED)\]/;
+const STATUS_TAG_RE_G = /\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE|NO_SHOW|CANCELLED)\]/gi;
 
 export function parseManualRoomStatusFromNotes(notes: string | null | undefined): ManualRoomBoardStatus | null {
   if (!notes) return null;
-  const match = notes.match(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/);
+  const match = notes.match(STATUS_TAG_RE);
   return (match?.[1] as ManualRoomBoardStatus | undefined) ?? null;
 }
 
 export function writeManualRoomStatusToNotes(notes: string | null | undefined, status: ManualRoomBoardStatus): string {
-  const cleaned = (notes ?? "").replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/g, "").trim();
+  const cleaned = (notes ?? "").replace(STATUS_TAG_RE_G, "").trim();
   return `${cleaned ? `${cleaned} ` : ""}[status:${status}]`.trim();
 }
 
@@ -38,7 +49,7 @@ export function setMaintenanceUrgentInNotes(notes: string | null | undefined, ur
 export function stripRoomNoteTags(notes: string | null | undefined): string {
   if (!notes) return "";
   return notes
-    .replace(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/gi, "")
+    .replace(STATUS_TAG_RE_G, "")
     .replace(URGENT_TAG_RE, "")
     .replace(/\s{2,}/g, " ")
     .trim();
@@ -53,7 +64,7 @@ export function stripRoomNoteTags(notes: string | null | undefined): string {
 export function setRoomNoteText(notes: string | null | undefined, text: string): string {
   const original = notes ?? "";
   const tags: string[] = [];
-  const statusMatch = original.match(/\[status:(AVAILABLE|RESERVED|OCCUPIED|CLEANING|MAINTENANCE)\]/i);
+  const statusMatch = original.match(STATUS_TAG_RE);
   if (statusMatch) tags.push(statusMatch[0]);
   // Don't reuse URGENT_TAG_RE here — it carries the `g` flag and `.test()` would
   // mutate `lastIndex` across calls, producing flaky results on repeated reads.
