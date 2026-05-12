@@ -232,6 +232,27 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .pricing-toggle button.is-active{background:#ffffff;color:#053b18;box-shadow:0 8px 22px -6px rgba(0,0,0,.18)}
 .pricing-toggle .save-flag{margin-left:8px;background:#dcfce7;color:#166534;font-size:11px;font-weight:800;border-radius:999px;padding:3px 8px;letter-spacing:.04em;text-transform:uppercase}
 .pricing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-bottom:34px;align-items:stretch}
+.pricing-grid--two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr));max-width:880px;margin-left:auto;margin-right:auto}
+.pricing-section-header{display:flex;flex-direction:column;gap:14px;padding:28px 30px;margin:8px 0 22px;border-radius:24px;background:linear-gradient(180deg,#ffffff 0%,#f4fdf8 100%);border:1px solid rgba(220,232,227,.85);box-shadow:0 16px 40px -18px rgba(15,44,38,.14);align-items:flex-start}
+.pricing-section-header .section-header-eyebrow{display:inline-flex;align-items:center;gap:8px;padding:5px 12px;border-radius:999px;background:linear-gradient(135deg,#dcfce7,#ecfff5);border:1px solid #bbf7d0;color:#064e46;font-size:11.5px;font-weight:900;letter-spacing:.1em;text-transform:uppercase}
+.pricing-section-header h2{margin:6px 0 2px;font-size:clamp(24px,3.2vw,32px);letter-spacing:-.025em;color:var(--ink);line-height:1.1}
+.pricing-section-header p{margin:0;color:var(--muted);font-size:15px;line-height:1.55;max-width:720px}
+.pricing-section-header .section-header-note{display:inline-flex;gap:8px;margin-top:4px;padding:7px 12px;border-radius:12px;background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.22);color:#064e46;font-weight:700;font-size:13px}
+.pricing-section-header .section-header-note span[aria-hidden]{color:#25d366}
+.pricing-section-header .section-header-cta{display:flex;flex-wrap:wrap;gap:10px;margin-top:4px}
+.pricing-section-header.listing-header{background:linear-gradient(180deg,#fafafa 0%,#f6fbff 100%);border-color:rgba(180,201,219,.65)}
+.pricing-section-header.listing-header .section-header-eyebrow{background:linear-gradient(135deg,#dbeafe,#e0f2fe);border-color:#bfdbfe;color:#1e40af}
+.pricing-section-header.listing-header .listing-note{background:rgba(37,99,235,.07);border-color:rgba(37,99,235,.22);color:#1e3a8a}
+.pricing-section-header.listing-header .listing-note span[aria-hidden]{color:#2563eb}
+.plan-card.listing-card{background:linear-gradient(180deg,#ffffff 0%,#f6fbff 100%)}
+.plan-card.listing-card .plan-name{color:#1e40af}
+.plan-card.listing-card.recommended{outline-color:rgba(37,99,235,.45);box-shadow:0 32px 80px -20px rgba(37,99,235,.32),inset 0 1px 0 rgba(255,255,255,.95)}
+.plan-card.listing-card.recommended::before{background:linear-gradient(135deg,#2563eb 0%,#60a5fa 100%);color:#ffffff;content:"Recommended";box-shadow:0 12px 26px -6px rgba(37,99,235,.45)}
+.plan-card .listing-badge{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#1e40af;background:linear-gradient(135deg,#dbeafe,#e0f2fe);border:1px solid #bfdbfe;padding:5px 10px;border-radius:999px;margin:-2px 0 2px}
+.plan-card .listing-badge span[aria-hidden]{color:#2563eb}
+.compare-table.path-compare-table th.recommended-col,.compare-table.path-compare-table td.recommended-col{background:linear-gradient(180deg,rgba(220,252,231,.6),rgba(167,243,208,.35));position:relative}
+.compare-table.path-compare-table thead th{font-size:13.5px}
+@media (max-width:680px){.pricing-section-header{padding:22px 20px;border-radius:20px}.pricing-section-header .section-header-cta{width:100%}.pricing-section-header .section-header-cta .btn{flex:1 1 auto;text-align:center}}
 .plan-card{position:relative;background:linear-gradient(180deg,#ffffff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);border-radius:24px;padding:26px 24px 24px;display:flex;flex-direction:column;gap:14px;box-shadow:0 18px 48px -16px rgba(15,44,38,.16),inset 0 1px 0 rgba(255,255,255,.85);animation:wa-fade-up .42s cubic-bezier(.22,1,.36,1) both;transform-origin:center;will-change:transform;transition:transform .26s cubic-bezier(.25,1,.5,1),box-shadow .26s cubic-bezier(.25,1,.5,1),border-color .26s cubic-bezier(.25,1,.5,1)}
 .plan-card:hover{transform:translateY(-8px) scale(1.035);box-shadow:0 36px 90px -20px rgba(7,68,58,.26);border-color:#cbe5da;z-index:2}
 .plan-card:nth-child(2){animation-delay:.05s}
@@ -1348,6 +1369,14 @@ const PRICING_FAQ: { q: string; a: string }[] = [
   {
     q: "Can I migrate from another PMS?",
     a: "Yes. Growth, Pro, and Enterprise plans include guided data import (rooms, rates, guests, future bookings). Our team handles the heavy lifting so you can switch without losing reservations."
+  },
+  {
+    q: "I already use another PMS — can I just be listed on ChatAstay?",
+    a: "Absolutely. Pick a Marketplace Listing Plan instead of a Partner Plan. Marketplace Basic gives you a listing with inquiry/manual workflow; Marketplace Connected layers API or channel-manager bridges on top so availability and bookings can sync with your existing systems without migrating."
+  },
+  {
+    q: "How is a Marketplace Listing Plan different from a Partner Plan?",
+    a: "Partner Plans run your entire hotel on ChatAstay (PMS, WhatsApp automation, restaurant, housekeeping, reports, staff roles). Marketplace Listing Plans only handle visibility and booking routing — you keep your existing software. Many hotels start with a listing and upgrade to a Partner Plan later."
   }
 ];
 
@@ -1393,6 +1422,134 @@ function renderPricingPlanCard(plan: PricingPlan): string {
       ${secondaryCta}
     </div>
   </article>`;
+}
+
+// =============================================================================
+// Marketplace Listing Plans — for hotels who want to be listed on the
+// ChatAstay marketplace without adopting the full PMS/extranet. Two tiers:
+// Basic (manual/email handoff) and Connected (API/PMS sync hooks).
+// The cards reuse the same .plan-card visual treatment as Partner plans
+// but with a distinct accent so the two purchase paths read as separate
+// products. Routes for the CTAs are placeholders so the architecture is
+// ready for future integration work (PMS adapters, channel manager, etc.).
+// =============================================================================
+type MarketplaceListingPlan = {
+  id: "basic" | "connected";
+  name: string;
+  tagline: string;
+  bestFor: string;
+  badge: string;
+  features: string[];
+  ctaLabel: string;
+  ctaHref: string;
+  recommended?: boolean;
+};
+
+const MARKETPLACE_LISTING_PLANS: MarketplaceListingPlan[] = [
+  {
+    id: "basic",
+    name: "Marketplace Basic",
+    tagline: "Visibility on the ChatAstay marketplace with manual booking handling.",
+    bestFor: "Direct inquiry or manual workflows",
+    badge: "Low Setup",
+    features: [
+      "Property listing with city & destination tags",
+      "Photos, amenities & room showcase",
+      "Direct contact / inquiry form",
+      "Booking request form for travellers",
+      "Email notifications on every enquiry",
+      "Manual confirmation workflow (you stay in control)"
+    ],
+    ctaLabel: "List My Property",
+    ctaHref: "/list-property?tier=basic"
+  },
+  {
+    id: "connected",
+    name: "Marketplace Connected",
+    tagline: "Marketplace exposure while keeping your existing PMS or booking software.",
+    bestFor: "Hotels with their own PMS / channel manager",
+    badge: "Recommended",
+    recommended: true,
+    features: [
+      "Everything in Marketplace Basic",
+      "API connectivity for inventory & rates",
+      "PMS integration support (adapter-based)",
+      "Real-time availability sync",
+      "OTA-style direct booking flow on the marketplace",
+      "Channel manager / OTA bridge support",
+      "Email or API booking routing to your systems"
+    ],
+    ctaLabel: "Connect My Hotel",
+    ctaHref: "/list-property?tier=connected"
+  }
+];
+
+function renderMarketplaceListingCard(plan: MarketplaceListingPlan): string {
+  const classes = ["plan-card", "listing-card"];
+  if (plan.recommended) classes.push("recommended");
+  const featuresHtml = plan.features.map((f) => `<li>${escapeHtml(f)}</li>`).join("");
+  return `<article class="${classes.join(" ")}" data-plan="${escapeHtml(plan.id)}">
+    <aside class="plan-suggested-callout" role="status" aria-hidden="true">
+      <span class="callout-icon" aria-hidden="true">&#10003;</span>
+      <span class="callout-text">${escapeHtml(plan.badge)}</span>
+    </aside>
+    <p class="plan-name">${escapeHtml(plan.name)}</p>
+    <p class="plan-tag">${escapeHtml(plan.tagline)}</p>
+    <p class="plan-best-for"><span aria-hidden="true">&#9678;</span>${escapeHtml(plan.bestFor)}</p>
+    <p class="listing-badge"><span aria-hidden="true">&#9737;</span> ${escapeHtml(plan.badge)}</p>
+    <ul>${featuresHtml}</ul>
+    <div class="plan-cta">
+      <a class="btn btn-primary" href="${escapeHtml(plan.ctaHref)}">${escapeHtml(plan.ctaLabel)}</a>
+      <a class="secondary-cta" href="mailto:partners@chatastay.com?subject=${encodeURIComponent("Marketplace listing enquiry — " + plan.name)}">Talk to our team</a>
+    </div>
+  </article>`;
+}
+
+function renderPathComparisonTable(): string {
+  // Cross-path comparison: Full Partner vs Marketplace Connected vs Marketplace Basic.
+  // Kept distinct from the per-plan partner table further down the page.
+  const rows: { label: string; values: [string | boolean, string | boolean, string | boolean] }[] = [
+    { label: "Marketplace visibility", values: [true, true, true] },
+    { label: "Direct booking capability", values: [true, true, "Inquiry only"] },
+    { label: "WhatsApp automation", values: [true, "Optional add-on", false] },
+    { label: "Extranet dashboard", values: [true, "Light dashboard", false] },
+    { label: "PMS features", values: [true, "Bring your own", "Bring your own"] },
+    { label: "API connectivity", values: [true, true, false] },
+    { label: "Booking sync", values: ["Native", "Two-way sync", "Manual"] },
+    { label: "Manual booking support", values: [true, true, true] },
+    { label: "Reports & analytics", values: [true, "Listing analytics", "Listing analytics"] },
+    { label: "Staff management", values: [true, false, false] },
+    { label: "Best for", values: ["Full operations + automation", "Hotels with their own PMS", "Simple listing presence"] }
+  ];
+  const cellHtml = (v: string | boolean) =>
+    v === true
+      ? '<span class="yes" aria-label="Included">✓</span>'
+      : v === false
+        ? '<span class="no" aria-label="Not included">—</span>'
+        : `<span>${escapeHtml(String(v))}</span>`;
+  const body = rows
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(r.label)}</td>
+        <td class="recommended-col">${cellHtml(r.values[0])}</td>
+        <td>${cellHtml(r.values[1])}</td>
+        <td>${cellHtml(r.values[2])}</td>
+      </tr>`
+    )
+    .join("");
+  return `<div class="compare-table-wrap">
+    <table class="compare-table path-compare-table">
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th class="recommended-col">Full ChatStay Partner</th>
+          <th>Marketplace Connected</th>
+          <th>Marketplace Basic</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
 }
 
 function renderPricingComparisonTable(): string {
@@ -1554,13 +1711,49 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
       <span role="listitem">GDPR-friendly data handling</span>
     </div>
 
+    <section class="pricing-section-header pricing-reveal" id="section-partner-plans" aria-labelledby="section-partner-plans-h">
+      <div class="section-header-meta">
+        <span class="section-header-eyebrow">Section 1 &middot; Full Platform</span>
+        <h2 id="section-partner-plans-h">ChatAstay Partner Plans</h2>
+        <p>Run your hotel end-to-end on ChatAstay — bookings, restaurant, housekeeping, and WhatsApp automation in one place.</p>
+        <p class="section-header-note"><span aria-hidden="true">&#9733;</span> Best for hotels wanting full digital operations and automation.</p>
+      </div>
+      <div class="section-header-cta">
+        <a class="btn btn-whatsapp" href="/admin/onboard?plan=growth">Become a ChatStay Partner</a>
+        <a class="btn btn-ghost" href="/admin/onboard?plan=starter">Start Full Platform Setup</a>
+      </div>
+    </section>
+
     <div class="pricing-grid">
       ${planCardsHtml}
     </div>
 
+    <section class="card compare-card pricing-reveal" id="path-compare">
+      <h2>Which path is right for your hotel?</h2>
+      <p class="lead">Two ways to grow with ChatStay: run your whole operation on ChatStay, or just take advantage of marketplace exposure with the systems you already use.</p>
+      ${renderPathComparisonTable()}
+    </section>
+
+    <section class="pricing-section-header pricing-reveal listing-header" id="section-marketplace-plans" aria-labelledby="section-marketplace-plans-h">
+      <div class="section-header-meta">
+        <span class="section-header-eyebrow">Section 2 &middot; Marketplace Listing</span>
+        <h2 id="section-marketplace-plans-h">Marketplace Listing Plans</h2>
+        <p>Already using another PMS or hotel software? List your property on ChatStay and still receive bookings directly through your existing systems.</p>
+        <p class="section-header-note listing-note"><span aria-hidden="true">&#9881;</span> Keep your PMS &middot; we route inquiries and bookings to your systems.</p>
+      </div>
+      <div class="section-header-cta">
+        <a class="btn btn-primary" href="/list-property?tier=connected">Connect My Hotel</a>
+        <a class="btn btn-ghost" href="/list-property?tier=basic">List My Property</a>
+      </div>
+    </section>
+
+    <div class="pricing-grid pricing-grid--two">
+      ${MARKETPLACE_LISTING_PLANS.map(renderMarketplaceListingCard).join("")}
+    </div>
+
     <section class="card compare-card pricing-reveal">
-      <h2>Compare every feature</h2>
-      <p class="lead">All plans include the WhatsApp assistant, secure data hosting, and lifetime product updates. Scroll horizontally on small screens.</p>
+      <h2>Compare every Partner plan</h2>
+      <p class="lead">A detailed feature matrix for the Full ChatStay Partner plans above. Scroll horizontally on small screens.</p>
       ${renderPricingComparisonTable()}
     </section>
 
@@ -2073,6 +2266,142 @@ marketplaceRouter.get("/m/start", async (req: Request, res: Response) => {
   });
 
   res.redirect(waUrl);
+});
+
+// =============================================================================
+// GET /list-property — public placeholder onboarding for marketplace-only
+// hotels (Basic = manual workflow; Connected = bring-your-own PMS + API).
+// This route intentionally does NOT spin up a full ChatStay tenant. It
+// captures interest, persists nothing yet, and routes the partner to the
+// right intake channel. Future iterations can wire it to a dedicated
+// "marketplace partner" record, channel-manager adapters, or PMS connectors
+// — the structure below already exposes the tier so we can branch behaviour
+// without changing the public URL.
+// =============================================================================
+marketplaceRouter.get("/list-property", (req: Request, res: Response) => {
+  const tierRaw = String(req.query.tier ?? "basic").toLowerCase();
+  const tier: "basic" | "connected" = tierRaw === "connected" ? "connected" : "basic";
+  const isConnected = tier === "connected";
+  const planMeta = isConnected
+    ? {
+        title: "Connect your hotel to the ChatAstay marketplace",
+        eyebrow: "Marketplace Connected",
+        intro:
+          "Keep your existing PMS, channel manager, or booking software — and get marketplace exposure on ChatAstay. Our team will scope your integration (API, channel bridge, or email routing) and set up your listing.",
+        ctaLabel: "Send connect request",
+        accentClass: "listing-page-connected",
+        checklist: [
+          "Property profile, photos & amenities",
+          "API or channel-manager bridge to your PMS",
+          "Two-way availability & rate sync",
+          "OTA-style direct booking flow on the marketplace",
+          "Booking forwarding to your existing systems (email or webhook)"
+        ]
+      }
+    : {
+        title: "List your property on the ChatAstay marketplace",
+        eyebrow: "Marketplace Basic",
+        intro:
+          "Get discovered by ChatAstay travellers without changing how you operate today. We'll publish your listing, capture inquiries, and email each request to your team for manual confirmation.",
+        ctaLabel: "Send listing request",
+        accentClass: "listing-page-basic",
+        checklist: [
+          "Property listing with city & destination tags",
+          "Photos, amenities & room showcase",
+          "Direct contact / inquiry form on your listing page",
+          "Email notifications on every traveller enquiry",
+          "Manual confirmation workflow (you stay in control)"
+        ]
+      };
+
+  const mailSubject = encodeURIComponent(
+    `${planMeta.eyebrow} listing enquiry`
+  );
+  const mailBody = encodeURIComponent(
+    [
+      `Hi ChatAstay team,`,
+      ``,
+      `I'd like to list our property on the ${planMeta.eyebrow} plan.`,
+      ``,
+      `Hotel name:`,
+      `City / location:`,
+      `Number of rooms:`,
+      `Existing PMS / channel manager (if any):`,
+      `Booking volume per month (approx):`,
+      `Contact name:`,
+      `Contact email:`,
+      `Contact WhatsApp:`,
+      ``,
+      `Thanks!`
+    ].join("\n")
+  );
+  const mailto = `mailto:partners@chatastay.com?subject=${mailSubject}&body=${mailBody}`;
+  const waText = encodeURIComponent(
+    `Hi ChatAstay! I'd like to list my hotel on the ${planMeta.eyebrow} plan.`
+  );
+  const waHref = `https://wa.me/?text=${waText}`;
+
+  const checklistHtml = planMeta.checklist
+    .map((item) => `<li>${escapeHtml(item)}</li>`)
+    .join("");
+
+  const otherTier = isConnected ? "basic" : "connected";
+  const otherLabel = isConnected ? "Marketplace Basic" : "Marketplace Connected";
+
+  const body = `
+    <style>
+      .listing-hero{position:relative;overflow:hidden;border-radius:32px;padding:48px 36px;margin-bottom:24px;color:#fff;background:linear-gradient(135deg,#053b34 0%,#0c7a6e 50%,#128c7e 100%);box-shadow:0 26px 70px -18px rgba(7,68,58,.36)}
+      .listing-hero.listing-page-connected{background:linear-gradient(135deg,#0b1f3a 0%,#1d3557 50%,#2563eb 100%);box-shadow:0 26px 70px -18px rgba(37,99,235,.34)}
+      .listing-hero .eyebrow{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.26);font-size:11.5px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#ecfdf5;margin-bottom:14px}
+      .listing-hero h1{margin:0 0 10px;font-size:clamp(28px,4.5vw,46px);letter-spacing:-.035em;line-height:1.05;max-width:720px}
+      .listing-hero p{margin:0;max-width:640px;font-size:16px;line-height:1.55;opacity:.94}
+      .listing-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;align-items:start}
+      .listing-card-block{background:linear-gradient(180deg,#fff 0%,#f7fdfa 100%);border:1px solid rgba(220,232,227,.85);border-radius:24px;padding:26px 24px;box-shadow:0 14px 38px -18px rgba(15,44,38,.18)}
+      .listing-card-block h3{margin:0 0 6px;letter-spacing:-.02em;color:var(--ink)}
+      .listing-card-block ul{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:10px}
+      .listing-card-block ul li{position:relative;padding-left:26px;font-size:14.5px;color:var(--ink);line-height:1.5}
+      .listing-card-block ul li::before{content:"";position:absolute;left:0;top:4px;width:18px;height:18px;border-radius:50%;background:linear-gradient(135deg,#25d366,#7df0ad);box-shadow:inset 0 1px 0 rgba(255,255,255,.6)}
+      .listing-card-block ul li::after{content:"";position:absolute;left:5px;top:7px;width:8px;height:5px;border-left:2px solid #053b18;border-bottom:2px solid #053b18;transform:rotate(-45deg)}
+      .listing-side{background:linear-gradient(180deg,#fff 0%,#f4fbf7 100%);border:1px solid #dce8e3;border-radius:22px;padding:20px;box-shadow:0 12px 32px -16px rgba(15,44,38,.18);position:sticky;top:14px}
+      .listing-side h4{margin:0 0 8px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#475569}
+      .listing-side .btn{width:100%;text-align:center;margin-bottom:10px}
+      .listing-side .other-tier{display:block;text-align:center;font-size:13px;color:var(--brand-2);text-decoration:none;font-weight:800;margin-top:6px;padding:8px 0;border-top:1px dashed #dce8e3}
+      .listing-side .other-tier:hover{text-decoration:underline}
+      @media (max-width:880px){.listing-grid{grid-template-columns:1fr}.listing-side{position:static}}
+    </style>
+    <section class="listing-hero ${escapeHtml(planMeta.accentClass)}">
+      <span class="eyebrow">${escapeHtml(planMeta.eyebrow)}</span>
+      <h1>${escapeHtml(planMeta.title)}</h1>
+      <p>${escapeHtml(planMeta.intro)}</p>
+    </section>
+    <div class="listing-grid">
+      <div class="listing-card-block">
+        <h3>What you'll get</h3>
+        <p class="muted">${escapeHtml(
+          isConnected
+            ? "We'll keep your operations exactly where they are — your PMS, your channel manager, your team — and add ChatAstay marketplace exposure on top."
+            : "A simple, low-setup way to be discoverable on the ChatAstay marketplace. Perfect if you handle bookings by email, WhatsApp, or your own back office."
+        )}</p>
+        <ul>${checklistHtml}</ul>
+      </div>
+      <aside class="listing-side">
+        <h4>Get started</h4>
+        <a class="btn btn-whatsapp" href="${escapeHtml(waHref)}" target="_blank" rel="noopener">Send a WhatsApp note</a>
+        <a class="btn btn-primary" href="${escapeHtml(mailto)}">${escapeHtml(planMeta.ctaLabel)}</a>
+        <a class="other-tier" href="/list-property?tier=${otherTier}">Looking for ${escapeHtml(otherLabel)} instead?</a>
+        <a class="other-tier" href="/pricing">← Back to pricing</a>
+      </aside>
+    </div>`;
+
+  res
+    .type("html")
+    .send(
+      renderShell({
+        title: `${planMeta.eyebrow} — ChatAstay marketplace listing`,
+        meta: { description: planMeta.intro },
+        body
+      })
+    );
 });
 
 /// Exported so the WhatsApp webhook can use the same marker definition.
