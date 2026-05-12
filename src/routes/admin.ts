@@ -8590,14 +8590,15 @@ adminRouter.get("/profile", requireAuth, async (req, res) => {
           })
         : "";
       const unitDataAttr = card.unitId ? ` data-room-unit-id="${escapeHtml(card.unitId)}"` : "";
+      const showGuestOnCard = roomBoardStatusShowsGuestOnCard(card.status);
       return `<div class="room-board-card ${colorClass}"${unitDataAttr} style="display:flex;flex-direction:column;min-width:0;max-width:100%;overflow-x:clip;align-items:stretch">
         <strong>${escapeHtml(card.unitName)}</strong>${card.unitId ? "" : ' <span class="badge pending" style="font-size:10px">no unit</span>'}
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.roomTypeName)}</div>
         <div class="muted" style="font-size:12px; margin-top:3px">${escapeHtml(card.status)}</div>
-        ${card.guestName ? `<div style="margin-top:6px; font-size:12px">Guest: ${escapeHtml(card.guestName)}</div>` : ""}
-        ${card.checkIn && card.checkOut ? `<div class="muted" style="font-size:11px">${formatDateForInput(card.checkIn)} - ${formatDateForInput(card.checkOut)}</div>` : ""}
+        ${showGuestOnCard && card.guestName ? `<div style="margin-top:6px; font-size:12px">Guest: ${escapeHtml(card.guestName)}</div>` : ""}
+        ${showGuestOnCard && card.checkIn && card.checkOut ? `<div class="muted" style="font-size:11px">${formatDateForInput(card.checkIn)} - ${formatDateForInput(card.checkOut)}</div>` : ""}
         ${
-          card.bookingRefShort
+          showGuestOnCard && card.bookingRefShort
             ? `<div class="muted" style="font-size:10px;margin-top:4px" title="Reservation">Res: <strong>${escapeHtml(card.bookingRefShort)}</strong></div>`
             : ""
         }
@@ -9559,6 +9560,23 @@ function formatRoomBoardStayDetailHtml(params: {
 }
 
 /**
+ * PMS-style rule for the Room Rack card display: the guest's identity, party
+ * size, dates and reservation reference should only appear on the rack card
+ * when the operational room status is one where the guest is actually meant
+ * to be tied to the room (RESERVED = arrival expected, OCCUPIED = in-house).
+ *
+ * For CLEANING / MAINTENANCE / NO_SHOW / CANCELLED / AVAILABLE the card shows
+ * room number and housekeeping/operational state only — the reservation
+ * itself remains intact in the database and stays visible on the reservation
+ * details page, folio, invoice, audit logs and reports. This matches Opera /
+ * Mews / Cloudbeds behaviour: once a stay ends or the room is flagged for
+ * housekeeping the previous guest is no longer the room's active occupant.
+ */
+function roomBoardStatusShowsGuestOnCard(status: RoomBoardStatus): boolean {
+  return status === "RESERVED" || status === "OCCUPIED";
+}
+
+/**
  * PENDING/CONFIRMED bookings show as RESERVED on the board (future or same-day reservation).
  * OCCUPIED is only shown after front desk sets the room unit to OCCUPIED (stored in unit notes).
  * CLEANING / MAINTENANCE in notes still win when staff set them explicitly.
@@ -10501,6 +10519,10 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
     .map(
       (c) => {
         const statusClass = getRoomBoardStatusClass(c.status);
+        // PMS lifecycle rule: only RESERVED or OCCUPIED rooms expose the active
+        // guest on the rack card. The booking record itself is preserved — staff
+        // can still click "details" to open the reservation history.
+        const showGuestOnCard = roomBoardStatusShowsGuestOnCard(c.status);
         const detailUrl = c.unitId
           ? `/admin/room-board/unit/${encodeURIComponent(c.unitId)}/details?date=${formatDateForInput(boardDate)}${
               c.bookingId ? `&highlightBooking=${encodeURIComponent(c.bookingId)}` : ""
@@ -10517,7 +10539,7 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
               })
             : "";
         const stayDetailHtml =
-          c.bookingId && c.checkIn && c.checkOut
+          showGuestOnCard && c.bookingId && c.checkIn && c.checkOut
             ? formatRoomBoardStayDetailHtml({
                 bookingId: c.bookingId,
                 adults: c.adults,
@@ -10534,11 +10556,11 @@ adminRouter.get("/room-board", requirePermission("ROOMS", "VIEW"), async (req, r
   <div style="font-weight:700; font-size:0.92rem; margin-bottom:2px;">${escapeHtml(c.unitName)}${c.isUnassignedBooking ? ' <span class="badge pending" style="font-size:10px">no unit</span>' : ""}</div>
   <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">${escapeHtml(c.name)}</div>
   <div style="margin-bottom:4px;"><span class="room-board-badge ${statusClass}">${escapeHtml(getRoomBoardStatusLabel(c.status))}</span></div>
-  ${c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
+  ${showGuestOnCard && c.guestName ? `<div style="font-size:11px; margin-top:4px;">Guest: ${escapeHtml(c.guestName)}</div>` : ""}
   ${stayDetailHtml}
-  ${c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
+  ${showGuestOnCard && c.checkIn && c.checkOut ? `<div style="font-size:11px; color:var(--muted);">${formatDateForInput(c.checkIn)} – ${formatDateForInput(c.checkOut)}</div>` : ""}
   ${
-    c.bookingRefShort
+    showGuestOnCard && c.bookingRefShort
       ? `<div style="font-size:10px;color:var(--muted);margin-top:3px;line-height:1.25" title="Reservation">Res: <strong>${escapeHtml(c.bookingRefShort)}</strong></div>`
       : ""
   }
