@@ -52,6 +52,29 @@ export interface UnpaidDepartureRow {
   isVip: boolean;
 }
 
+export interface CheckedOutTodayRow {
+  bookingId: string;
+  guestName: string;
+  guestPhone: string;
+  unitName: string | null;
+  checkedOutAt: Date;
+  staffLabel: string | null;
+  paymentStatus: PaymentStatus;
+  balanceStatus: "settled" | "outstanding" | "refund_due";
+  balanceAmount: number;
+  currency: string;
+}
+
+export interface RefundDueRow {
+  bookingId: string;
+  guestName: string;
+  guestPhone: string;
+  unitName: string | null;
+  amount: number;
+  currency: string;
+  checkOut: Date;
+}
+
 export interface VipInHouseRow {
   bookingId: string;
   guestName: string;
@@ -112,6 +135,8 @@ export interface SmartHandoverSnapshot {
   asOf: Date;
   pendingArrivals: PendingArrivalRow[];
   unpaidDepartures: UnpaidDepartureRow[];
+  checkedOutToday: CheckedOutTodayRow[];
+  refundDue: RefundDueRow[];
   vipInHouse: VipInHouseRow[];
   openComplaints: OpenComplaintRow[];
   roomsNeedingAttention: RoomNeedingAttentionRow[];
@@ -121,6 +146,8 @@ export interface SmartHandoverSnapshot {
   totals: {
     pendingArrivals: number;
     unpaidDepartures: number;
+    checkedOutToday: number;
+    refundDue: number;
     vipInHouse: number;
     openComplaints: number;
     dirtyRooms: number;
@@ -148,6 +175,8 @@ export async function loadSmartHandoverSnapshot(
   const [
     expectedArrivals,
     expectedDepartures,
+    checkedOutBookings,
+    checkoutAuditRows,
     inHouseVip,
     feedbackRows,
     units,
@@ -186,6 +215,34 @@ export async function loadSmartHandoverSnapshot(
         roomUnit: { select: { name: true } }
       },
       take: HANDOVER_TAKE
+    }),
+    prisma.booking.findMany({
+      where: {
+        hotelId,
+        status: BookingStatus.CHECKED_IN,
+        checkOut: { gte: dayStart, lt: dayEnd }
+      },
+      select: {
+        id: true,
+        checkOut: true,
+        totalAmount: true,
+        currency: true,
+        paymentStatus: true,
+        guest: { select: { fullName: true, phoneE164: true } },
+        roomUnit: { select: { name: true } }
+      },
+      orderBy: { checkOut: "desc" },
+      take: HANDOVER_TAKE
+    }),
+    prisma.auditLog.findMany({
+      where: {
+        hotelId,
+        entityType: "Booking",
+        action: { in: ["MANUAL_FRONT_DESK_CHECK_OUT", "MANUAL_FRONT_DESK_CHECK_OUT_OUTSTANDING"] },
+        createdAt: { gte: dayStart, lt: dayEnd }
+      },
+      orderBy: { createdAt: "desc" },
+      select: { entityId: true, createdAt: true, actorEmail: true, actorUserId: true }
     }),
     prisma.booking.findMany({
       where: {
@@ -292,7 +349,7 @@ export async function loadSmartHandoverSnapshot(
     isVip: Boolean(b.guest?.isVip)
   }));
 
-  const departureBookingIds = expectedDepartures.map((d) => d.id);
+  const departureBookingIds = Array.from(new Set([...expectedDepartures.map((d) => d.id), ...checkedOutBookings.map((d) => d.id)]));
   const folioCharges = departureBookingIds.length
     ? await prisma.folioTransaction.groupBy({
         by: ["bookingId"],
@@ -368,6 +425,54 @@ export async function loadSmartHandoverSnapshot(
       };
     })
     .filter((row) => row.outstandingAmount > 0.005);
+
+  const checkoutAuditByBooking = new Map<string, { createdAt: Date; staffLabel: string | null }>();
+  for (const row of checkoutAuditRows) {
+    if (!row.entityId || checkoutAuditByBooking.has(row.entityId)) continue;
+    checkoutAuditByBooking.set(row.entityId, {
+      createdAt: row.createdAt,
+      staffLabel: row.actorEmail || row.actorUserId || null
+    });
+  }
+
+  const checkedOutToday: CheckedOutTodayRow[] = checkedOutBookings.map((b) => {
+    const charges = chargeByBooking.get(b.id) ?? 0;
+    const paid = paidByBooking.get(b.id) ?? 0;
+    const totalDue = Math.max(b.totalAmount, charges);
+    const signedBalance = Math.round((totalDue - paid) * 100) / 100;
+    const audit = checkoutAuditByBooking.get(b.id);
+    return {
+      bookingId: b.id,
+      guestName: b.guest?.fullName?.trim() || b.guest?.phoneE164 || "—",
+      guestPhone: b.guest?.phoneE164 ?? "",
+      unitName: b.roomUnit?.name ?? null,
+      checkedOutAt: audit?.createdAt ?? b.checkOut,
+      staffLabel: audit?.staffLabel ?? null,
+      paymentStatus: b.paymentStatus,
+      balanceStatus: signedBalance < -0.005 ? "refund_due" : signedBalance > 0.005 ? "outstanding" : "settled",
+      balanceAmount: Math.abs(signedBalance),
+      currency: b.currency || hotelCurrency
+    };
+  });
+
+  const refundDue: RefundDueRow[] = checkedOutBookings
+    .map((b) => {
+      const charges = chargeByBooking.get(b.id) ?? 0;
+      const paid = paidByBooking.get(b.id) ?? 0;
+      const totalDue = Math.max(b.totalAmount, charges);
+      const signedBalance = Math.round((totalDue - paid) * 100) / 100;
+      if (signedBalance >= -0.005) return null;
+      return {
+        bookingId: b.id,
+        guestName: b.guest?.fullName?.trim() || b.guest?.phoneE164 || "—",
+        guestPhone: b.guest?.phoneE164 ?? "",
+        unitName: b.roomUnit?.name ?? null,
+        amount: Math.abs(signedBalance),
+        currency: b.currency || hotelCurrency,
+        checkOut: b.checkOut
+      } as RefundDueRow;
+    })
+    .filter((row): row is RefundDueRow => row !== null);
 
   const vipInHouse: VipInHouseRow[] = inHouseVip.map((b) => ({
     bookingId: b.id,
@@ -448,6 +553,8 @@ export async function loadSmartHandoverSnapshot(
     asOf,
     pendingArrivals,
     unpaidDepartures,
+    checkedOutToday,
+    refundDue,
     vipInHouse,
     openComplaints,
     roomsNeedingAttention,
@@ -457,6 +564,8 @@ export async function loadSmartHandoverSnapshot(
     totals: {
       pendingArrivals: pendingArrivals.length,
       unpaidDepartures: unpaidDepartures.length,
+      checkedOutToday: checkedOutToday.length,
+      refundDue: refundDue.length,
       vipInHouse: vipInHouse.length,
       openComplaints: openComplaints.length,
       dirtyRooms,

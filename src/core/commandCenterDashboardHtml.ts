@@ -29,6 +29,14 @@ export type CommandCenterDepartureRow = {
   primaryLabel: string;
 };
 
+export type CommandCenterCheckedOutRow = {
+  guestLabel: string;
+  roomLine: string;
+  checkoutLine: string;
+  bookingHref: string;
+  invoiceHref: string;
+};
+
 export type CommandCenterInHouseRow = {
   guestLabel: string;
   roomLine: string;
@@ -86,6 +94,7 @@ export type CommandCenterDashboardVm = {
   roomSnapshot: CommandCenterRoomSnapshot | null;
   arrivals: CommandCenterArrivalRow[];
   departures: CommandCenterDepartureRow[];
+  checkedOutToday: CommandCenterCheckedOutRow[];
   inHouse: CommandCenterInHouseRow[];
   whatsappRows: CommandCenterWhatsAppRow[];
   whatsappPendingInbound: number;
@@ -196,6 +205,15 @@ export function renderCommandCenterDashboard(htmlStyles: string, vm: CommandCent
     )
     .join("");
 
+  const checkedOutBody = vm.checkedOutToday
+    .map(
+      (r) =>
+        `<tr><td class="cc-guest">${esc(r.guestLabel)}</td><td>${esc(r.roomLine)}</td><td>${esc(r.checkoutLine)}</td><td><a href="${esc(
+          r.bookingHref
+        )}">Booking</a> · <a href="${esc(r.invoiceHref)}">Invoice</a></td></tr>`
+    )
+    .join("");
+
   const inHouseBody = vm.inHouse
     .map(
       (r) =>
@@ -234,6 +252,14 @@ export function renderCommandCenterDashboard(htmlStyles: string, vm: CommandCent
 
   const bookingsColumn = vm.show.bookings
     ? `<div class="cc-grid-main duplicate-cols">
+  <section class="cc-card" style="grid-column:1/-1">
+    <div class="cc-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+      <a href="/admin/bookings?view=arrival-today&range=today&rangeBy=checkIn&sort=checkin_asc">View Today&apos;s Arrivals →</a>
+      <a href="/admin/bookings?view=due-out-today&range=today&rangeBy=checkOut&sort=checkout_asc">View Today&apos;s Departures →</a>
+      <a href="/admin/bookings?view=checked-out-today&range=today&rangeBy=checkOut&sort=checkout_desc">View Checked-Out Today →</a>
+      <a href="/admin/bookings?view=outstanding&range=month&rangeBy=checkOut&sort=checkout_desc">View Outstanding Balances →</a>
+    </div>
+  </section>
   <section class="cc-card">
     <div class="cc-card-head">
       <h2>Today&apos;s arrivals</h2>
@@ -247,6 +273,13 @@ export function renderCommandCenterDashboard(htmlStyles: string, vm: CommandCent
       <div class="cc-actions"><a href="/admin/front-desk/check-out?date=${esc(vm.dateLabel)}">Check-out desk →</a></div>
     </div>
     ${ccTable(["Guest", "Room", "Balance / pay", "Action"], departuresBody, "No departures scheduled for this calendar day.")}
+  </section>
+  <section class="cc-card">
+    <div class="cc-card-head">
+      <h2>Checked-out today</h2>
+      <div class="cc-actions"><a href="/admin/bookings?view=checked-out-today&range=today&rangeBy=checkOut&sort=checkout_desc">History →</a></div>
+    </div>
+    ${ccTable(["Guest", "Room", "Checkout", "Actions"], checkedOutBody, "No guests checked out yet today.")}
   </section>
   <section class="cc-card">
     <div class="cc-card-head">

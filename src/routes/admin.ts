@@ -162,6 +162,7 @@ import {
   renderCommandCenterDashboard,
   type CommandCenterActionRow,
   type CommandCenterArrivalRow,
+  type CommandCenterCheckedOutRow,
   type CommandCenterDashboardVm,
   type CommandCenterDepartureRow,
   type CommandCenterInHouseRow,
@@ -1787,6 +1788,9 @@ function renderLayout(
       ...(canNavRooms ? [{ href: "/admin/room-board", label: "Room rack" }] : []),
       ...(canCreateBookings ? [{ href: "/admin/front-desk/check-in", label: "Arrivals / check-in" }] : []),
       ...(canNavRooms ? [{ href: "/admin/front-desk/check-out", label: "Departures / check-out" }] : []),
+      ...(canNavBookings
+        ? [{ href: "/admin/bookings?view=checked-out&range=7d&rangeBy=checkOut&sort=checkout_desc", label: "Checked-out history" }]
+        : []),
       ...(canNavBookings ? [{ href: "/admin/guests", label: "Guests" }] : []),
       ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "Guest bills &amp; folios" }] : []),
       ...(perm && hasPermission(perm, "ROOMS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover sheet" }] : []),
@@ -2398,6 +2402,35 @@ function renderSmartHandoverSheet(snap: SmartHandoverSnapshot, hotelCurrency: st
         .join("")}</ul>`
     : smartCardEmpty("All current departures have settled their bills.");
 
+  const checkedOutList = snap.checkedOutToday.length
+    ? `<ul>${snap.checkedOutToday
+        .slice(0, 12)
+        .map((d) => {
+          const balance =
+            d.balanceStatus === "refund_due"
+              ? `Refund due ${fmtMoney(d.balanceAmount, d.currency)}`
+              : d.balanceStatus === "outstanding"
+                ? `Outstanding ${fmtMoney(d.balanceAmount, d.currency)}`
+                : "Settled";
+          return `<li><strong>${escapeHtml(d.guestName)}</strong>${
+            d.unitName ? `<span class="room-pill">Room ${escapeHtml(d.unitName)}</span>` : ""
+          }<span class="muted">Checked out ${escapeHtml(fmtTime(d.checkedOutAt))}${d.staffLabel ? ` · ${escapeHtml(d.staffLabel)}` : ""} · ${escapeHtml(String(d.paymentStatus))} · ${escapeHtml(balance)}</span></li>`;
+        })
+        .join("")}</ul>`
+    : smartCardEmpty("No guests have checked out today yet.");
+
+  const refundDueList = snap.refundDue.length
+    ? `<ul>${snap.refundDue
+        .slice(0, 12)
+        .map(
+          (r) =>
+            `<li><strong>${escapeHtml(r.guestName)}</strong>${
+              r.unitName ? `<span class="room-pill">Room ${escapeHtml(r.unitName)}</span>` : ""
+            }<span class="muted">Credit / refund due <strong>${escapeHtml(fmtMoney(r.amount, r.currency))}</strong> · checked out ${escapeHtml(ymd(r.checkOut))}</span></li>`
+        )
+        .join("")}</ul>`
+    : smartCardEmpty("No guest credit balances found for today.");
+
   const vipList = snap.vipInHouse.length
     ? `<ul>${snap.vipInHouse
         .slice(0, 12)
@@ -2468,6 +2501,8 @@ function renderSmartHandoverSheet(snap: SmartHandoverSnapshot, hotelCurrency: st
     <div class="smart-strip">
       ${stripCard("Pending arrivals", t.pendingArrivals, "Expected today, not yet checked in", "warn")}
       ${stripCard("Unpaid departures", t.unpaidDepartures, "Outstanding folio balance", "alert")}
+      ${stripCard("Checked out today", t.checkedOutToday, "Historical stays processed", "ok")}
+      ${stripCard("Refund due", t.refundDue, "Credit balances to resolve", "warn")}
       ${stripCard("VIPs in-house", t.vipInHouse, "Guests flagged VIP", "ok")}
       ${stripCard("Open complaints", t.openComplaints, "Low ratings without follow-up", "alert")}
       ${stripCard("Dirty rooms", t.dirtyRooms, "Need cleaning before sale", "warn")}
@@ -2486,6 +2521,16 @@ function renderSmartHandoverSheet(snap: SmartHandoverSnapshot, hotelCurrency: st
         <h3>💳 Departures with money owing <span class="pill">${t.unpaidDepartures}</span></h3>
         <p class="muted">Settle these folios before the guest leaves.</p>
         ${departuresList}
+      </div>
+      <div class="smart-card ${t.checkedOutToday > 0 ? "ok" : "info"}">
+        <h3>✅ Checked out today <span class="pill">${t.checkedOutToday}</span></h3>
+        <p class="muted">Guests already processed this business day — useful for the next shift.</p>
+        ${checkedOutList}
+      </div>
+      <div class="smart-card ${smartTone(t.refundDue)}">
+        <h3>↩ Refund / credit due <span class="pill">${t.refundDue}</span></h3>
+        <p class="muted">Overpayments that should be returned or explained before shift close.</p>
+        ${refundDueList}
       </div>
       <div class="smart-card ${t.vipInHouse > 0 ? "ok" : "info"}">
         <h3>⭐ VIPs in-house <span class="pill">${t.vipInHouse}</span></h3>
@@ -9127,6 +9172,7 @@ async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCente
 
   const [
     arrivals,
+    checkedOutToday,
     departures,
     inHouse,
     conversations,
@@ -9150,6 +9196,19 @@ async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCente
           },
           include: { guest: true, roomType: true, roomUnit: true },
           orderBy: { checkIn: "asc" },
+          take: 12
+        })
+      : Promise.resolve([]),
+    show.bookings
+      ? prisma.booking.findMany({
+          where: {
+            hotelId: hotel.id,
+            ...propBooking,
+            checkOut: { gte: opDay, lt: opNext },
+            status: BookingStatus.CHECKED_IN
+          },
+          include: { guest: true, roomUnit: true },
+          orderBy: { checkOut: "desc" },
           take: 12
         })
       : Promise.resolve([]),
@@ -9306,6 +9365,18 @@ async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCente
     const primaryHref = `/admin/bookings/${encodeURIComponent(b.id)}`;
     const primaryLabel = "Folio / check-out";
     return { guestLabel, roomLine, balanceLine, primaryHref, primaryLabel };
+  });
+
+  const checkedOutRows: CommandCenterCheckedOutRow[] = checkedOutToday.map((b) => {
+    const guestLabel = b.guest?.fullName?.trim() || b.guest?.phoneE164 || "Guest";
+    const roomLine = b.roomUnit?.name ?? "Unassigned";
+    return {
+      guestLabel,
+      roomLine,
+      checkoutLine: `${formatDateTime(b.checkOut)} · ${payShort(b.paymentStatus)}`,
+      bookingHref: `/admin/bookings/${encodeURIComponent(b.id)}`,
+      invoiceHref: `/admin/bookings/${encodeURIComponent(b.id)}/invoice-print`
+    };
   });
 
   const inHouseRows: CommandCenterInHouseRow[] = inHouse.map((b) => {
@@ -9487,6 +9558,7 @@ async function buildFrontDeskCommandCenterVm(req: Request): Promise<CommandCente
     roomSnapshot,
     arrivals: arrivalRows,
     departures: departureRows,
+    checkedOutToday: checkedOutRows,
     inHouse: inHouseRows,
     whatsappRows,
     whatsappPendingInbound: inboundPending.length,
@@ -11246,17 +11318,96 @@ adminRouter.get("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), asy
       })
     )
   ).join("");
+  const checkoutAuditRowsToday = await prisma.auditLog.findMany({
+    where: {
+      hotelId: hotel.id,
+      entityType: "Booking",
+      action: { in: ["MANUAL_FRONT_DESK_CHECK_OUT", "MANUAL_FRONT_DESK_CHECK_OUT_OUTSTANDING"] },
+      createdAt: { gte: boardDay, lt: dateEndExclusive }
+    },
+    orderBy: { createdAt: "desc" },
+    select: { entityId: true, createdAt: true, actorEmail: true, actorUserId: true }
+  });
+  const checkoutAuditByBookingToday = new Map<string, { createdAt: Date; actor: string }>();
+  for (const row of checkoutAuditRowsToday) {
+    if (!row.entityId || checkoutAuditByBookingToday.has(row.entityId)) continue;
+    checkoutAuditByBookingToday.set(row.entityId, {
+      createdAt: row.createdAt,
+      actor: row.actorEmail || row.actorUserId || "System"
+    });
+  }
+  const checkedOutAuditIds = Array.from(checkoutAuditByBookingToday.keys());
+  const checkedOutToday = await prisma.booking.findMany({
+    where: {
+      hotelId: hotel.id,
+      roomUnitId: { not: null },
+      status: BookingStatus.CHECKED_IN,
+      OR: [
+        ...(checkedOutAuditIds.length ? [{ id: { in: checkedOutAuditIds } }] : []),
+        { checkOut: { gte: boardDay, lt: dateEndExclusive } }
+      ]
+    },
+    include: { guest: true, roomType: true, roomUnit: true, property: true, paymentIntents: true },
+    orderBy: { checkOut: "desc" },
+    take: 50
+  });
+  const checkedOutTodayRows = (
+    await Promise.all(
+      checkedOutToday.map(async (b) => {
+        const audit = checkoutAuditByBookingToday.get(b.id);
+        const { folio } = await getBookingCheckoutSettlementSnapshot(prisma, b);
+        const signedBalance = Math.round((folio.totalCharges - folio.paidBalance) * 1000) / 1000;
+        const balanceLabel =
+          signedBalance < -0.005
+            ? `<span class="badge ok">Refund due ${formatMoney(Math.abs(signedBalance), folio.currency)}</span>`
+            : signedBalance > 0.005
+              ? `<span class="badge pending">Outstanding ${formatMoney(signedBalance, folio.currency)}</span>`
+              : '<span class="badge ok">Settled</span>';
+        const invoiceDispatch = await getLatestInvoiceDispatch(b.id);
+        const invoiceLabel = invoiceDispatch.sentAt
+          ? `<span class="badge ok">Sent</span><br/><span class="muted">${formatDateTime(invoiceDispatch.sentAt)}</span>`
+          : '<span class="badge pending">Not sent</span>';
+        const guestName = b.guest.fullName || b.guest.phoneE164 || "Guest";
+        return `<tr>
+          <td><strong>${escapeHtml(guestName)}</strong><br /><span class="muted">${escapeHtml(b.guest.phoneE164)}</span></td>
+          <td>${escapeHtml(b.roomUnit?.name ?? "Unassigned")}<br /><span class="muted">${escapeHtml(b.roomType.name)}</span></td>
+          <td>${escapeHtml(displayBookingReference(b))}<br /><span class="muted">${escapeHtml(b.source)}</span></td>
+          <td>${audit ? formatDateTime(audit.createdAt) : formatDateTime(b.checkOut)}<br/><span class="muted">${audit ? escapeHtml(audit.actor) : "—"}</span></td>
+          <td><span class="badge ${getBadgeClass(b.paymentStatus)}">${escapeHtml(b.paymentStatus)}</span><br/>${balanceLabel}</td>
+          <td>${invoiceLabel}</td>
+          <td>
+            <a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">Booking</a>
+            ${b.roomUnitId ? ` · <a class="inline-link" href="/admin/room-board/unit/${encodeURIComponent(b.roomUnitId)}/details?date=${encodeURIComponent(boardDateStr)}&highlightBooking=${encodeURIComponent(b.id)}">Folio</a>` : ""}
+            · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}/invoice-print">Invoice</a>
+          </td>
+        </tr>`;
+      })
+    )
+  ).join("");
 
   const content = `
 <h2>Departures / check-out</h2>
 <p class="muted">${escapeHtml(hotel.displayName)} — For the clearest flow, open <strong>Reservation details</strong> from the room board and use <strong>Checkout guest</strong> there after the folio is settled. This page still supports quick settlement and checkout for departures.</p>
 ${errorMsg ? `<p class="badge" style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 12px">${escapeHtml(errorMsg)}</p>` : ""}
 ${settledMsg}
+<div class="actions" style="margin:10px 0 16px">
+  <a class="btn-link primary" href="/admin/bookings?view=checked-out-today&range=today&rangeBy=checkOut&sort=checkout_desc">Checked-out today</a>
+  <a class="btn-link" href="/admin/bookings?view=checked-out&range=7d&rangeBy=checkOut&sort=checkout_desc">Checked-out history</a>
+  <a class="btn-link" href="/admin/bookings?view=outstanding&range=month&rangeBy=checkOut&sort=checkout_desc">Outstanding balances</a>
+</div>
 <section style="margin:12px 0 18px">
   <h3>Departures and active stays</h3>
   <table>
     <thead><tr><th>Guest</th><th>Room</th><th>Reservation</th><th>Check-in</th><th>Expected departure</th><th>Payment</th><th>Settlement / checkout</th></tr></thead>
     <tbody>${candidateRows || '<tr><td colspan="7">No assigned active stays found for this date.</td></tr>'}</tbody>
+  </table>
+</section>
+<section style="margin:12px 0 18px">
+  <h3>Already checked out today</h3>
+  <p class="muted" style="margin-top:-4px">Guests processed by the desk today. Historical stays remain visible here and in checked-out history, but no longer appear as active room occupants.</p>
+  <table>
+    <thead><tr><th>Guest</th><th>Room</th><th>Reservation</th><th>Checkout time / staff</th><th>Payment / balance</th><th>Invoice</th><th>Actions</th></tr></thead>
+    <tbody>${checkedOutTodayRows || '<tr><td colspan="7">No guests checked out for this date yet.</td></tr>'}</tbody>
   </table>
 </section>
 <form method="post" action="/admin/front-desk/check-out" style="max-width:640px;display:grid;gap:12px">
@@ -16893,18 +17044,102 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   }
 
   const activePropertyId = await resolveActivePropertyIdForHotel(req, hotel.id);
-  const now = startOfDay(new Date());
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const defaultEndInclusive = defaultBookingReportInclusiveEnd(now);
-  const start = parseDateInput(req.query.start, monthStart);
-  const end = parseDateInput(req.query.end, defaultEndInclusive);
+  const today = startOfDay(new Date());
+  const tomorrow = addDays(today, 1);
+  const yesterday = addDays(today, -1);
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  type BookingListView =
+    | "all"
+    | "pending"
+    | "confirmed"
+    | "arrival-today"
+    | "in-house"
+    | "due-out-today"
+    | "checked-out-today"
+    | "checked-out"
+    | "cancelled"
+    | "no-show"
+    | "outstanding"
+    | "refund-due";
+  const viewRaw = typeof req.query.view === "string" ? req.query.view.trim().toLowerCase() : "all";
+  const allowedViews: BookingListView[] = [
+    "all",
+    "pending",
+    "confirmed",
+    "arrival-today",
+    "in-house",
+    "due-out-today",
+    "checked-out-today",
+    "checked-out",
+    "cancelled",
+    "no-show",
+    "outstanding",
+    "refund-due"
+  ];
+  const view: BookingListView = allowedViews.includes(viewRaw as BookingListView) ? (viewRaw as BookingListView) : "all";
+  type BookingRangePreset = "today" | "yesterday" | "7d" | "month" | "custom";
+  const rangeRaw = typeof req.query.range === "string" ? req.query.range.trim().toLowerCase() : "";
+  const hasCustomRange = typeof req.query.start === "string" || typeof req.query.end === "string";
+  const rangePreset: BookingRangePreset =
+    rangeRaw === "today" || rangeRaw === "yesterday" || rangeRaw === "7d" || rangeRaw === "month" || rangeRaw === "custom"
+      ? rangeRaw
+      : hasCustomRange
+        ? "custom"
+        : view === "arrival-today" || view === "due-out-today" || view === "checked-out-today"
+          ? "today"
+          : "month";
+  const defaultRange = (() => {
+    switch (rangePreset) {
+      case "today":
+        return { start: today, end: today };
+      case "yesterday":
+        return { start: yesterday, end: yesterday };
+      case "7d":
+        return { start: addDays(today, -6), end: today };
+      case "month":
+        return { start: monthStart, end: monthEnd };
+      case "custom":
+      default:
+        return { start: monthStart, end: defaultBookingReportInclusiveEnd(today) };
+    }
+  })();
+  const start = parseDateInput(req.query.start, defaultRange.start);
+  const end = parseDateInput(req.query.end, defaultRange.end);
   const endExclusive = addDays(end, 1);
+  type BookingRangeBy = "checkIn" | "checkOut" | "createdAt";
+  const rangeByRaw = typeof req.query.rangeBy === "string" ? req.query.rangeBy.trim() : "";
+  const rangeBy: BookingRangeBy =
+    rangeByRaw === "checkIn" || rangeByRaw === "checkOut" || rangeByRaw === "createdAt"
+      ? rangeByRaw
+      : view === "due-out-today" || view === "checked-out" || view === "checked-out-today"
+        ? "checkOut"
+        : "createdAt";
+  const sortRaw = typeof req.query.sort === "string" ? req.query.sort.trim() : "newest";
+  const sort =
+    sortRaw === "checkin_asc" ||
+    sortRaw === "checkin_desc" ||
+    sortRaw === "checkout_asc" ||
+    sortRaw === "checkout_desc"
+      ? sortRaw
+      : "newest";
+  const orderBy: Prisma.BookingOrderByWithRelationInput =
+    sort === "checkin_asc"
+      ? { checkIn: "asc" }
+      : sort === "checkin_desc"
+        ? { checkIn: "desc" }
+        : sort === "checkout_asc"
+          ? { checkOut: "asc" }
+          : sort === "checkout_desc"
+            ? { checkOut: "desc" }
+            : { createdAt: "desc" };
   const status = typeof req.query.status === "string" ? req.query.status : "ALL";
   const allowedStatuses: BookingStatus[] = [
     BookingStatus.PENDING,
     BookingStatus.CONFIRMED,
     BookingStatus.CANCELLED,
-    BookingStatus.NO_SHOW
+    BookingStatus.NO_SHOW,
+    BookingStatus.CHECKED_IN
   ];
   const selectedStatus: BookingStatus | null = allowedStatuses.includes(status as BookingStatus)
     ? (status as BookingStatus)
@@ -16925,14 +17160,61 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       ? (paymentStatusParam as PaymentStatus)
       : null;
 
+  const checkoutAuditActions = ["MANUAL_FRONT_DESK_CHECK_OUT", "MANUAL_FRONT_DESK_CHECK_OUT_OUTSTANDING"];
+  const checkoutAuditRows =
+    view === "checked-out" || view === "checked-out-today"
+      ? await prisma.auditLog.findMany({
+          where: {
+            hotelId: hotel.id,
+            entityType: "Booking",
+            action: { in: checkoutAuditActions },
+            createdAt: { gte: start, lt: endExclusive }
+          },
+          select: { entityId: true, createdAt: true, actorEmail: true, actorUserId: true }
+        })
+      : [];
+  const auditedCheckedOutIds = Array.from(
+    new Set(checkoutAuditRows.map((row) => row.entityId).filter((id): id is string => Boolean(id)))
+  );
+  const where: Prisma.BookingWhereInput = {
+    hotelId: hotel.id,
+    ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
+    ...(selectedStatus ? { status: selectedStatus } : {}),
+    ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
+  };
+  (where as Record<BookingRangeBy, unknown>)[rangeBy] = { gte: start, lt: endExclusive };
+  if (view === "pending") where.status = BookingStatus.PENDING;
+  if (view === "confirmed") where.status = BookingStatus.CONFIRMED;
+  if (view === "cancelled") where.status = BookingStatus.CANCELLED;
+  if (view === "no-show") where.status = BookingStatus.NO_SHOW;
+  if (view === "arrival-today") {
+    where.checkIn = { gte: today, lt: tomorrow };
+    where.status = { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] };
+  }
+  if (view === "in-house") {
+    where.status = BookingStatus.CHECKED_IN;
+    where.checkIn = { lt: tomorrow };
+    where.checkOut = { gte: today };
+  }
+  if (view === "due-out-today") {
+    where.checkOut = { gte: today, lt: tomorrow };
+    where.status = { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN, BookingStatus.PENDING] };
+  }
+  if (view === "checked-out" || view === "checked-out-today") {
+    delete (where as Record<string, unknown>).createdAt;
+    where.status = BookingStatus.CHECKED_IN;
+    where.OR = [
+      ...(auditedCheckedOutIds.length ? [{ id: { in: auditedCheckedOutIds } }] : []),
+      { checkOut: { gte: start, lt: new Date() } }
+    ];
+    where.checkOut = { gte: start, lt: endExclusive };
+  }
+  if (view === "outstanding") {
+    where.paymentStatus = { not: PaymentStatus.SUCCEEDED };
+  }
+
   const bookings = await prisma.booking.findMany({
-    where: {
-      hotelId: hotel.id,
-      ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}),
-      checkIn: { gte: start, lt: endExclusive },
-      ...(selectedStatus ? { status: selectedStatus } : {}),
-      ...(selectedPaymentStatus ? { paymentStatus: selectedPaymentStatus } : {})
-    },
+    where,
     include: {
       roomType: true,
       guest: true,
@@ -16940,7 +17222,7 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       roomUnit: { select: { name: true } },
       paymentIntents: { select: { amount: true, status: true } }
     },
-    orderBy: { checkIn: "asc" }
+    orderBy
   });
 
   const bookingIdsForPaymentRollup = bookings.map((booking) => booking.id);
@@ -16962,26 +17244,42 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
     const signed = p.transactionType === FolioTransactionType.REFUND ? -p.grossAmount : p.grossAmount;
     folioPaymentNetByBooking.set(p.bookingId, (folioPaymentNetByBooking.get(p.bookingId) ?? 0) + signed);
   }
-  const paidForBooking = (booking: (typeof bookings)[number]) =>
-    Math.max(
-      0,
-      booking.paymentIntents
-        .filter((p) => p.status === PaymentStatus.SUCCEEDED)
-        .reduce((sum, p) => sum + p.amount, 0) + (folioPaymentNetByBooking.get(booking.id) ?? 0)
-    );
+  const paidRawForBooking = (booking: (typeof bookings)[number]) =>
+    booking.paymentIntents
+      .filter((p) => p.status === PaymentStatus.SUCCEEDED)
+      .reduce((sum, p) => sum + p.amount, 0) + (folioPaymentNetByBooking.get(booking.id) ?? 0);
+  const paidForBooking = (booking: (typeof bookings)[number]) => Math.max(0, paidRawForBooking(booking));
+  const balanceForBooking = (booking: (typeof bookings)[number]) =>
+    Math.round((booking.totalAmount - paidRawForBooking(booking)) * 1000) / 1000;
+  const displayBookings = bookings.filter((booking) => {
+    const signedBalance = balanceForBooking(booking);
+    if (view === "outstanding") return signedBalance > 0.005;
+    if (view === "refund-due") return signedBalance < -0.005;
+    return true;
+  });
 
   const conversationsCount = await prisma.conversation.count({
     where: { hotelId: hotel.id, ...(isScopedPropertyId(activePropertyId) ? { propertyId: activePropertyId } : {}), createdAt: { gte: start, lt: endExclusive } }
   });
 
-  const revenue = bookings.reduce((sum, booking) => sum + booking.totalAmount, 0);
-  const paidTotal = bookings.reduce((sum, booking) => sum + paidForBooking(booking), 0);
-  const confirmed = bookings.filter((booking) => booking.status === "CONFIRMED").length;
-  const pending = bookings.filter((booking) => booking.status === "PENDING").length;
-  const cancelled = bookings.filter((booking) => booking.status === "CANCELLED").length;
-  const whatsappConfirmed = bookings.filter((booking) => booking.status === "CONFIRMED" && Boolean(booking.conversationId)).length;
+  const revenue = displayBookings.reduce((sum, booking) => sum + booking.totalAmount, 0);
+  const paidTotal = displayBookings.reduce((sum, booking) => sum + paidForBooking(booking), 0);
+  const confirmed = displayBookings.filter((booking) => booking.status === "CONFIRMED").length;
+  const pending = displayBookings.filter((booking) => booking.status === "PENDING").length;
+  const cancelled = displayBookings.filter((booking) => booking.status === "CANCELLED").length;
+  const checkedIn = displayBookings.filter((booking) => booking.status === "CHECKED_IN").length;
+  const whatsappConfirmed = displayBookings.filter((booking) => booking.status === "CONFIRMED" && Boolean(booking.conversationId)).length;
 
-  const rows = bookings
+  const checkoutAuditByBooking = new Map<string, { createdAt: Date; actor: string }>();
+  for (const row of checkoutAuditRows) {
+    if (!row.entityId || checkoutAuditByBooking.has(row.entityId)) continue;
+    checkoutAuditByBooking.set(row.entityId, {
+      createdAt: row.createdAt,
+      actor: row.actorEmail || row.actorUserId || "System"
+    });
+  }
+
+  const rows = displayBookings
     .map(
       (booking) => {
         const sourceLabel = booking.conversationId ? "WhatsApp" : booking.source;
@@ -16991,7 +17289,16 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
           : "";
         const rowClass = booking.status === "CONFIRMED" && sourceLabel === "WhatsApp" ? ' class="booking-whatsapp-confirmed"' : "";
         const paidAmount = paidForBooking(booking);
-        const balanceAmount = Math.max(0, booking.totalAmount - paidAmount);
+        const balanceAmount = balanceForBooking(booking);
+        const balanceLabel =
+          balanceAmount < -0.005
+            ? `<span class="badge ok">Refund due ${formatMoney(Math.abs(balanceAmount), hotel.currency)}</span>`
+            : formatMoney(Math.max(0, balanceAmount), hotel.currency);
+        const checkoutAudit = checkoutAuditByBooking.get(booking.id);
+        const isHistoricallyCheckedOut =
+          booking.status === BookingStatus.CHECKED_IN &&
+          (Boolean(checkoutAudit) || booking.checkOut.getTime() < new Date().getTime());
+        const bookingStatusLabel = isHistoricallyCheckedOut ? "CHECKED_OUT" : booking.status;
         const unitAssignmentBadge = booking.roomUnitId
           ? `<span class="badge ok">Unit assigned${booking.roomUnit?.name ? ` (${escapeHtml(booking.roomUnit.name)})` : ""}</span>`
           : '<span class="badge pending">Pending assignment</span>';
@@ -17006,28 +17313,100 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
       <td data-label="Nights">${booking.nights}</td>
       <td data-label="Total">${formatMoney(booking.totalAmount, hotel.currency)}</td>
       <td data-label="Paid">${formatMoney(paidAmount, hotel.currency)}</td>
-      <td data-label="Balance">${formatMoney(balanceAmount, hotel.currency)}</td>
-      <td data-label="Booking"><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span></td>
+      <td data-label="Balance">${balanceLabel}</td>
+      <td data-label="Booking"><span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(bookingStatusLabel)}</span></td>
       <td data-label="Payment"><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td>
       <td data-label="Unit">${unitAssignmentBadge}</td>
       <td data-label="Source"><span class="badge ${sourceLabel === "WhatsApp" ? "ok" : "pending"}">${escapeHtml(String(sourceLabel))}</span></td>
-      <td data-label="Actions"><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Open details</a></td>
+      <td data-label="Checkout audit">${
+        checkoutAudit
+          ? `${formatDateTime(checkoutAudit.createdAt)}<br/><span class="muted">${escapeHtml(checkoutAudit.actor)}</span>`
+          : '<span class="muted">—</span>'
+      }</td>
+      <td data-label="Actions"><a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Booking</a>${
+        booking.roomUnitId
+          ? ` · <a class="inline-link" href="/admin/room-board/unit/${encodeURIComponent(booking.roomUnitId)}/details?date=${encodeURIComponent(formatDateForInput(booking.checkOut))}&highlightBooking=${encodeURIComponent(booking.id)}">Folio</a>`
+          : ""
+      } · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(booking.id)}/invoice-print">Invoice</a></td>
       </tr>`
       }
     )
     .join("");
 
+  const bookingViewLabels: Array<{ value: BookingListView; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "pending", label: "Pending" },
+    { value: "confirmed", label: "Confirmed" },
+    { value: "arrival-today", label: "Arrival Today" },
+    { value: "in-house", label: "In-House" },
+    { value: "due-out-today", label: "Due Out Today" },
+    { value: "checked-out-today", label: "Checked-Out Today" },
+    { value: "checked-out", label: "Checked-Out History" },
+    { value: "cancelled", label: "Cancelled" },
+    { value: "no-show", label: "No-show" },
+    { value: "outstanding", label: "Outstanding Balance" },
+    { value: "refund-due", label: "Refund Due" }
+  ];
+  const qsFor = (extra: Record<string, string>) => {
+    const q = new URLSearchParams({
+      view,
+      range: rangePreset,
+      rangeBy,
+      sort,
+      start: formatDateForInput(start),
+      end: formatDateForInput(end),
+      status,
+      paymentStatus: paymentStatusParam,
+      ...extra
+    });
+    return `/admin/bookings?${q.toString()}`;
+  };
+  const viewChips = bookingViewLabels
+    .map(
+      (item) =>
+        `<a class="booking-view-chip${item.value === view ? " active" : ""}" href="${qsFor({ view: item.value })}">${escapeHtml(item.label)}</a>`
+    )
+    .join("");
+
   const content = `
 <h2>Reports & Bookings</h2>
-<p class="muted">Filter performance by date range, booking status, and track revenue trends. Default range uses <strong>check-in from the start of this month through the end of the month three months ahead</strong> so newly confirmed WhatsApp stays (often for future dates) appear without changing dates.</p>
+<p class="muted">One PMS reservation list for live, due-out, checked-out, cancelled/no-show, outstanding and refund follow-up views. Checked-out is derived from checkout audit/history because the schema intentionally keeps historical stays as <code>CHECKED_IN</code>.</p>
+<div class="booking-view-row">${viewChips}</div>
 <form method="get" action="/admin/bookings" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end">
+  <input type="hidden" name="view" value="${escapeHtml(view)}" />
+  <label>Range
+    <select name="range" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="today" ${rangePreset === "today" ? "selected" : ""}>Today</option>
+      <option value="yesterday" ${rangePreset === "yesterday" ? "selected" : ""}>Yesterday</option>
+      <option value="7d" ${rangePreset === "7d" ? "selected" : ""}>Last 7 days</option>
+      <option value="month" ${rangePreset === "month" ? "selected" : ""}>This month</option>
+      <option value="custom" ${rangePreset === "custom" ? "selected" : ""}>Custom</option>
+    </select>
+  </label>
+  <label>Range by
+    <select name="rangeBy" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="createdAt" ${rangeBy === "createdAt" ? "selected" : ""}>Created / newest</option>
+      <option value="checkIn" ${rangeBy === "checkIn" ? "selected" : ""}>Check-in</option>
+      <option value="checkOut" ${rangeBy === "checkOut" ? "selected" : ""}>Check-out</option>
+    </select>
+  </label>
   <label>From <input type="date" name="start" value="${formatDateForInput(start)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
   <label>To <input type="date" name="end" value="${formatDateForInput(end)}" style="padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+  <label>Sort
+    <select name="sort" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
+      <option value="newest" ${sort === "newest" ? "selected" : ""}>Newest first</option>
+      <option value="checkin_asc" ${sort === "checkin_asc" ? "selected" : ""}>Check-in ↑</option>
+      <option value="checkin_desc" ${sort === "checkin_desc" ? "selected" : ""}>Check-in ↓</option>
+      <option value="checkout_asc" ${sort === "checkout_asc" ? "selected" : ""}>Check-out ↑</option>
+      <option value="checkout_desc" ${sort === "checkout_desc" ? "selected" : ""}>Check-out ↓</option>
+    </select>
+  </label>
   <label>Booking status
     <select name="status" style="padding:8px; border:1px solid #d8dee6; border-radius:8px">
       <option value="ALL" ${status === "ALL" ? "selected" : ""}>All</option>
       <option value="PENDING" ${status === "PENDING" ? "selected" : ""}>Pending</option>
       <option value="CONFIRMED" ${status === "CONFIRMED" ? "selected" : ""}>Confirmed</option>
+      <option value="CHECKED_IN" ${status === "CHECKED_IN" ? "selected" : ""}>Checked-in / In-house</option>
       <option value="CANCELLED" ${status === "CANCELLED" ? "selected" : ""}>Cancelled</option>
       <option value="NO_SHOW" ${status === "NO_SHOW" ? "selected" : ""}>No Show</option>
     </select>
@@ -17050,16 +17429,20 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   <a class="btn-link" href="/admin/bookings/export?start=${encodeURIComponent(formatDateForInput(start))}&end=${encodeURIComponent(formatDateForInput(end))}&paymentStatus=FRIENDS_TRANSFER">Export friends transfer</a>
 </form>
 <div class="grid-4">
-  <article class="stat"><h3>Total bookings</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=ALL">${bookings.length}</a></p></article>
-  <article class="stat"><h3>Confirmed</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=CONFIRMED">${confirmed}</a></p></article>
+  <article class="stat"><h3>Total bookings</h3><p><a class="stat-link" href="${qsFor({ view: "all", status: "ALL" })}">${displayBookings.length}</a></p></article>
+  <article class="stat"><h3>Confirmed</h3><p><a class="stat-link" href="${qsFor({ view: "confirmed", status: "ALL" })}">${confirmed}</a></p></article>
   <article class="stat"><h3>WhatsApp Confirmed</h3><p>${whatsappConfirmed}</p></article>
-  <article class="stat"><h3>Pending / Cancelled</h3><p><a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=PENDING">${pending}</a> / <a class="stat-link" href="/admin/bookings?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}&status=CANCELLED">${cancelled}</a></p></article>
+  <article class="stat"><h3>Pending / Cancelled</h3><p><a class="stat-link" href="${qsFor({ view: "pending", status: "ALL" })}">${pending}</a> / <a class="stat-link" href="${qsFor({ view: "cancelled", status: "ALL" })}">${cancelled}</a></p></article>
+  <article class="stat"><h3>Checked-in rows</h3><p><a class="stat-link" href="${qsFor({ view: "in-house", status: "ALL" })}">${checkedIn}</a></p></article>
   <article class="stat"><h3>Revenue</h3><p><a class="stat-link" href="/admin/billing">${formatMoney(revenue, hotel.currency)}</a></p></article>
   <article class="stat"><h3>Paid / Balance</h3><p>${formatMoney(paidTotal, hotel.currency)} / ${formatMoney(Math.max(0, revenue - paidTotal), hotel.currency)}</p></article>
 </div>
 <p class="muted" style="margin-top:10px">Conversations in range: <strong><a class="inline-link" href="/admin/conversations?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}">${conversationsCount}</a></strong> (opens conversations filtered by this date range)</p>
 <style>
   .booking-whatsapp-confirmed { background: #f3fff8; }
+  .booking-view-row { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 14px; }
+  .booking-view-chip { display:inline-flex; align-items:center; padding:7px 10px; border:1px solid #d8dee6; border-radius:999px; background:#fff; color:#075e54; text-decoration:none; font-size:12px; font-weight:800; }
+  .booking-view-chip.active { background:#075e54; color:#fff; border-color:#075e54; }
   .bookings-report-table { min-width: 980px; font-size: 12px; }
   .bookings-report-table th,
   .bookings-report-table td { padding: 8px 7px; vertical-align: middle; }
@@ -17111,8 +17494,8 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   }
 </style>
 <table class="bookings-report-table">
-  <thead><tr><th>Reference</th><th>Guest Name</th><th>Phone Number</th><th>Room Type</th><th>Check-in</th><th>Check-out</th><th>Guests</th><th>Nights</th><th>Total Amount</th><th>Paid</th><th>Balance</th><th>Booking Status</th><th>Payment Status</th><th>Unit Assignment</th><th>Source</th><th>Actions</th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="16">No bookings in selected range.</td></tr>'}</tbody>
+  <thead><tr><th>Reference</th><th>Guest Name</th><th>Phone Number</th><th>Room Type</th><th>Check-in</th><th>Check-out</th><th>Guests</th><th>Nights</th><th>Total Amount</th><th>Paid</th><th>Balance</th><th>Booking Status</th><th>Payment Status</th><th>Unit Assignment</th><th>Source</th><th>Checkout audit</th><th>Actions</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="17">No bookings in selected range.</td></tr>'}</tbody>
 </table>`;
   res.type("html").send(renderLayout(content, true));
 });
@@ -22227,7 +22610,16 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
     booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.PENDING;
   const canAddLinkedRoom =
     booking.status !== BookingStatus.CANCELLED && booking.status !== BookingStatus.NO_SHOW;
-  const [selectedUnitCode, latestInvoiceDispatch, fbFolio, fbOrders, bookingMessages, failedGuestNotifications] = await Promise.all([
+  const [
+    selectedUnitCode,
+    latestInvoiceDispatch,
+    fbFolio,
+    fbOrders,
+    bookingMessages,
+    failedGuestNotifications,
+    statusHistoryRows,
+    bookingAuditRows
+  ] = await Promise.all([
     getBookingUnitCode(booking.id),
     getLatestInvoiceDispatch(booking.id),
     getFbFolioForBooking(booking.id),
@@ -22252,6 +22644,24 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
       },
       orderBy: { createdAt: "desc" },
       take: 8
+    }),
+    prisma.bookingStatusHistory.findMany({
+      where: { hotelId: hotel.id, bookingId: booking.id },
+      orderBy: { createdAt: "desc" },
+      take: 12,
+      include: { actorUser: { select: { fullName: true, email: true } } }
+    }),
+    prisma.auditLog.findMany({
+      where: {
+        hotelId: hotel.id,
+        OR: [
+          { bookingId: booking.id },
+          { entityType: "Booking", entityId: booking.id },
+          { action: { in: ["FOLIO_REFUND_POSTED", "FRONT_DESK_CHECKOUT_PAYMENT_SETTLED"] }, metadataJson: { contains: booking.id } }
+        ]
+      },
+      orderBy: { createdAt: "desc" },
+      take: 20
     })
   ]);
   const folioGrandTotal = Number((booking.totalAmount + fbFolio.subtotal).toFixed(2));
@@ -22427,6 +22837,76 @@ adminRouter.get("/bookings/:id", requirePermission("BOOKINGS", "VIEW"), async (r
   const conversationLink = booking.conversationId
     ? `<a class="inline-link" href="/admin/conversations/${encodeURIComponent(booking.conversationId)}">Open linked conversation</a>`
     : '<span class="muted">No conversation linked.</span>';
+  const statusHistoryHtml = statusHistoryRows
+    .map((row) => {
+      const actor = row.actorUser?.fullName ?? row.actorUser?.email ?? row.actorUserId ?? "System";
+      return `<tr>
+        <td>${formatDateTime(row.createdAt)}</td>
+        <td>${row.fromStatus ? escapeHtml(row.fromStatus) : '<span class="muted">—</span>'} → <strong>${escapeHtml(row.toStatus)}</strong></td>
+        <td>${escapeHtml(row.source)}</td>
+        <td>${escapeHtml(actor)}</td>
+        <td>${row.note ? escapeHtml(row.note) : '<span class="muted">—</span>'}</td>
+      </tr>`;
+    })
+    .join("");
+  const auditHtml = bookingAuditRows
+    .map((row) => {
+      const metadata = parseAuditMetadata(row.metadataJson);
+      const outstanding = metadata.outstanding && typeof metadata.outstanding === "object"
+        ? (metadata.outstanding as Record<string, unknown>)
+        : null;
+      const detailParts: string[] = [];
+      if (typeof metadata.departureDate === "string") detailParts.push(`Departure ${metadata.departureDate}`);
+      if (typeof metadata.departureTime === "string") detailParts.push(`Time ${metadata.departureTime}`);
+      if (typeof metadata.executedByEmail === "string") detailParts.push(`By ${metadata.executedByEmail}`);
+      if (outstanding) {
+        const amount = typeof outstanding.amount === "number" ? outstanding.amount.toFixed(3) : String(outstanding.amount ?? "");
+        const currency = typeof outstanding.currency === "string" ? outstanding.currency : booking.currency;
+        const payer = typeof outstanding.payerType === "string" ? outstanding.payerType : "payer";
+        detailParts.push(`Outstanding ${currency} ${amount} (${payer})`);
+      }
+      return `<tr>
+        <td>${formatDateTime(row.createdAt)}</td>
+        <td><strong>${escapeHtml(row.action)}</strong></td>
+        <td>${escapeHtml(row.actorEmail || row.actorUserId || "System")}</td>
+        <td>${detailParts.length ? escapeHtml(detailParts.join(" · ")) : '<span class="muted">—</span>'}</td>
+      </tr>`;
+    })
+    .join("");
+  const activityAuditPanel = `<section style="margin:18px 0">
+  <h3>Checkout &amp; audit visibility</h3>
+  <p class="muted" style="margin-top:0">Front-desk audit trail for status movement, checkout timestamp/staff, invoice status, payment status, outstanding balance, and refund activity.</p>
+  <div class="grid-2" style="align-items:start">
+    <div>
+      <table>
+        <tbody>
+          <tr><th>Derived checkout state</th><td>${
+            booking.status === BookingStatus.CHECKED_IN && booking.checkOut < new Date()
+              ? '<span class="badge ok">Checked-out / historical</span>'
+              : `<span class="badge ${getBadgeClass(booking.status)}">${escapeHtml(booking.status)}</span>`
+          }</td></tr>
+          <tr><th>Invoice status</th><td>${escapeHtml(invoiceStatusNote)}</td></tr>
+          <tr><th>Payment status</th><td><span class="badge ${getBadgeClass(booking.paymentStatus)}">${escapeHtml(booking.paymentStatus)}</span></td></tr>
+          <tr><th>Final room status</th><td>${selectedUnitCode ? "Historical stay linked to room " + escapeHtml(selectedUnitCode) : '<span class="muted">No selected unit</span>'}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="overflow:auto">
+      <h4 style="margin:0 0 8px">Status history</h4>
+      <table>
+        <thead><tr><th>Time</th><th>Status</th><th>Source</th><th>Actor</th><th>Note</th></tr></thead>
+        <tbody>${statusHistoryHtml || '<tr><td colspan="5">No status history rows yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+  </div>
+  <div style="overflow:auto;margin-top:12px">
+    <h4 style="margin:0 0 8px">Operational audit log</h4>
+    <table>
+      <thead><tr><th>Time</th><th>Action</th><th>Actor</th><th>Details</th></tr></thead>
+      <tbody>${auditHtml || '<tr><td colspan="4">No booking audit entries yet.</td></tr>'}</tbody>
+    </table>
+  </div>
+</section>`;
 
   const content = `
 <h2>Booking ${escapeHtml(booking.id)}</h2>
@@ -22445,6 +22925,7 @@ ${linkedAddedNotice}
 ${roomChangeErrBanner}
 ${noUnitWarning}
 ${groupSectionHtml}
+${activityAuditPanel}
 <div class="actions">
   <a class="btn-link" href="/admin/bookings">Back to bookings</a>
   <a class="btn-link" href="/admin/calendar?start=${formatDate(booking.checkIn)}&days=14">Open calendar around stay</a>
