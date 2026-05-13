@@ -175,6 +175,7 @@ import {
   getBookingCheckoutSettlementSnapshot,
   performGuestCheckout
 } from "../core/guestCheckout";
+import type { SettlementPayerType } from "../core/bookingSettlementPolicy";
 import {
   formatGuestVipAndTagsHtml,
   refreshGuestSegmentTagsForGuest,
@@ -3225,11 +3226,23 @@ export async function sendInvoicePdfForBooking(params: {
       paymentIntentsSucceededTotal
     })
   ]);
-  if (
-    documentKind === "invoice" &&
-    (booking.paymentStatus !== PaymentStatus.SUCCEEDED || folioSummary.outstandingBalance > 0.005)
-  ) {
-    return { sent: false, skipped: true, error: "Invoice is held until payment is fully settled." };
+  if (documentKind === "invoice") {
+    // Invoices are sent immediately when the folio is paid in full. When the
+    // booking went through the "Checkout with outstanding balance" path the
+    // paymentStatus moves to LPO / FRIENDS_TRANSFER / REFUNDED and the invoice
+    // is allowed to ship with a printed "Outstanding balance:" line so the
+    // guest / company / OTA can see what's still owed. PENDING / REQUIRES_ACTION
+    // still wait — those are mid-checkout states.
+    const postStaySettlementOk =
+      booking.paymentStatus === PaymentStatus.LPO ||
+      booking.paymentStatus === PaymentStatus.FRIENDS_TRANSFER ||
+      booking.paymentStatus === PaymentStatus.REFUNDED;
+    const fullyPaid =
+      booking.paymentStatus === PaymentStatus.SUCCEEDED &&
+      folioSummary.outstandingBalance <= 0.005;
+    if (!fullyPaid && !postStaySettlementOk) {
+      return { sent: false, skipped: true, error: "Invoice is held until payment is fully settled." };
+    }
   }
   const grandTotal = folioSummary.totalCharges;
   const refPrefix = documentKind === "quotation" ? "QUO" : documentKind === "receipt" ? "RCP" : "INV";
@@ -12822,9 +12835,25 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       );
     }
     const refNoteCell = refNoteParts.length ? refNoteParts.join("<br/>") : "—";
+    const refundEligible =
+      !voided &&
+      booking &&
+      r.transactionType === FolioTransactionType.PAYMENT &&
+      r.folioPaymentStatus === FolioTxnPaymentStatus.PAID;
+    const actionButtons: string[] = [];
+    if (!voided && booking) {
+      actionButtons.push(
+        `<button type="button" class="btn-link rud-void-btn" data-txn-id="${escapeHtml(r.id)}">Void</button>`
+      );
+    }
+    if (refundEligible) {
+      actionButtons.push(
+        `<button type="button" class="btn-link rud-refund-btn" data-txn-id="${escapeHtml(r.id)}" data-amount="${r.grossAmount}" data-method="${escapeHtml(r.folioPaymentMethod ?? "CASH")}" data-label="${escapeHtml(r.itemName)}" style="color:#92400e">Refund</button>`
+      );
+    }
     const voidBtn =
-      !voided && booking
-        ? `<button type="button" class="btn-link rud-void-btn" data-txn-id="${escapeHtml(r.id)}">Void transaction</button>`
+      actionButtons.length > 0
+        ? actionButtons.join(' <span class="muted" aria-hidden="true">·</span> ')
         : voided
           ? `<span class="muted" title="${escapeHtml(r.voidReason ?? "")}">—</span>`
           : "—";
@@ -12988,6 +13017,11 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <input type="hidden" name="date" value="${dateKey}" />
         <button type="submit" class="btn-link">Send invoice via WhatsApp</button>
       </form>
+      ${
+        booking && booking.status === BookingStatus.CONFIRMED
+          ? `<button type="button" class="btn-link" id="rud-quick-checkin" data-booking-id="${escapeHtml(booking.id)}" style="font-weight:700;color:#0a5c4e">Check in guest</button>`
+          : ""
+      }
       ${
         canOfferCheckoutButton
           ? `<button type="button" class="btn-link" id="rud-open-checkout" style="font-weight:700">Checkout guest</button>`
@@ -13396,10 +13430,95 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     <div class="rud-drawer-scroll">
       <p id="rud-checkout-block-reason" class="badge alert" style="display:none;margin:0 0 10px"></p>
       <dl class="rud-checkout-grid" id="rud-checkout-summary"></dl>
+      <div id="rud-checkout-outstanding" style="display:none;margin-top:16px;padding:12px;border:1px solid #fbbf24;background:#fffbeb;border-radius:10px">
+        <p style="margin:0 0 8px;font-weight:700;color:#92400e">Outstanding balance settlement</p>
+        <p id="rud-checkout-outstanding-policy" class="muted" style="margin:0 0 10px;font-size:12px"></p>
+        <label style="display:block;font-size:12px;font-weight:600;color:#5f6b7a;margin-bottom:4px">Reason
+          <input type="text" id="rud-checkout-out-reason" placeholder="e.g. LPO 2026-007 - settle within 7 days" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+        </label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px">
+          <label style="font-size:12px;font-weight:600;color:#5f6b7a">Due date
+            <input type="date" id="rud-checkout-out-due" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+          </label>
+          <label style="font-size:12px;font-weight:600;color:#5f6b7a">Payer
+            <select id="rud-checkout-out-payer" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px">
+              <option value="GUEST">Guest</option>
+              <option value="TOUR_COMPANY">Tour company</option>
+              <option value="TRAVEL_AGENT">Travel agent</option>
+              <option value="OTA">OTA channel</option>
+              <option value="CORPORATE">Company / corporate</option>
+              <option value="OTHER">Other</option>
+            </select>
+          </label>
+        </div>
+        <p id="rud-checkout-out-approval" class="muted" style="display:none;margin:10px 0 0;font-size:12px;color:#9a3412">
+          <strong>Manager approval required.</strong> This booking source normally requires full payment before checkout.
+          Provide a clear reason; this checkout will be logged with the staff who approved it.
+        </p>
+      </div>
+      <div id="rud-checkout-credit" style="display:none;margin-top:16px;padding:12px;border:1px solid #34d399;background:#ecfdf5;border-radius:10px">
+        <p style="margin:0 0 8px;font-weight:700;color:#065f46">Credit balance / refund due</p>
+        <p class="muted" style="margin:0 0 10px;font-size:12px">Guest overpaid. Record the refund details (or leave blank to handle later from the Guest Ledger).</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <label style="font-size:12px;font-weight:600;color:#5f6b7a">Refund method
+            <select id="rud-checkout-credit-method" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px">
+              <option value="">— defer —</option>
+              <option value="CASH">Cash</option>
+              <option value="CARD">Card</option>
+              <option value="BANK_TRANSFER">Bank transfer</option>
+              <option value="WALLET">Digital wallet</option>
+              <option value="OTHER">Other</option>
+            </select>
+          </label>
+          <label style="font-size:12px;font-weight:600;color:#5f6b7a">Reference / receipt #
+            <input type="text" id="rud-checkout-credit-ref" placeholder="optional" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+          </label>
+        </div>
+      </div>
     </div>
     <div class="rud-checkout-actions" style="padding:12px 18px;border-top:1px solid #e2e8f0;background:#fff">
       <button type="button" class="rud-checkout-primary" id="rud-checkout-confirm" disabled>Complete checkout</button>
       <button type="button" class="btn-link" id="rud-checkout-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="folio-refund-modal" class="rud-drawer" style="display:none" role="dialog" aria-modal="true" aria-labelledby="folio-refund-title" aria-hidden="true">
+  <div class="rud-drawer-sheet">
+    <div class="rud-drawer-head">
+      <div>
+        <p class="rud-drawer-kicker muted">Guest ledger</p>
+        <h3 id="folio-refund-title" class="rud-drawer-title">Record refund</h3>
+      </div>
+      <button type="button" class="rud-drawer-close" data-close-refund aria-label="Close">&times;</button>
+    </div>
+    <div class="rud-drawer-scroll" style="padding:14px 18px">
+      <p class="muted" style="margin:0 0 10px;font-size:13px">Posts a REFUND line against the selected payment. Updates Booking.paymentStatus when fully reversed.</p>
+      <p id="folio-refund-parent-label" style="margin:0 0 12px;font-size:13px"><strong>Parent line:</strong> <span class="muted">—</span></p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+        <label style="font-size:12px;font-weight:600;color:#5f6b7a">Refund amount (${escapeHtml(cur)})
+          <input type="number" id="folio-refund-amount" min="0" step="0.001" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+        </label>
+        <label style="font-size:12px;font-weight:600;color:#5f6b7a">Method
+          <select id="folio-refund-method" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px">
+            <option value="CASH">Cash</option>
+            <option value="CARD">Card</option>
+            <option value="BANK_TRANSFER">Bank transfer</option>
+            <option value="WALLET">Digital wallet</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </label>
+      </div>
+      <label style="display:block;font-size:12px;font-weight:600;color:#5f6b7a;margin-bottom:10px">Reference / receipt #
+        <input type="text" id="folio-refund-ref" placeholder="optional" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+      </label>
+      <label style="display:block;font-size:12px;font-weight:600;color:#5f6b7a">Notes
+        <textarea id="folio-refund-notes" rows="2" placeholder="e.g. overpayment returned at checkout" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px;resize:vertical"></textarea>
+      </label>
+    </div>
+    <div class="rud-checkout-actions" style="padding:12px 18px;border-top:1px solid #e2e8f0;background:#fff">
+      <button type="button" class="rud-checkout-primary" id="folio-refund-submit" style="background:#b45309">Post refund</button>
+      <button type="button" class="btn-link" data-close-refund>Cancel</button>
     </div>
   </div>
 </div>
@@ -13436,9 +13555,11 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     var ch = document.getElementById("folio-charge-modal");
     var pay = document.getElementById("folio-payment-modal");
     var co = document.getElementById("rud-checkout-modal");
+    var rf = document.getElementById("folio-refund-modal");
     if (ch) { ch.style.display = "none"; ch.setAttribute("aria-hidden", "true"); }
     if (pay) { pay.style.display = "none"; pay.setAttribute("aria-hidden", "true"); }
     if (co) { co.style.display = "none"; co.setAttribute("aria-hidden", "true"); }
+    if (rf) { rf.style.display = "none"; rf.setAttribute("aria-hidden", "true"); }
     openBackdrop(false);
   }
   function openChargeDrawer() {
@@ -13739,6 +13860,134 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     });
   });
 
+  (function quickCheckInUi() {
+    var btn = document.getElementById("rud-quick-checkin");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      var id = btn.getAttribute("data-booking-id");
+      if (!id) return;
+      if (!window.confirm("Check this guest in now?")) return;
+      btn.disabled = true;
+      var originalText = btn.textContent;
+      btn.textContent = "Checking in…";
+      fetch("/admin/bookings/" + encodeURIComponent(id) + "/check-in", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({})
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (x) {
+          if (x.j && x.j.ok) {
+            showToast("Guest checked in.");
+            window.location.reload();
+          } else {
+            showToast((x.j && (x.j.error || x.j.message)) || "Check-in failed.", true);
+            btn.disabled = false;
+            btn.textContent = originalText || "Check in guest";
+          }
+        })
+        .catch(function () {
+          showToast("Check-in request failed.", true);
+          btn.disabled = false;
+          btn.textContent = originalText || "Check in guest";
+        });
+    });
+  })();
+
+  (function refundUi() {
+    var refundBookingId = ${booking ? JSON.stringify(booking.id) : '""'};
+    var modal = document.getElementById("folio-refund-modal");
+    if (!modal) return;
+    var amountEl = document.getElementById("folio-refund-amount");
+    var methodEl = document.getElementById("folio-refund-method");
+    var refEl = document.getElementById("folio-refund-ref");
+    var notesEl = document.getElementById("folio-refund-notes");
+    var parentLabel = document.getElementById("folio-refund-parent-label");
+    var submitBtn = document.getElementById("folio-refund-submit");
+    var currentParentId = "";
+
+    function open(parentId, amount, method, label) {
+      if (!refundBookingId) {
+        showToast("Refund is only available with a linked booking.", true);
+        return;
+      }
+      closeAllDrawers();
+      openBackdrop(true);
+      currentParentId = parentId;
+      if (amountEl) amountEl.value = String(Number(amount || 0).toFixed(3));
+      if (methodEl && method) methodEl.value = String(method).toUpperCase();
+      if (refEl) refEl.value = "";
+      if (notesEl) notesEl.value = "";
+      if (parentLabel) {
+        parentLabel.innerHTML =
+          "<strong>Parent line:</strong> " +
+          (label ? String(label).replace(/[<>&]/g, function (c) { return c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&amp;"; }) : "—");
+      }
+      modal.style.display = "block";
+      modal.setAttribute("aria-hidden", "false");
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Post refund"; }
+    }
+
+    document.querySelectorAll(".rud-refund-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        open(
+          btn.getAttribute("data-txn-id") || "",
+          btn.getAttribute("data-amount") || "0",
+          btn.getAttribute("data-method") || "CASH",
+          btn.getAttribute("data-label") || ""
+        );
+      });
+    });
+    document.querySelectorAll("[data-close-refund]").forEach(function (btn) {
+      btn.addEventListener("click", function () { closeAllDrawers(); });
+    });
+
+    if (submitBtn) {
+      submitBtn.addEventListener("click", function () {
+        var amount = parseFloat(amountEl && amountEl.value ? amountEl.value : "0");
+        if (!isFinite(amount) || amount <= 0) {
+          showToast("Enter a positive refund amount.", true);
+          return;
+        }
+        if (!currentParentId) {
+          showToast("Missing parent transaction.", true);
+          return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Posting…";
+        fetch("/admin/api/bookings/" + encodeURIComponent(refundBookingId) + "/folio/refund", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            amount: amount,
+            parentTransactionId: currentParentId,
+            folioPaymentMethod: methodEl && methodEl.value ? methodEl.value : "CASH",
+            referenceNumber: refEl && refEl.value ? refEl.value : null,
+            notes: notesEl && notesEl.value ? notesEl.value : null
+          })
+        })
+          .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (x) {
+            if (x.j && x.j.ok) {
+              showToast("Refund posted.");
+              window.location.reload();
+            } else {
+              showToast((x.j && (x.j.error || x.j.message)) || "Refund failed.", true);
+              submitBtn.disabled = false;
+              submitBtn.textContent = "Post refund";
+            }
+          })
+          .catch(function () {
+            showToast("Refund request failed.", true);
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Post refund";
+          });
+      });
+    }
+  })();
+
   (function checkoutGuestUi() {
     var elig = ${checkoutEligibilityJson};
     var bookingCheckoutId = ${booking ? JSON.stringify(booking.id) : '""'};
@@ -13773,8 +14022,26 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         return "—";
       }
     }
+    var outBox = document.getElementById("rud-checkout-outstanding");
+    var outPolicyEl = document.getElementById("rud-checkout-outstanding-policy");
+    var outReason = document.getElementById("rud-checkout-out-reason");
+    var outDue = document.getElementById("rud-checkout-out-due");
+    var outPayer = document.getElementById("rud-checkout-out-payer");
+    var outApproval = document.getElementById("rud-checkout-out-approval");
+    var creditBox = document.getElementById("rud-checkout-credit");
+    var creditMethod = document.getElementById("rud-checkout-credit-method");
+    var creditRef = document.getElementById("rud-checkout-credit-ref");
+
+    function isoPlusDays(days) {
+      var d = new Date();
+      d.setDate(d.getDate() + (Number(days) || 0));
+      return d.toISOString().slice(0, 10);
+    }
+
     function renderSummary() {
       summaryEl.innerHTML = "";
+      if (outBox) outBox.style.display = "none";
+      if (creditBox) creditBox.style.display = "none";
       if (!elig || !elig.ok) {
         if (blockEl) {
           blockEl.style.display = "block";
@@ -13804,6 +14071,20 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         summaryEl.appendChild(dt);
         summaryEl.appendChild(dd);
       });
+
+      if (elig.outstanding && outBox) {
+        outBox.style.display = "block";
+        var policy = elig.outstanding.policy || {};
+        var policyText = policy.reasonHint || "Outstanding balance — capture follow-up details.";
+        if (outPolicyEl) outPolicyEl.textContent = policyText;
+        if (outReason && !outReason.value) outReason.value = policy.reasonHint || "";
+        if (outDue && !outDue.value) outDue.value = isoPlusDays(policy.defaultDueDays || 7);
+        if (outPayer && policy.payerHint) outPayer.value = String(policy.payerHint);
+        if (outApproval) outApproval.style.display = policy.requiresApproval && !policy.allowed ? "block" : "none";
+      }
+      if (elig.creditDue && creditBox) {
+        creditBox.style.display = "block";
+      }
       confirmBtn.disabled = false;
     }
     function openModal() {
@@ -13825,13 +14106,36 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     if (closeBtn) closeBtn.addEventListener("click", closeModal);
     confirmBtn.addEventListener("click", function () {
       if (!bookingCheckoutId || confirmBtn.disabled) return;
+      var payload = {};
+      if (elig && elig.outstanding && outBox && outBox.style.display !== "none") {
+        var reason = outReason && outReason.value ? String(outReason.value).trim() : "";
+        if (!reason) {
+          showToast("Reason is required for outstanding-balance checkout.", true);
+          return;
+        }
+        payload.allowOutstanding = {
+          reason: reason,
+          dueDate: outDue && outDue.value ? String(outDue.value) : null,
+          payerType: outPayer && outPayer.value ? String(outPayer.value) : "GUEST"
+        };
+      }
+      if (elig && elig.creditDue && creditBox && creditBox.style.display !== "none") {
+        var method = creditMethod && creditMethod.value ? String(creditMethod.value).trim() : "";
+        if (method) {
+          payload.refund = {
+            method: method,
+            reference: creditRef && creditRef.value ? String(creditRef.value).trim() : null,
+            amount: elig.creditDue.amount
+          };
+        }
+      }
       confirmBtn.disabled = true;
       confirmBtn.textContent = "Processing…";
       fetch("/admin/bookings/" + encodeURIComponent(bookingCheckoutId) + "/checkout", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({})
+        body: JSON.stringify(payload)
       })
         .then(function (r) {
           return r.json().then(function (j) {
@@ -16992,7 +17296,8 @@ adminRouter.get("/alert-center", requireAuth, async (req, res) => {
     unpaidDepartures,
     cleaningTasks,
     pendingOutletTickets,
-    openComplaints
+    openComplaints,
+    postStayOutstanding
   ] = await Promise.all([
     staffId
       ? prisma.notification.findMany({
@@ -17061,6 +17366,21 @@ adminRouter.get("/alert-center", requireAuth, async (req, res) => {
       include: { guest: { select: { fullName: true, phoneE164: true } } },
       orderBy: { createdAt: "desc" },
       take: 8
+    }),
+    // Post-stay outstanding accounts: guests who already departed but whose
+    // folio is being settled by the company / tour-co / OTA / friend transfer.
+    // These are the rows our "Checkout with outstanding balance" flow flipped
+    // to LPO or FRIENDS_TRANSFER. Showing them here keeps finance honest.
+    prisma.booking.findMany({
+      where: {
+        hotelId: hotel.id,
+        checkOut: { lt: dayStart },
+        status: { in: [BookingStatus.CONFIRMED, BookingStatus.CHECKED_IN] },
+        paymentStatus: { in: [PaymentStatus.LPO, PaymentStatus.FRIENDS_TRANSFER] }
+      },
+      include: { guest: true, roomType: true, roomUnit: true },
+      orderBy: { checkOut: "desc" },
+      take: 25
     })
   ]);
 
@@ -17202,6 +17522,34 @@ adminRouter.get("/alert-center", requireAuth, async (req, res) => {
         .join("")}</ul>`
     : renderEmpty("No unpaid departures pending.");
 
+  const outstandingAccountsHtml = postStayOutstanding.length
+    ? `<ul class="alert-list">${postStayOutstanding
+        .map((b) => {
+          const guestName = b.guest?.fullName ?? b.guest?.phoneE164 ?? "Guest";
+          const roomLabel = b.roomUnit?.name ? `Room ${b.roomUnit.name}` : (b.roomType?.name ?? "Room");
+          const ref = b.referenceCode ?? b.id.slice(-6).toUpperCase();
+          const ageDays = Math.max(0, Math.round((dayStart.getTime() - b.checkOut.getTime()) / 86400000));
+          const sev = ageDays > 30 ? "critical" : ageDays > 14 ? "high" : "normal";
+          const sourceLabel =
+            b.paymentStatus === PaymentStatus.LPO
+              ? "LPO (B2B / corporate)"
+              : "Friends / manual transfer";
+          return `<li class="alert-row sev-${sev}">
+  ${severityDot(sev)}
+  <span class="alert-cat" style="background:#0f766e1a;color:#0f766e;border:1px solid #0f766e40">Outstanding accounts</span>
+  <div class="alert-body">
+    <div class="alert-title">${escapeHtml(guestName)} · ${escapeHtml(roomLabel)} — ${escapeHtml(sourceLabel)}</div>
+    <div class="alert-detail">Departed ${escapeHtml(b.checkOut.toISOString().slice(0, 10))} (${ageDays}d ago) · ref ${escapeHtml(ref)} · total ${escapeHtml(b.currency)} ${b.totalAmount.toFixed(3)}.</div>
+  </div>
+  <div class="alert-meta">
+    <span class="muted" style="font-size:12px">${escapeHtml(relativeTime(b.checkOut))}</span>
+    <a class="alert-open" href="/admin/bookings/${encodeURIComponent(b.id)}">Open ledger →</a>
+  </div>
+</li>`;
+        })
+        .join("")}</ul>`
+    : renderEmpty("No post-checkout outstanding accounts. Finance is clean.");
+
   const cleaningHtml = cleaningTasks.length
     ? `<ul class="alert-list">${cleaningTasks
         .map((t) => {
@@ -17275,6 +17623,7 @@ adminRouter.get("/alert-center", requireAuth, async (req, res) => {
     urgent: urgentTiles.length,
     arrivals: arrivalsNeedingRoom.length,
     unpaid: unpaidDepartures.length,
+    outstanding: postStayOutstanding.length,
     cleaning: cleaningTasks.length,
     outlet: pendingOutletTickets.length,
     complaints: openComplaints.length
@@ -17284,6 +17633,7 @@ adminRouter.get("/alert-center", requireAuth, async (req, res) => {
     { label: "Urgent", value: counts.urgent, tone: "#dc2626" },
     { label: "Arrivals to assign", value: counts.arrivals, tone: "#5b21b6" },
     { label: "Unpaid departures", value: counts.unpaid, tone: "#92400e" },
+    { label: "Outstanding accounts", value: counts.outstanding, tone: "#0f766e" },
     { label: "Cleaning queue", value: counts.cleaning, tone: "#0369a1" },
     { label: "Open F&amp;B tickets", value: counts.outlet, tone: "#7c2d12" },
     { label: "Complaints", value: counts.complaints, tone: "#9f1239" }
@@ -17337,6 +17687,10 @@ adminRouter.get("/alert-center", requireAuth, async (req, res) => {
     <section class="alert-section">
       <h3>Unpaid departures</h3>
       ${unpaidHtml}
+    </section>
+    <section class="alert-section">
+      <h3>Outstanding accounts (post-checkout)</h3>
+      ${outstandingAccountsHtml}
     </section>
     <section class="alert-section">
       <h3>Housekeeping queue</h3>
@@ -21590,6 +21944,36 @@ adminRouter.post("/bookings/:id/checkout", requirePermissionJson("ROOMS", "EDIT"
     const staffSession = getSession(req);
     const executedByEmail = staffSession?.email ?? "unknown";
 
+    let allowOutstanding: Parameters<typeof performGuestCheckout>[1]["allowOutstanding"] = null;
+    const rawAllow = body.allowOutstanding;
+    if (rawAllow && typeof rawAllow === "object") {
+      const allowObj = rawAllow as Record<string, unknown>;
+      const reason = String(allowObj.reason ?? "").trim().slice(0, 500);
+      if (!reason) {
+        res.status(400).json({ ok: false, error: "Reason is required for outstanding-balance checkout." });
+        return;
+      }
+      const payerRaw = String(allowObj.payerType ?? "GUEST").toUpperCase();
+      const payerType: SettlementPayerType =
+        payerRaw === "TOUR_COMPANY" ||
+        payerRaw === "TRAVEL_AGENT" ||
+        payerRaw === "OTA" ||
+        payerRaw === "CORPORATE" ||
+        payerRaw === "OTHER"
+          ? (payerRaw as SettlementPayerType)
+          : "GUEST";
+      const dueRaw = String(allowObj.dueDate ?? "").trim();
+      const dueDate = dueRaw ? startOfDay(parseDateInput(dueRaw, startOfDay(new Date()))) : null;
+      allowOutstanding = {
+        reason,
+        dueDate,
+        payerType,
+        approvedByEmail: executedByEmail,
+        approvedByStaffId: staffSession?.staffId ?? null,
+        policySource: "POLICY"
+      };
+    }
+
     const result = await performGuestCheckout(prisma, {
       hotelId: hotel.id,
       bookingId,
@@ -21599,7 +21983,8 @@ adminRouter.post("/bookings/:id/checkout", requirePermissionJson("ROOMS", "EDIT"
       discountRequested,
       executedByEmail,
       staffId: staffSession?.staffId ?? null,
-      ensureHkTask: ensureHousekeepingTaskForCleaningTx
+      ensureHkTask: ensureHousekeepingTaskForCleaningTx,
+      allowOutstanding
     });
     if (!result.ok) {
       res.status(400).json({ ok: false, error: result.message });
@@ -21607,7 +21992,9 @@ adminRouter.post("/bookings/:id/checkout", requirePermissionJson("ROOMS", "EDIT"
     }
     await logAudit({
       hotelId: hotel.id,
-      action: "MANUAL_FRONT_DESK_CHECK_OUT",
+      action: result.outstanding
+        ? "MANUAL_FRONT_DESK_CHECK_OUT_OUTSTANDING"
+        : "MANUAL_FRONT_DESK_CHECK_OUT",
       entityType: result.auditBookingId ? "Booking" : "RoomUnit",
       entityId: result.auditBookingId ?? result.roomUnitId,
       metadata: {
@@ -21618,7 +22005,19 @@ adminRouter.post("/bookings/:id/checkout", requirePermissionJson("ROOMS", "EDIT"
         departureReason: departureReason || undefined,
         discountRequested,
         executedByEmail,
-        path: "booking_json_checkout"
+        path: "booking_json_checkout",
+        outstanding: result.outstanding
+          ? {
+              amount: result.outstanding.amount,
+              currency: result.outstanding.currency,
+              dueDate: result.outstanding.dueDate
+                ? result.outstanding.dueDate.toISOString().slice(0, 10)
+                : null,
+              payerType: result.outstanding.payerType,
+              reason: result.outstanding.reason,
+              newPaymentStatus: result.outstanding.paymentStatus
+            }
+          : undefined
       }
     });
     if (result.hkFromCheckout.created && result.hkFromCheckout.taskId) {
@@ -21660,6 +22059,112 @@ adminRouter.post("/bookings/:id/checkout", requirePermissionJson("ROOMS", "EDIT"
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Checkout failed" });
+  }
+});
+
+// One-click check-in for an already-CONFIRMED reservation. Reuses the same
+// idempotent status-history + manual-room-status helpers used by the manual
+// front-desk check-in form so behaviour stays consistent.
+adminRouter.post("/bookings/:id/check-in", requirePermissionJson("ROOMS", "EDIT"), async (req, res) => {
+  try {
+    const hotel = await prisma.hotel.findFirst({
+      where: { slug: activeHotelSlug() },
+      select: { id: true }
+    });
+    if (!hotel) {
+      res.status(400).json({ ok: false, error: "Hotel not found" });
+      return;
+    }
+    const bookingId = String(req.params.id ?? "").trim();
+    if (!bookingId) {
+      res.status(400).json({ ok: false, error: "Reservation reference is missing." });
+      return;
+    }
+    const session = getSession(req);
+    const executedByEmail = session?.email ?? "unknown";
+
+    const result = await prisma.$transaction(async (tx) => {
+      const booking = await tx.booking.findFirst({
+        where: { id: bookingId, hotelId: hotel.id },
+        select: {
+          id: true,
+          status: true,
+          roomUnitId: true,
+          guestId: true,
+          currency: true,
+          checkIn: true
+        }
+      });
+      if (!booking) {
+        return { ok: false as const, status: 404, message: "Reservation was not found for this hotel." };
+      }
+      if (booking.status === BookingStatus.CHECKED_IN) {
+        return { ok: false as const, status: 409, message: "This reservation is already checked in." };
+      }
+      if (booking.status !== BookingStatus.CONFIRMED) {
+        return {
+          ok: false as const,
+          status: 400,
+          message:
+            "Only confirmed reservations can be checked in. Cancelled / pending bookings must be confirmed first."
+        };
+      }
+      if (!booking.roomUnitId) {
+        return { ok: false as const, status: 400, message: "Assign a room before checking the guest in." };
+      }
+
+      await tx.booking.update({
+        where: { id: booking.id },
+        data: { status: BookingStatus.CHECKED_IN }
+      });
+      await recordBookingStatusChange(tx, {
+        hotelId: hotel.id,
+        bookingId: booking.id,
+        fromStatus: booking.status,
+        toStatus: BookingStatus.CHECKED_IN,
+        source: "FRONT_DESK_QUICK_CHECK_IN"
+      });
+
+      const unitNotesRow = await tx.roomUnit.findUnique({
+        where: { id: booking.roomUnitId },
+        select: { notes: true }
+      });
+      await tx.roomUnit.update({
+        where: { id: booking.roomUnitId },
+        data: { notes: mergeRoomBoardStatusNote(unitNotesRow?.notes ?? null, "OCCUPIED") }
+      });
+
+      await ensureActiveFolio(tx, {
+        hotelId: hotel.id,
+        bookingId: booking.id,
+        guestId: booking.guestId,
+        roomUnitId: booking.roomUnitId,
+        currency: booking.currency,
+        staffId: session?.staffId ?? null
+      });
+
+      return { ok: true as const, roomUnitId: booking.roomUnitId, fromStatus: booking.status };
+    });
+
+    if (!result.ok) {
+      res.status(result.status).json({ ok: false, error: result.message });
+      return;
+    }
+    await logAudit({
+      hotelId: hotel.id,
+      action: "MANUAL_FRONT_DESK_CHECK_IN_QUICK",
+      entityType: "Booking",
+      entityId: bookingId,
+      metadata: {
+        bookingId,
+        roomUnitId: result.roomUnitId,
+        executedByEmail,
+        path: "booking_json_check_in"
+      }
+    });
+    res.json({ ok: true, message: "Guest checked in.", roomUnitId: result.roomUnitId });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : "Check-in failed" });
   }
 });
 

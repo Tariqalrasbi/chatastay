@@ -11,6 +11,11 @@ import { getFolioSummary, type FolioSummaryDto } from "./folioService";
 import { writeManualRoomStatusToNotes } from "./roomBoardNotes";
 import { round2 } from "./roomUnitFolio";
 import { startOfDay } from "./availability";
+import {
+  canCheckoutWithOutstanding,
+  type SettlementDecision,
+  type SettlementPayerType
+} from "./bookingSettlementPolicy";
 
 export type EnsureHkCleaningFn = (
   tx: Prisma.TransactionClient,
@@ -72,8 +77,61 @@ export type GuestCheckoutEligibility =
       };
       folio: FolioSummaryDto;
       paidAmount: number;
+      /**
+       * When the folio is in deficit AND the booking source / payment status
+       * agreement allows post-stay settlement (LPO, OTA, tour-co, corporate,
+       * etc.) we still return ok:true so the front-desk modal can offer the
+       * "Checkout with outstanding balance" path. UI must capture reason/due.
+       */
+      outstanding?: {
+        amount: number;
+        currency: string;
+        policy: SettlementDecision;
+      };
+      /**
+       * Guest overpaid (paid > total). Render a "credit / refund due" path on
+       * the checkout modal so receptionists can record the refund.
+       */
+      creditDue?: { amount: number; currency: string };
     }
   | { ok: false; code: string; message: string };
+
+/**
+ * Looks up the most recent registration card `bookedBy` value the front desk
+ * captured on this room unit. Stored as audit metadata (AuditLog rows of action
+ * `ROOM_UNIT_GUEST_DETAILS`) so we can read it back without a schema change.
+ */
+async function loadBookedByHint(
+  prisma: PrismaClient,
+  hotelId: string,
+  roomUnitId: string | null
+): Promise<string | null> {
+  if (!roomUnitId) return null;
+  try {
+    const row = await prisma.auditLog.findFirst({
+      where: {
+        hotelId,
+        action: "ROOM_UNIT_GUEST_DETAILS",
+        entityType: "RoomUnit",
+        entityId: roomUnitId
+      },
+      orderBy: { createdAt: "desc" },
+      select: { metadataJson: true }
+    });
+    if (!row?.metadataJson) return null;
+    let meta: unknown;
+    try {
+      meta = JSON.parse(row.metadataJson);
+    } catch {
+      return null;
+    }
+    if (!meta || typeof meta !== "object") return null;
+    const raw = (meta as Record<string, unknown>).bookedBy;
+    return typeof raw === "string" ? raw : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function evaluateGuestCheckoutEligibility(
   prisma: PrismaClient,
@@ -113,43 +171,98 @@ export async function evaluateGuestCheckoutEligibility(
         "Checkout cannot be completed while payment is still processing. Please wait for payment confirmation or settle manually."
     };
   }
-  if (booking.paymentStatus === PaymentStatus.PENDING || booking.paymentStatus === PaymentStatus.REQUIRES_ACTION) {
-    return {
-      ok: false,
-      code: "payment_processing",
-      message:
-        "Checkout cannot be completed while payment is still processing. Please wait for payment confirmation or settle manually."
-    };
-  }
-  const { folio, isPaid } = await getBookingCheckoutSettlementSnapshot(prisma, booking);
-  if (!isPaid || folio.outstandingBalance > 0.005) {
-    return {
-      ok: false,
-      code: "outstanding_balance",
-      message: `Checkout cannot be completed because this reservation still has an outstanding balance of ${folio.currency} ${folio.outstandingBalance.toFixed(3)}. Please add payment or settle the invoice first.`
-    };
-  }
+  const { folio } = await getBookingCheckoutSettlementSnapshot(prisma, booking);
   const guestName = booking.guest.fullName || booking.guest.phoneE164 || "Guest";
+  const bookingDto = {
+    id: booking.id,
+    hotelId: booking.hotelId,
+    roomUnitId: booking.roomUnitId,
+    guestName,
+    referenceDisplay: displayBookingReference(booking),
+    checkIn: booking.checkIn,
+    checkOut: booking.checkOut,
+    nights: booking.nights,
+    totalAmount: booking.totalAmount,
+    currency: booking.currency,
+    paymentStatus: booking.paymentStatus,
+    roomUnitName: booking.roomUnit?.name ?? null
+  } as const;
+
+  // Credit balance (overpaid). Folio summary clamps to 0; recompute the raw
+  // signed delta so the UI can surface a refund-due path.
+  const signedBalance = round2(folio.totalCharges - folio.paidBalance);
+  if (signedBalance < -0.005) {
+    return {
+      ok: true,
+      booking: bookingDto,
+      folio,
+      paidAmount: folio.paidBalance,
+      creditDue: { amount: Math.abs(signedBalance), currency: folio.currency }
+    };
+  }
+
+  const isPaid = folio.outstandingBalance <= 0.005;
+  if (isPaid) {
+    return { ok: true, booking: bookingDto, folio, paidAmount: folio.paidBalance };
+  }
+
+  // Outstanding balance — see if the booking source / payment-status agreement
+  // permits post-stay settlement. If so we still return ok:true and let the UI
+  // capture reason + due-date + payer before completing checkout.
+  const bookedBy = await loadBookedByHint(prisma, hotelId, booking.roomUnitId);
+  const policy = canCheckoutWithOutstanding({
+    source: booking.source,
+    paymentStatus: booking.paymentStatus,
+    bookedBy
+  });
+  if (
+    booking.paymentStatus !== PaymentStatus.PENDING &&
+    booking.paymentStatus !== PaymentStatus.REQUIRES_ACTION
+  ) {
+    // Already in a post-stay-eligible state (LPO / FRIENDS_TRANSFER / etc.) —
+    // surface the outstanding path so checkout can complete.
+    return {
+      ok: true,
+      booking: bookingDto,
+      folio,
+      paidAmount: folio.paidBalance,
+      outstanding: {
+        amount: folio.outstandingBalance,
+        currency: folio.currency,
+        policy
+      }
+    };
+  }
+  if (policy.allowed || policy.requiresApproval) {
+    // policy.allowed → caller can call performGuestCheckout with allowOutstanding directly.
+    // policy.requiresApproval → caller must show a manager-approval modal first.
+    return {
+      ok: true,
+      booking: bookingDto,
+      folio,
+      paidAmount: folio.paidBalance,
+      outstanding: {
+        amount: folio.outstandingBalance,
+        currency: folio.currency,
+        policy
+      }
+    };
+  }
   return {
-    ok: true,
-    booking: {
-      id: booking.id,
-      hotelId: booking.hotelId,
-      roomUnitId: booking.roomUnitId,
-      guestName,
-      referenceDisplay: displayBookingReference(booking),
-      checkIn: booking.checkIn,
-      checkOut: booking.checkOut,
-      nights: booking.nights,
-      totalAmount: booking.totalAmount,
-      currency: booking.currency,
-      paymentStatus: booking.paymentStatus,
-      roomUnitName: booking.roomUnit?.name ?? null
-    },
-    folio,
-    paidAmount: folio.paidBalance
+    ok: false,
+    code: "outstanding_balance",
+    message: `Checkout cannot be completed because this reservation still has an outstanding balance of ${folio.currency} ${folio.outstandingBalance.toFixed(3)}. Please add payment or settle the invoice first.`
   };
 }
+
+export type OutstandingCheckoutDetails = {
+  reason: string;
+  dueDate: Date | null;
+  payerType: SettlementPayerType;
+  approvedByStaffId?: string | null;
+  approvedByEmail?: string | null;
+  policySource: "POLICY" | "MANAGER_OVERRIDE";
+};
 
 export type PerformGuestCheckoutParams = {
   hotelId: string;
@@ -161,6 +274,13 @@ export type PerformGuestCheckoutParams = {
   executedByEmail: string;
   staffId?: string | null;
   ensureHkTask: EnsureHkCleaningFn;
+  /**
+   * When set, checkout proceeds even if the folio still has an outstanding
+   * balance. Booking.paymentStatus is moved to LPO (if not already a
+   * post-stay-settlement status) and an audit row is written so finance has
+   * a paper trail.
+   */
+  allowOutstanding?: OutstandingCheckoutDetails | null;
 };
 
 export type PerformGuestCheckoutOk = {
@@ -169,6 +289,15 @@ export type PerformGuestCheckoutOk = {
   roomUnitId: string;
   departureDateKey: string;
   hkFromCheckout: { created: boolean; taskId: string | null };
+  /** Set when checkout completed with an outstanding folio. */
+  outstanding?: {
+    amount: number;
+    currency: string;
+    paymentStatus: PaymentStatus;
+    dueDate: Date | null;
+    payerType: SettlementPayerType;
+    reason: string;
+  } | null;
 };
 
 export type PerformGuestCheckoutResult = PerformGuestCheckoutOk | { ok: false; message: string };
@@ -192,6 +321,7 @@ export async function performGuestCheckout(
   let hkFromCheckout: { created: boolean; taskId: string | null } = { created: false, taskId: null };
   let roomUnitIdForResult = "";
   let departureDateKey = "";
+  let outstandingResult: PerformGuestCheckoutOk["outstanding"] = null;
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -228,12 +358,23 @@ export async function performGuestCheckout(
       const cappedDiscount = Math.min(discountRequested, proRated);
       const newTotal = Math.max(0, Math.round((proRated - cappedDiscount) * 1000) / 1000);
 
+      // If the caller approved post-stay settlement, flip paymentStatus to LPO
+      // (B2B / finance follow-up) so reporting and the briefing widget can find
+      // the row. Leave FRIENDS_TRANSFER alone — it's also a valid post-stay
+      // state. Don't touch SUCCEEDED.
+      const shouldFlipToLpo =
+        Boolean(params.allowOutstanding) &&
+        booking.paymentStatus !== PaymentStatus.SUCCEEDED &&
+        booking.paymentStatus !== PaymentStatus.LPO &&
+        booking.paymentStatus !== PaymentStatus.FRIENDS_TRANSFER;
+
       await tx.booking.update({
         where: { id: booking.id },
         data: {
           checkOut: newCheckOut,
           nights: newNights,
-          totalAmount: newTotal
+          totalAmount: newTotal,
+          ...(shouldFlipToLpo ? { paymentStatus: PaymentStatus.LPO } : {})
         }
       });
 
@@ -263,6 +404,31 @@ export async function performGuestCheckout(
         createdByUserId: params.staffId ?? null,
         notes: "Guest departure (manual check-out)"
       });
+
+      if (params.allowOutstanding) {
+        // Recompute the folio outstanding after prorate so the value reported
+        // to the caller (and persisted in the audit log) reflects what finance
+        // actually needs to chase.
+        const paidAgg = await tx.paymentIntent.aggregate({
+          where: { hotelId: params.hotelId, bookingId: booking.id, status: PaymentStatus.SUCCEEDED },
+          _sum: { amount: true }
+        });
+        const folio = await getFolioSummary({
+          hotelId: params.hotelId,
+          bookingId: booking.id,
+          bookingTotalAmount: newTotal,
+          currency: booking.currency,
+          paymentIntentsSucceededTotal: round2(paidAgg._sum.amount ?? 0)
+        });
+        outstandingResult = {
+          amount: folio.outstandingBalance,
+          currency: folio.currency,
+          paymentStatus: shouldFlipToLpo ? PaymentStatus.LPO : booking.paymentStatus,
+          dueDate: params.allowOutstanding.dueDate ?? null,
+          payerType: params.allowOutstanding.payerType,
+          reason: params.allowOutstanding.reason
+        };
+      }
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Check-out could not be completed.";
@@ -274,6 +440,7 @@ export async function performGuestCheckout(
     auditBookingId,
     roomUnitId: roomUnitIdForResult,
     departureDateKey,
-    hkFromCheckout
+    hkFromCheckout,
+    outstanding: outstandingResult
   };
 }
