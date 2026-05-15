@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { BookingFlowReturnHint, FbCartDraftState, PendingPrebookOrder, WhatsAppMealPlanCode } from "../whatsapp/foodTypes";
+import { resolvePartyCountsFromSession } from "./partyCounts";
 import { prisma } from "../db";
 
 export type ConversationMode = "IDLE" | "BOOKING_MODE" | "QUESTION_MODE" | "AGENT_MODE";
@@ -10,6 +11,7 @@ export type BookingStep =
   | "children"
   | "capacity_room_pick"
   | "split_rooms"
+  | "room_distribution"
   | "rooms"
   | "checkin"
   | "checkout"
@@ -42,6 +44,12 @@ export type PersistentSessionState = {
   childCount?: number;
   /** When bookingStep is room_choice, list of offers shown so we can resolve selection to total/nights. */
   bookingRoomOffers?: Array<{ roomTypeId: string; roomTypeName: string; propertyId: string; total: number; nights: number }>;
+  /** When true, guest count fields below are cleared (new booking) instead of merged from previous metadata. */
+  clearBookingParty?: boolean;
+  /** Multi-room guest distribution (one entry per physical room). */
+  roomStayAllocations?: Array<{ roomTypeId: string; roomTypeName: string; adults: number; children: number }> | null;
+  /** Sub-state while bookingStep is room_distribution. */
+  distributionPhase?: "menu" | "manual_pax" | "mixed_types" | null;
   phoneNumberId?: string;
   guestName?: string;
   checkIn?: string;
@@ -175,6 +183,7 @@ export async function loadConversationSession(params: {
         "children",
         "capacity_room_pick",
         "split_rooms",
+        "room_distribution",
         "rooms",
         "checkin",
         "checkout",
@@ -246,8 +255,29 @@ export async function loadConversationSession(params: {
     lastInStayMenuSentAt: typeof metadata.lastInStayMenuSentAt === "string" ? metadata.lastInStayMenuSentAt : undefined,
     inStayComplaintStep: metadata.inStayComplaintStep === "await_description" ? "await_description" : undefined,
     inStayComplaintCategory: typeof metadata.inStayComplaintCategory === "string" ? metadata.inStayComplaintCategory : undefined,
-    inStayExtraAwaitQtyFor: typeof metadata.inStayExtraAwaitQtyFor === "string" ? metadata.inStayExtraAwaitQtyFor : undefined
+    inStayExtraAwaitQtyFor: typeof metadata.inStayExtraAwaitQtyFor === "string" ? metadata.inStayExtraAwaitQtyFor : undefined,
+    roomStayAllocations: parseRoomStayAllocations(metadata.roomStayAllocations),
+    distributionPhase:
+      metadata.distributionPhase === "menu" ||
+      metadata.distributionPhase === "manual_pax" ||
+      metadata.distributionPhase === "mixed_types"
+        ? metadata.distributionPhase
+        : undefined
   };
+}
+
+function parseRoomStayAllocations(raw: unknown): PersistentSessionState["roomStayAllocations"] {
+  if (!Array.isArray(raw)) return undefined;
+  const rows = raw
+    .filter((x): x is Record<string, unknown> => x !== null && typeof x === "object")
+    .map((x) => ({
+      roomTypeId: typeof x.roomTypeId === "string" ? x.roomTypeId : "",
+      roomTypeName: typeof x.roomTypeName === "string" ? x.roomTypeName : "",
+      adults: typeof x.adults === "number" ? x.adults : 0,
+      children: typeof x.children === "number" ? x.children : 0
+    }))
+    .filter((x) => x.roomTypeId.length > 0 && x.adults + x.children > 0);
+  return rows.length ? rows : undefined;
 }
 
 function parseFbCartDraft(raw: unknown): FbCartDraftState | undefined {
@@ -317,6 +347,13 @@ function parsePendingPrebook(raw: unknown): PendingPrebookOrder | undefined {
   return { lines, serviceMode: sm, timeNote, estimatedTotal };
 }
 
+function mergeOptionalNumber(params: { clearParty: boolean; incoming: number | undefined; prev: unknown }): number | null {
+  if (params.clearParty) return null;
+  if (typeof params.incoming === "number") return params.incoming;
+  if (typeof params.prev === "number") return params.prev;
+  return null;
+}
+
 export async function saveConversationSession(params: {
   hotelId: string;
   guestId: string;
@@ -349,12 +386,28 @@ export async function saveConversationSession(params: {
     checkOutOptions: params.state.checkOutOptions ?? [],
     manualCheckInDate: params.state.manualCheckInDate ?? null,
     manualCheckOutDate: params.state.manualCheckOutDate ?? null,
-    guestCount: params.state.guestCount ?? null,
-    roomCount: params.state.roomCount ?? null,
+    guestCount: mergeOptionalNumber({
+      clearParty: Boolean(params.state.clearBookingParty),
+      incoming: params.state.guestCount,
+      prev: prevMeta.guestCount
+    }),
+    roomCount: mergeOptionalNumber({
+      clearParty: Boolean(params.state.clearBookingParty),
+      incoming: params.state.roomCount,
+      prev: prevMeta.roomCount
+    }),
     bookingStep: params.state.bookingStep ?? null,
     capacityPickRoomTypes: params.state.capacityPickRoomTypes ?? null,
-    adultCount: params.state.adultCount ?? null,
-    childCount: params.state.childCount ?? null,
+    adultCount: mergeOptionalNumber({
+      clearParty: Boolean(params.state.clearBookingParty),
+      incoming: params.state.adultCount,
+      prev: prevMeta.adultCount
+    }),
+    childCount: mergeOptionalNumber({
+      clearParty: Boolean(params.state.clearBookingParty),
+      incoming: params.state.childCount,
+      prev: prevMeta.childCount
+    }),
     bookingRoomOffers: params.state.bookingRoomOffers ?? null,
     suggestedRoomTypeId: params.state.suggestedRoomTypeId ?? null,
     suggestedRoomTypeName: params.state.suggestedRoomTypeName ?? null,
@@ -393,7 +446,24 @@ export async function saveConversationSession(params: {
         ? params.state.inStayExtraAwaitQtyFor
         : typeof prevMeta.inStayExtraAwaitQtyFor === "string"
           ? prevMeta.inStayExtraAwaitQtyFor
-          : null
+          : null,
+    roomStayAllocations: (() => {
+      if (params.state.clearBookingParty) return null;
+      if (params.state.roomStayAllocations !== undefined && params.state.roomStayAllocations !== null) {
+        return params.state.roomStayAllocations;
+      }
+      if (Array.isArray(prevMeta.roomStayAllocations)) return prevMeta.roomStayAllocations;
+      return null;
+    })(),
+    distributionPhase: (() => {
+      if (params.state.clearBookingParty) return null;
+      if (params.state.distributionPhase !== undefined && params.state.distributionPhase !== null) {
+        return params.state.distributionPhase;
+      }
+      const p = prevMeta.distributionPhase;
+      if (p === "menu" || p === "manual_pax" || p === "mixed_types") return p;
+      return null;
+    })()
   };
   await prisma.conversationSession.upsert({
     where: { hotelId_guestId: { hotelId: params.hotelId, guestId: params.guestId } },
@@ -430,6 +500,7 @@ export async function upsertBookingDraft(params: {
     where: { hotelId: params.hotelId, guestId: params.guestId, status: "OPEN" },
     orderBy: { updatedAt: "desc" }
   });
+  const party = resolvePartyCountsFromSession(params.state);
   const draftData = {
     hotelId: params.hotelId,
     guestId: params.guestId,
@@ -438,7 +509,7 @@ export async function upsertBookingDraft(params: {
     status: "OPEN",
     checkIn: params.state.checkIn ? new Date(params.state.checkIn) : null,
     checkOut: params.state.checkOut ? new Date(params.state.checkOut) : null,
-    adults: params.state.adultCount ?? params.state.guestCount ?? 2,
+    adults: party.adults,
     rooms: params.state.roomCount ?? 1,
     guestName: params.state.guestName ?? null,
     roomTypeId: params.state.suggestedRoomTypeId ?? null,
@@ -450,7 +521,7 @@ export async function upsertBookingDraft(params: {
     metadataJson: JSON.stringify({
       stage: params.state.stage,
       nights: params.state.nights ?? null,
-      childCount: params.state.childCount ?? null,
+      childCount: party.children,
       checkInOptions: params.state.checkInOptions ?? [],
       checkOutOptions: params.state.checkOutOptions ?? []
     }),

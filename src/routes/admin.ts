@@ -22962,7 +22962,7 @@ ${activityAuditPanel}
         <tr><th>Room type</th><td>${escapeHtml(booking.roomType.name)}</td></tr>
         <tr><th>Selected unit</th><td>${selectedUnitCode ? escapeHtml(selectedUnitCode) : '<span class="badge pending">Not selected</span>'}</td></tr>
         <tr><th>Stay</th><td>${formatDate(booking.checkIn)} to ${formatDate(booking.checkOut)} (${booking.nights} nights)</td></tr>
-        <tr><th>Guests</th><td>${booking.adults}</td></tr>
+        <tr><th>Guests</th><td>${booking.adults} adult(s)${booking.children > 0 ? ` · ${booking.children} child(ren)` : ""} · <span class="muted">${booking.adults + booking.children} total</span></td></tr>
         <tr><th>Accommodation total</th><td>${formatMoney(booking.totalAmount, booking.currency)}</td></tr>
         <tr><th>F&amp;B (posted to folio)</th><td>${
           fbFolio.subtotal > 0 ? formatMoney(fbFolio.subtotal, booking.currency) : '<span class="muted">—</span>'
