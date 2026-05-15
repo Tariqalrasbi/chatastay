@@ -9,6 +9,10 @@ import {
 import { getSafeSendTime, hotelTimezoneOrUtc } from "../core/guestMessagingSchedule";
 import { trySendWhatsAppText } from "../whatsapp/send";
 import { parseLightGuestMemory } from "../core/lightGuestMemory";
+import {
+  STAFF_SCHEDULED_FOLLOWUP_TYPE,
+  staffFollowUpMessageFromPayload
+} from "../core/guestStaffFollowUp";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 
 type FollowUpType =
@@ -16,7 +20,8 @@ type FollowUpType =
   | "PENDING_REQUEST"
   | "PRE_ARRIVAL_ENGAGEMENT"
   | "POST_STAY_FOLLOWUP"
-  | "RE_ENGAGEMENT";
+  | "RE_ENGAGEMENT"
+  | typeof STAFF_SCHEDULED_FOLLOWUP_TYPE;
 
 function envHoursToMs(envKey: string, defaultHours: number): number {
   const h = parseInt(process.env[envKey] ?? String(defaultHours), 10);
@@ -339,13 +344,19 @@ async function seedReEngagement(now: Date): Promise<void> {
 }
 
 function buildFollowUpBody(params: {
-  type: FollowUpType;
+  type: FollowUpType | string;
   guestName: string;
   hotelName: string;
   memoryJson?: string | null;
+  payloadJson?: string | null;
 }): string {
   const who = firstName(params.guestName);
   const mem = parseLightGuestMemory(params.memoryJson ?? null);
+  if (params.type === STAFF_SCHEDULED_FOLLOWUP_TYPE) {
+    const custom = staffFollowUpMessageFromPayload(params.payloadJson);
+    if (custom) return custom;
+    return `Hello ${who}, this is ${params.hotelName}. We wanted to follow up with you on WhatsApp.`;
+  }
   if (params.type === "BOOKING_RECOVERY") {
     return `Hello ${who}, just checking in — would you like us to complete your booking or assist you further?`;
   }
@@ -377,6 +388,9 @@ async function shouldSuppressSend(fu: {
     select: { lightGuestMemoryJson: true }
   });
   const mem = parseLightGuestMemory(guestRow?.lightGuestMemoryJson ?? null);
+  if (fu.type === STAFF_SCHEDULED_FOLLOWUP_TYPE && mem.messagingDoNotDisturb) {
+    return true;
+  }
   if (fu.type === "POST_STAY_FOLLOWUP") {
     const ev = evaluateLifecycleMarketingEligibility("POST_STAY_FOLLOWUP", {
       messagingDoNotDisturb: mem.messagingDoNotDisturb,
@@ -510,7 +524,8 @@ export async function runGuestAutoFollowupSweep(): Promise<{ scheduled: number; 
       type: fu.type as FollowUpType,
       guestName: fu.guest.fullName ?? "Guest",
       hotelName: fu.hotel.displayName,
-      memoryJson: fu.guest.lightGuestMemoryJson
+      memoryJson: fu.guest.lightGuestMemoryJson,
+      payloadJson: fu.payloadJson
     });
     const send = await trySendWhatsAppText({
       to: fu.guest.phoneE164,

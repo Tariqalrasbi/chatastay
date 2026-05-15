@@ -37,6 +37,20 @@ import {
   lifecycleStateLabel
 } from "../core/guestLifecycleState";
 import {
+  buildPartnerLeadOutreachBody,
+  isPartnerLeadOutreachTemplateKey,
+  PARTNER_LEAD_OUTREACH_TEMPLATE_OPTIONS
+} from "../core/crmWhatsAppTemplates";
+import { parseLightGuestMemory } from "../core/lightGuestMemory";
+import {
+  createStaffScheduledGuestFollowUp,
+  formatDatetimeLocalValue,
+  guestFollowUpTypeLabel,
+  parseStaffFollowUpScheduledAt,
+  staffFollowUpMessageFromPayload,
+  STAFF_SCHEDULED_FOLLOWUP_TYPE
+} from "../core/guestStaffFollowUp";
+import {
   generateSecureToken,
   hashPassword as hashSecret,
   hashToken,
@@ -8049,16 +8063,6 @@ adminRouter.get("/analytics/optimization", requireAuth, async (_req, res) => {
   res.type("html").send(renderLayout(content, true));
 });
 
-function leadOutreachTemplate(template: "initial_intro" | "followup_1" | "followup_2", leadHotelName: string): string {
-  if (template === "followup_1") {
-    return `Hello, just following up from ChatStay regarding ${leadHotelName}. Would you be open to a short demo on how AI WhatsApp booking and operations can help your hotel team?`;
-  }
-  if (template === "followup_2") {
-    return `Quick follow-up from ChatStay for ${leadHotelName}. If this is not a fit now, we are happy to reconnect later.`;
-  }
-  return `Hello from ChatStay. We help hotels like ${leadHotelName} automate WhatsApp booking, guest operations, upsell, and follow-up in one platform. Would you like a quick walkthrough?`;
-}
-
 const PARTNER_LEAD_PIPELINE_STAGES: Array<{ value: string; label: string }> = [
   { value: "new", label: "New Lead" },
   { value: "contacted", label: "Contacted" },
@@ -8211,9 +8215,9 @@ adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, r
       <option value="whatsapp">whatsapp</option>
     </select>
     <select name="templateKey" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
-      <option value="initial_intro">initial_intro</option>
-      <option value="followup_1">followup_1</option>
-      <option value="followup_2">followup_2</option>
+      ${PARTNER_LEAD_OUTREACH_TEMPLATE_OPTIONS.map(
+        (opt) => `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`
+      ).join("")}
     </select>
     <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Send</button>
   </form>
@@ -8408,7 +8412,8 @@ adminRouter.post("/leads/:leadId/outreach", requireAuth, requirePlatformAcquisit
   }
   const leadId = String(req.params.leadId ?? "");
   const channel = String(req.body.channel ?? "email").trim().toLowerCase();
-  const templateKey = String(req.body.templateKey ?? "initial_intro").trim() as "initial_intro" | "followup_1" | "followup_2";
+  const templateKeyRaw = String(req.body.templateKey ?? "initial_intro").trim();
+  const templateKey = isPartnerLeadOutreachTemplateKey(templateKeyRaw) ? templateKeyRaw : "initial_intro";
   const lead = await prisma.lead.findFirst({ where: { id: leadId, hotelId: hotel.id } });
   if (!lead) {
     res.redirect("/admin/leads");
@@ -8432,7 +8437,10 @@ adminRouter.post("/leads/:leadId/outreach", requireAuth, requirePlatformAcquisit
       return;
     }
   }
-  const body = leadOutreachTemplate(templateKey, lead.hotelName);
+  const body = buildPartnerLeadOutreachBody(templateKey, {
+    leadHotelName: lead.hotelName,
+    contactName: lead.contactName
+  });
   let sent = false;
   let sendStatus = "FAILED";
   if (channel === "email" && lead.contactEmail) {
@@ -17041,7 +17049,14 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
           checkOut: true,
           status: true,
           source: true,
-          nights: true
+          nights: true,
+          createdAt: true,
+          totalAmount: true,
+          currency: true,
+          paymentIntents: {
+            where: { status: PaymentStatus.SUCCEEDED },
+            select: { amount: true }
+          }
         }
       }
     }
@@ -17069,7 +17084,15 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
       where: feedbackWhere,
       orderBy: { createdAt: "desc" },
       take: 15,
-      select: { id: true, rating: true, bookingId: true, createdAt: true, status: true, comment: true }
+      select: {
+        id: true,
+        rating: true,
+        bookingId: true,
+        createdAt: true,
+        status: true,
+        comment: true,
+        managerFollowUpRequestedAt: true
+      }
     }),
     prisma.fbOrder.findMany({
       where: { hotelId: hotel.id, guestId: g.id },
@@ -17079,10 +17102,353 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
     })
   ]);
 
+  const conversationIds = conversations.map((c) => c.id);
+  const [
+    priorStaysCount,
+    convSession,
+    lastOutbound,
+    pendingFollowUps,
+    timelineMessages,
+    inboundMessageCount
+  ] = await Promise.all([
+    prisma.booking.count({
+      where: {
+        hotelId: hotel.id,
+        guestId: g.id,
+        status: BookingStatus.CHECKED_IN,
+        checkOut: { lte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+      }
+    }),
+    prisma.conversationSession.findUnique({
+      where: { hotelId_guestId: { hotelId: hotel.id, guestId: g.id } },
+      select: { stage: true }
+    }),
+    prisma.message.findFirst({
+      where: {
+        hotelId: hotel.id,
+        direction: MessageDirection.OUTBOUND,
+        conversation: { guestId: g.id, hotelId: hotel.id }
+      },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true, body: true, aiIntent: true, conversationId: true }
+    }),
+    prisma.guestFollowUp.findMany({
+      where: { hotelId: hotel.id, guestId: g.id, status: "PENDING" },
+      orderBy: { scheduledFor: "asc" },
+      take: 12,
+      select: { id: true, type: true, scheduledFor: true, bookingId: true, payloadJson: true }
+    }),
+    conversationIds.length
+      ? prisma.message.findMany({
+          where: { hotelId: hotel.id, conversationId: { in: conversationIds } },
+          orderBy: { createdAt: "desc" },
+          take: 40,
+          select: {
+            id: true,
+            createdAt: true,
+            direction: true,
+            body: true,
+            aiIntent: true,
+            conversationId: true
+          }
+        })
+      : Promise.resolve([]),
+    prisma.message.count({
+      where: {
+        hotelId: hotel.id,
+        direction: MessageDirection.INBOUND,
+        conversation: { guestId: g.id, hotelId: hotel.id }
+      }
+    })
+  ]);
+
   const lightGuestMemoryJson =
     (g as { lightGuestMemoryJson?: string | null }).lightGuestMemoryJson ?? null;
+  const lightMemory = parseLightGuestMemory(lightGuestMemoryJson);
 
-  const savedNotice = req.query.saved ? '<p class="badge ok">Profile saved.</p>' : "";
+  const actionableForFolio = g.bookings
+    .filter((b) => b.status === BookingStatus.CONFIRMED || b.status === BookingStatus.CHECKED_IN)
+    .slice(0, 8);
+  const folioOutstandingFlags = await Promise.all(
+    actionableForFolio.map(async (b) => {
+      const succ = b.paymentIntents.reduce((sum, p) => sum + p.amount, 0);
+      try {
+        const s = await getFolioSummary({
+          hotelId: hotel.id,
+          bookingId: b.id,
+          bookingTotalAmount: b.totalAmount,
+          currency: b.currency,
+          paymentIntentsSucceededTotal: succ
+        });
+        return s.outstandingBalance > 0.02;
+      } catch {
+        return false;
+      }
+    })
+  );
+  const unpaidHint = folioOutstandingFlags.some(Boolean);
+
+  const lifecycle = computeGuestLifecycleState({
+    guest: {
+      id: g.id,
+      fullName: g.fullName,
+      priorStaysCount
+    },
+    bookings: g.bookings.map((b) => ({
+      id: b.id,
+      status: b.status,
+      checkIn: b.checkIn,
+      checkOut: b.checkOut,
+      createdAt: b.createdAt
+    })),
+    conversation: {
+      hasInboundMessage: inboundMessageCount > 0,
+      sessionStage: convSession?.stage ?? null
+    }
+  });
+  const lifecycleBadgeCls = lifecycleBadgeClass(lifecycle.state);
+  const lifecycleBadgeHtml = `<span class="badge ${lifecycleBadgeCls}" title="Relationship lifecycle">${escapeHtml(
+    lifecycleStateLabel(lifecycle.state)
+  )}</span>`;
+
+  const hasComplaintSignal = feedbackRows.some(
+    (f) => f.rating <= 6 || (f.managerFollowUpRequestedAt != null && f.managerFollowUpRequestedAt.getTime() > 0)
+  );
+
+  const segmentChips: string[] = [lifecycleBadgeHtml];
+  if (lifecycle.isReturning) {
+    segmentChips.push('<span class="badge" title="Prior completed stay at this hotel">Repeat</span>');
+  }
+  if (lifecycle.state === "IN_HOUSE") {
+    segmentChips.push('<span class="badge ok" title="Guest is in-house on dates">In house</span>');
+  }
+  if (hasComplaintSignal) {
+    segmentChips.push('<span class="badge alert" title="Low score or manager follow-up requested">Feedback risk</span>');
+  }
+  if (unpaidHint) {
+    segmentChips.push('<span class="badge alert" title="Outstanding folio on an active booking">Folio due</span>');
+  }
+  if (lightMemory.messagingDoNotDisturb) {
+    segmentChips.push('<span class="badge pending" title="Guest asked to limit non-essential WhatsApp">DND</span>');
+  }
+  if (lightMemory.messagingMarketingOptOut) {
+    segmentChips.push('<span class="badge" title="Promotional automation suppressed">Marketing off</span>');
+  }
+  const segmentChipsHtml = segmentChips.join(" ");
+
+  const activeForPrimary = g.bookings.filter(
+    (b) => b.status === BookingStatus.CHECKED_IN || b.status === BookingStatus.CONFIRMED
+  );
+  const primaryBooking =
+    (activeForPrimary.some((b) => b.status === BookingStatus.CHECKED_IN)
+      ? activeForPrimary.filter((b) => b.status === BookingStatus.CHECKED_IN)
+      : activeForPrimary
+    )
+      .slice()
+      .sort((a, b) => b.checkIn.getTime() - a.checkIn.getTime())[0] ?? g.bookings[0] ?? null;
+
+  const partnerCfgForGuest = loadPartnerSetupConfig(hotel.id);
+  const reviewLinkRaw = partnerCfgForGuest.googleReviewLink?.trim() ?? "";
+
+  type TimelineLine = { at: number; html: string };
+  const timelineLines: TimelineLine[] = [];
+  for (const m of timelineMessages) {
+    const inbound = m.direction === MessageDirection.INBOUND;
+    const who = inbound ? "Guest" : m.aiIntent === "MANUAL_REPLY" ? "Staff" : "AI / system";
+    const friendlyIntent = !inbound && m.aiIntent ? aiIntentDisplayLabel(m.aiIntent) : null;
+    timelineLines.push({
+      at: m.createdAt.getTime(),
+      html: `<div style="border-left:3px solid ${inbound ? "#25d366" : "#94a3b8"};padding-left:10px;margin-bottom:10px">
+  <div class="muted" style="font-size:12px">${escapeHtml(formatDateTime(m.createdAt))} · WhatsApp · ${escapeHtml(who)}${
+        friendlyIntent ? ` · ${escapeHtml(friendlyIntent)}` : ""
+      }</div>
+  <div style="font-size:14px">${escapeHtml(m.body.slice(0, 360))}${m.body.length > 360 ? "…" : ""}</div>
+</div>`
+    });
+  }
+  for (const b of g.bookings) {
+    timelineLines.push({
+      at: b.createdAt.getTime(),
+      html: `<div style="border-left:3px solid #0ea5e9;padding-left:10px;margin-bottom:10px">
+  <div class="muted" style="font-size:12px">${escapeHtml(formatDateTime(b.createdAt))} · Booking</div>
+  <div style="font-size:14px"><a class="inline-link" href="/admin/bookings/${encodeURIComponent(b.id)}">${escapeHtml(
+        b.referenceCode ?? b.id
+      )}</a> · ${escapeHtml(formatDate(b.checkIn))}–${escapeHtml(formatDate(b.checkOut))} · <span class="badge ${getBadgeClass(
+        b.status
+      )}">${escapeHtml(b.status)}</span></div>
+</div>`
+    });
+  }
+  for (const f of feedbackRows) {
+    timelineLines.push({
+      at: f.createdAt.getTime(),
+      html: `<div style="border-left:3px solid #f59e0b;padding-left:10px;margin-bottom:10px">
+  <div class="muted" style="font-size:12px">${escapeHtml(formatDateTime(f.createdAt))} · Feedback</div>
+  <div style="font-size:14px">Rating ${f.rating} · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(
+        f.bookingId
+      )}">Booking</a>${f.comment ? ` · ${escapeHtml(f.comment.slice(0, 160))}${f.comment.length > 160 ? "…" : ""}` : ""}</div>
+</div>`
+    });
+  }
+  for (const o of fbOrders) {
+    timelineLines.push({
+      at: o.createdAt.getTime(),
+      html: `<div style="border-left:3px solid #8b5cf6;padding-left:10px;margin-bottom:10px">
+  <div class="muted" style="font-size:12px">${escapeHtml(formatDateTime(o.createdAt))} · F&amp;B folio</div>
+  <div style="font-size:14px">${escapeHtml(String(o.outletType))} · ${formatMoney(o.totalAmount, hotel.currency)} · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(
+        o.bookingId
+      )}">Booking</a></div>
+</div>`
+    });
+  }
+  timelineLines.sort((a, b) => b.at - a.at);
+  const timelineMergedHtml =
+    timelineLines.slice(0, 48).map((l) => l.html).join("") ||
+    '<p class="muted" style="margin:0;font-size:13px">No messages, stays, feedback, or F&amp;B orders yet.</p>';
+
+  const lastStaffContactHtml = lastOutbound
+    ? `${escapeHtml(formatDateTime(lastOutbound.createdAt))}<span class="muted" style="display:block;font-size:12px;margin-top:4px">Latest outbound message${
+        lastOutbound.body ? ` — ${escapeHtml(lastOutbound.body.slice(0, 120))}${lastOutbound.body.length > 120 ? "…" : ""}` : ""
+      }</span>`
+    : '<span class="muted">No outbound WhatsApp logged for this guest yet.</span>';
+
+  const guestSess = getSession(req);
+  const canScheduleFollowUp = Boolean(
+    guestSess && hasPermission(guestSess.permissions, "BOOKINGS", "EDIT")
+  );
+  const defaultScheduleAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  defaultScheduleAt.setSeconds(0, 0);
+  if (defaultScheduleAt.getMinutes() > 0) {
+    defaultScheduleAt.setHours(defaultScheduleAt.getHours() + 1, 0, 0, 0);
+  }
+  if (defaultScheduleAt.getHours() < 9) {
+    defaultScheduleAt.setHours(10, 0, 0, 0);
+  }
+  const followUpBookingOptions = g.bookings
+    .slice(0, 12)
+    .map(
+      (b) =>
+        `<option value="${escapeHtml(b.id)}" ${primaryBooking?.id === b.id ? "selected" : ""}>${escapeHtml(
+          b.referenceCode ?? b.id.slice(0, 10)
+        )} · ${escapeHtml(formatDate(b.checkIn))}</option>`
+    )
+    .join("");
+  const scheduleFollowUpFormHtml = canScheduleFollowUp
+    ? `<form method="post" action="/admin/guests/${encodeURIComponent(
+        g.id
+      )}/followups" style="margin-top:12px;display:grid;gap:8px;border-top:1px solid var(--border);padding-top:12px">
+  <p class="muted" style="margin:0;font-size:12px">Schedule a one-off WhatsApp message (sent by the automated follow-up job at the chosen time; respects quiet hours).</p>
+  ${
+    lightMemory.messagingDoNotDisturb
+      ? '<p class="badge alert" style="margin:0;font-size:12px">Guest has DND — scheduling is blocked until DND is cleared.</p>'
+      : ""
+  }
+  <label style="font-size:13px">Send at
+    <input type="datetime-local" name="scheduledFor" required value="${escapeHtml(
+      formatDatetimeLocalValue(defaultScheduleAt)
+    )}" style="display:block;width:100%;max-width:280px;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:8px" />
+  </label>
+  <label style="font-size:13px">Message
+    <textarea name="message" required rows="3" maxlength="900" placeholder="e.g. Hello, just checking whether you need airport transfer for your arrival…" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px"></textarea>
+  </label>
+  <label style="font-size:13px">Link booking (optional)
+    <select name="bookingId" style="display:block;width:100%;max-width:320px;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:8px">
+      <option value="">— None —</option>
+      ${followUpBookingOptions}
+    </select>
+  </label>
+  <button type="submit" ${lightMemory.messagingDoNotDisturb ? "disabled" : ""} style="padding:8px 14px;border:0;border-radius:8px;background:#128c7e;color:#fff;font-weight:700;width:fit-content;cursor:pointer">Schedule WhatsApp</button>
+</form>`
+    : "";
+
+  const followUpListHtml =
+    pendingFollowUps.length === 0
+      ? `<p class="muted" style="margin:0;font-size:13px">No pending follow-ups in queue.</p>${scheduleFollowUpFormHtml}`
+      : `<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.55">${pendingFollowUps
+          .map((fu) => {
+            const staffMsg =
+              fu.type === STAFF_SCHEDULED_FOLLOWUP_TYPE
+                ? staffFollowUpMessageFromPayload(fu.payloadJson)
+                : null;
+            const preview = staffMsg
+              ? `<span class="muted" style="display:block;font-size:12px;margin-top:2px">${escapeHtml(
+                  staffMsg.slice(0, 100)
+                )}${staffMsg.length > 100 ? "…" : ""}</span>`
+              : "";
+            return `<li style="margin-bottom:8px">
+  <strong>${escapeHtml(guestFollowUpTypeLabel(fu.type))}</strong> · due ${escapeHtml(formatDateTime(fu.scheduledFor))}${
+              fu.bookingId
+                ? ` · <a class="inline-link" href="/admin/bookings/${encodeURIComponent(fu.bookingId)}">booking</a>`
+                : ""
+            }
+  ${preview}
+  <form method="post" action="/admin/guests/${encodeURIComponent(g.id)}/followups/${encodeURIComponent(
+              fu.id
+            )}/cancel" style="display:inline;margin-left:8px">
+    <button type="submit" class="btn-link" style="padding:0;font-size:12px;border:0;background:none;cursor:pointer;color:#b91c1c">Cancel queue</button>
+  </form>
+</li>`;
+          })
+          .join("")}</ul>${scheduleFollowUpFormHtml}`;
+
+  const quickLinks: string[] = [];
+  if (conversations[0]) {
+    quickLinks.push(
+      `<a class="btn-link primary" href="/admin/conversations/${encodeURIComponent(conversations[0].id)}">Latest WhatsApp thread</a>`
+    );
+  }
+  if (primaryBooking) {
+    quickLinks.push(
+      `<a class="btn-link" href="/admin/bookings/${encodeURIComponent(primaryBooking.id)}">Primary booking — invoice, guidebook, folio</a>`
+    );
+  }
+  quickLinks.push(`<a class="btn-link" href="/admin/conversations/group-messages">Group messages / campaigns</a>`);
+  quickLinks.push(`<a class="btn-link" href="/admin/whatsapp/templates">WhatsApp templates</a>`);
+  if (reviewLinkRaw) {
+    quickLinks.push(
+      `<a class="btn-link" target="_blank" rel="noopener noreferrer" href="${escapeHtml(reviewLinkRaw)}">Public review link</a>`
+    );
+  }
+  const quickLinksHtml = quickLinks.join("\n  ");
+
+  const guestHubSectionHtml = `
+<section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
+  <h3 style="margin-top:0">Guest hub</h3>
+  <p class="muted" style="margin-top:0;font-size:13px">Lifecycle, messaging context, and quick links — property-scoped. Bulk marketing stays in campaigns / group messages.</p>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">${segmentChipsHtml}</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:14px;font-size:13px">
+    <div style="border:1px solid var(--border);border-radius:10px;padding:10px;background:#fff">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Last outbound WhatsApp</div>
+      ${lastStaffContactHtml}
+    </div>
+    <div style="border:1px solid var(--border);border-radius:10px;padding:10px;background:#fff">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Follow-up queue</div>
+      ${followUpListHtml}
+    </div>
+  </div>
+  <div class="actions" style="flex-wrap:wrap;gap:8px;margin-bottom:14px">
+    ${quickLinksHtml}
+  </div>
+  <h4 style="margin:0 0 8px;font-size:14px">Unified timeline</h4>
+  <p class="muted" style="margin:0 0 8px;font-size:12px">Recent WhatsApp messages, bookings, feedback, and F&amp;B (newest first).</p>
+  <div style="max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:10px;padding:12px;background:#fafafa">
+    ${timelineMergedHtml}
+  </div>
+</section>`;
+
+  const savedRaw = typeof req.query.saved === "string" ? req.query.saved : "";
+  const followupErrorRaw = typeof req.query.followupError === "string" ? req.query.followupError : "";
+  const followupErrorNotice = followupErrorRaw
+    ? `<p class="badge alert">${escapeHtml(decodeURIComponent(followupErrorRaw).slice(0, 240))}</p>`
+    : "";
+  const savedNotice =
+    savedRaw === "1"
+      ? '<p class="badge ok">Profile saved.</p>'
+      : savedRaw === "followup"
+        ? '<p class="badge ok">Follow-up removed from queue.</p>'
+        : savedRaw === "scheduled"
+          ? '<p class="badge ok">WhatsApp follow-up scheduled.</p>'
+          : "";
   const manualSet = new Set(
     g.segmentTags.filter((t) => t.source === SegmentTagSource.MANUAL).map((t) => t.tag)
   );
@@ -17164,6 +17530,7 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
 <h2>Guest CRM</h2>
 <p class="muted">${escapeHtml(hotel.displayName)} — Guest profile, stay history, WhatsApp, feedback, and F&amp;B context (property-scoped).</p>
 ${savedNotice}
+${followupErrorNotice}
 <div class="actions">
   <a class="btn-link" href="/admin/guests">All guests</a>
   ${
@@ -17172,6 +17539,7 @@ ${savedNotice}
       : `<a class="btn-link" href="/admin/conversations">Conversations</a>`
   }
 </div>
+${guestHubSectionHtml}
 
 <section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
   <h3 style="margin-top:0">Current labels</h3>
@@ -17308,6 +17676,134 @@ adminRouter.post("/guests/:guestId", requirePermission("BOOKINGS", "EDIT"), asyn
   });
   res.redirect(`/admin/guests/${encodeURIComponent(guestId)}?saved=1`);
 });
+
+adminRouter.post("/guests/:guestId/followups", requirePermission("BOOKINGS", "EDIT"), async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/guests");
+    return;
+  }
+  const guestId = String(req.params.guestId ?? "");
+  const guest = await prisma.guest.findFirst({
+    where: { id: guestId, hotelId: hotel.id },
+    select: { id: true }
+  });
+  if (!guest) {
+    res.status(404).type("html").send(renderLayout("<h2>Guest not found</h2>", true));
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const message = String(body.message ?? "").trim();
+  const scheduledFor = parseStaffFollowUpScheduledAt(body.scheduledFor);
+  const bookingIdRaw = String(body.bookingId ?? "").trim();
+  const bookingId = bookingIdRaw || null;
+
+  if (!scheduledFor) {
+    res.redirect(
+      `/admin/guests/${encodeURIComponent(guestId)}?followupError=${encodeURIComponent("Invalid date and time.")}`
+    );
+    return;
+  }
+
+  let propertyId: string | null = null;
+  let conversationId: string | null = null;
+  if (bookingId) {
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, hotelId: hotel.id, guestId },
+      select: { propertyId: true, conversationId: true }
+    });
+    if (!booking) {
+      res.redirect(
+        `/admin/guests/${encodeURIComponent(guestId)}?followupError=${encodeURIComponent("Booking not found for this guest.")}`
+      );
+      return;
+    }
+    propertyId = booking.propertyId;
+    conversationId = booking.conversationId;
+  }
+  if (!conversationId) {
+    const conv = await prisma.conversation.findFirst({
+      where: { hotelId: hotel.id, guestId },
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true, propertyId: true }
+    });
+    if (conv) {
+      conversationId = conv.id;
+      if (!propertyId) propertyId = conv.propertyId;
+    }
+  }
+  if (!propertyId) {
+    const resolvedProperty = await resolveActivePropertyIdForHotel(req, hotel.id);
+    if (isScopedPropertyId(resolvedProperty)) {
+      propertyId = resolvedProperty;
+    }
+  }
+
+  const staff = getSession(req);
+  const result = await createStaffScheduledGuestFollowUp({
+    hotelId: hotel.id,
+    guestId,
+    propertyId,
+    bookingId,
+    conversationId,
+    scheduledFor,
+    message,
+    createdByEmail: staff?.email ?? null,
+    createdByStaffId: staff?.staffId ?? null
+  });
+
+  if (!result.ok) {
+    res.redirect(
+      `/admin/guests/${encodeURIComponent(guestId)}?followupError=${encodeURIComponent(result.error)}`
+    );
+    return;
+  }
+
+  await logAudit({
+    hotelId: hotel.id,
+    action: "GUEST_FOLLOWUP_SCHEDULED",
+    entityType: "GuestFollowUp",
+    entityId: result.followUpId,
+    bookingId,
+    metadata: { guestId, scheduledFor: scheduledFor.toISOString(), messagePreview: message.slice(0, 120) }
+  });
+  res.redirect(`/admin/guests/${encodeURIComponent(guestId)}?saved=scheduled`);
+});
+
+adminRouter.post(
+  "/guests/:guestId/followups/:followUpId/cancel",
+  requirePermission("BOOKINGS", "EDIT"),
+  async (req, res) => {
+    const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+    if (!hotel) {
+      res.redirect("/admin/guests");
+      return;
+    }
+    const guestId = String(req.params.guestId ?? "");
+    const followUpId = String(req.params.followUpId ?? "");
+    const guest = await prisma.guest.findFirst({
+      where: { id: guestId, hotelId: hotel.id },
+      select: { id: true }
+    });
+    if (!guest) {
+      res.status(404).type("html").send(renderLayout("<h2>Guest not found</h2>", true));
+      return;
+    }
+    await prisma.guestFollowUp.updateMany({
+      where: { id: followUpId, hotelId: hotel.id, guestId, status: "PENDING" },
+      data: { status: "CANCELLED", cancelledAt: new Date() }
+    });
+    await logAudit({
+      hotelId: hotel.id,
+      action: "GUEST_FOLLOWUP_CANCELLED",
+      entityType: "GuestFollowUp",
+      entityId: followUpId,
+      metadata: { guestId }
+    });
+    res.redirect(`/admin/guests/${encodeURIComponent(guestId)}?saved=followup`);
+  }
+);
 
 adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });

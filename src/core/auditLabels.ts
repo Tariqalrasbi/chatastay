@@ -461,6 +461,26 @@ export function describeAuditAction(
         category: "Reports",
         accent: "slate"
       };
+    case "GUEST_FOLLOWUP_CANCELLED":
+      return {
+        icon: "✉️",
+        headline: "Cancelled a queued guest follow-up",
+        detail: joinDetail(guest, str(metadata.guestId) && `Guest ${metadata.guestId}`),
+        category: "Front Desk",
+        accent: "slate"
+      };
+    case "GUEST_FOLLOWUP_SCHEDULED":
+      return {
+        icon: "📅",
+        headline: "Scheduled a staff WhatsApp follow-up",
+        detail: joinDetail(
+          guest,
+          str(metadata.scheduledFor) && `Due ${metadata.scheduledFor}`,
+          str(metadata.messagePreview)
+        ),
+        category: "Front Desk",
+        accent: "teal"
+      };
 
     // ----- Inventory / settings / users -----
     case "ROOM_TYPE_UPDATED":
