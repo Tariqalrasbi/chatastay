@@ -2,7 +2,7 @@ import { ConversationState, MessageDirection } from "@prisma/client";
 import { prisma } from "../db";
 import { loadPartnerSetupConfig } from "./partnerSetup";
 import { parseLightGuestMemory } from "./lightGuestMemory";
-import { trySendWhatsAppText } from "../whatsapp/send";
+import { resolveWhatsAppSendConfig, trySendWhatsAppText } from "../whatsapp/send";
 import type { CampaignGuestRow } from "./campaignAudience";
 
 const CAMPAIGN_INTENT = "MARKETING_CAMPAIGN";
@@ -57,7 +57,20 @@ export type CampaignSendResult = {
   sentOk: number;
   sentFailed: number;
   skippedNoPhone: number;
+  skippedDoNotDisturb: number;
+  skippedMarketingOptOut: number;
+  /** First Meta / config error (for staff-facing summary). */
+  firstErrorMessage: string | null;
 };
+
+/** Campaign row status — never mark SENT when zero messages were delivered. */
+export function deriveMarketingCampaignStatus(result: CampaignSendResult): "SENT" | "PARTIAL" | "FAILED" {
+  if (result.sentOk <= 0) return "FAILED";
+  const skipped =
+    result.skippedNoPhone + result.skippedDoNotDisturb + result.skippedMarketingOptOut + result.sentFailed;
+  if (skipped > 0) return "PARTIAL";
+  return "SENT";
+}
 
 /**
  * Sends WhatsApp to each guest; records Message + optional MarketingCampaignRecipient rows.
@@ -72,12 +85,20 @@ export async function sendMarketingCampaignWhatsApp(params: {
 }): Promise<CampaignSendResult> {
   const partner = loadPartnerSetupConfig(params.hotelId);
   const phoneNumberId = partner.whatsappPhoneNumberId?.trim() || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
+  if (!resolveWhatsAppSendConfig(phoneNumberId)) {
+    throw new Error(
+      "WhatsApp is not configured (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID, or partner Phone number ID in Property setup)."
+    );
+  }
   const gapMs = Math.min(5000, Math.max(0, parseInt(process.env.CAMPAIGN_MESSAGE_GAP_MS ?? "350", 10) || 350));
 
   let attempted = 0;
   let sentOk = 0;
   let sentFailed = 0;
   let skippedNoPhone = 0;
+  let skippedDoNotDisturb = 0;
+  let skippedMarketingOptOut = 0;
+  let firstErrorMessage: string | null = null;
 
   for (let gi = 0; gi < params.guests.length; gi++) {
     const g = params.guests[gi]!;
@@ -97,6 +118,8 @@ export async function sendMarketingCampaignWhatsApp(params: {
 
     const prefs = parseLightGuestMemory(g.lightGuestMemoryJson ?? null);
     if (prefs.messagingDoNotDisturb || prefs.messagingMarketingOptOut) {
+      if (prefs.messagingDoNotDisturb) skippedDoNotDisturb++;
+      else skippedMarketingOptOut++;
       await prisma.marketingCampaignRecipient.create({
         data: {
           campaignId: params.campaignId,
@@ -163,6 +186,7 @@ export async function sendMarketingCampaignWhatsApp(params: {
       ]);
     } else {
       sentFailed++;
+      if (!firstErrorMessage) firstErrorMessage = result.errorMessage;
       await prisma.marketingCampaignRecipient.create({
         data: {
           campaignId: params.campaignId,
@@ -178,5 +202,13 @@ export async function sendMarketingCampaignWhatsApp(params: {
     }
   }
 
-  return { attempted, sentOk, sentFailed, skippedNoPhone };
+  return {
+    attempted,
+    sentOk,
+    sentFailed,
+    skippedNoPhone,
+    skippedDoNotDisturb,
+    skippedMarketingOptOut,
+    firstErrorMessage
+  };
 }

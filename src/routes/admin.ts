@@ -203,7 +203,8 @@ import {
   resolveCampaignAudience,
   serializeCampaignFilters
 } from "../core/campaignAudience";
-import { sendMarketingCampaignWhatsApp } from "../core/campaignSend";
+import { deriveMarketingCampaignStatus, sendMarketingCampaignWhatsApp } from "../core/campaignSend";
+import { resolveWhatsAppSendConfig } from "../whatsapp/send";
 import { renderCampaignComposePage } from "./campaignCenterHtml";
 import { loadManagementKpis, parseKpiPreset } from "../core/managementKpiDashboard";
 import { runHotelDailyDigest } from "../core/hotelDailyDigest";
@@ -15735,7 +15736,7 @@ async function renderGroupMessagesPage(
       (c) => `<tr>
   <td><a class="inline-link" href="${opts.detailHrefBase}/${encodeURIComponent(c.id)}">${escapeHtml(c.name)}</a></td>
   <td>${formatDateTime(c.createdAt)}</td>
-  <td><span class="badge ${c.status === "SENT" ? "ok" : c.status === "FAILED" ? "alert" : "pending"}">${escapeHtml(c.status)}</span></td>
+  <td><span class="badge ${c.status === "SENT" ? "ok" : c.status === "PARTIAL" ? "pending" : c.status === "FAILED" ? "alert" : "pending"}">${escapeHtml(c.status)}</span></td>
   <td>${c.audienceCount}</td>
   <td>${c.sentOkCount}</td>
   <td>${c.sentFailedCount}</td>
@@ -16032,6 +16033,17 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
     return;
   }
 
+  const partnerCfg = loadPartnerSetupConfig(hotel.id);
+  const waPhoneNumberId =
+    partnerCfg.whatsappPhoneNumberId?.trim() || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
+  if (!resolveWhatsAppSendConfig(waPhoneNumberId)) {
+    renderForm(
+      count,
+      "WhatsApp is not configured on this server (WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID, or Phone number ID in Property setup). No messages can be sent until that is fixed."
+    );
+    return;
+  }
+
   const campaign = await prisma.marketingCampaign.create({
     data: {
       hotelId: hotel.id,
@@ -16063,11 +16075,11 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       offer: offerSnip
     });
 
-    const failedAll = result.attempted > 0 && result.sentOk === 0;
+    const campaignStatus = deriveMarketingCampaignStatus(result);
     await prisma.marketingCampaign.update({
       where: { id: campaign.id },
       data: {
-        status: failedAll ? "FAILED" : "SENT",
+        status: campaignStatus,
         attemptedCount: result.attempted,
         sentOkCount: result.sentOk,
         sentFailedCount: result.sentFailed,
@@ -16084,20 +16096,30 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       metadata: {
         name: campaignName,
         audienceCount: count,
+        status: campaignStatus,
         sentOk: result.sentOk,
         sentFailed: result.sentFailed,
-        skippedNoPhone: result.skippedNoPhone
+        skippedNoPhone: result.skippedNoPhone,
+        skippedDoNotDisturb: result.skippedDoNotDisturb,
+        skippedMarketingOptOut: result.skippedMarketingOptOut,
+        firstError: result.firstErrorMessage
       }
     });
+    res.redirect(
+      `/admin/campaigns/${encodeURIComponent(campaign.id)}?done=1&status=${encodeURIComponent(campaignStatus)}`
+    );
+    return;
   } catch (err) {
     await prisma.marketingCampaign.update({
       where: { id: campaign.id },
       data: { status: "FAILED" }
     });
-    throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    res.redirect(
+      `/admin/campaigns/${encodeURIComponent(campaign.id)}?done=1&status=FAILED&error=${encodeURIComponent(msg.slice(0, 240))}`
+    );
+    return;
   }
-
-  res.redirect(`/admin/campaigns/${encodeURIComponent(campaign.id)}?sent=1`);
 });
 
 adminRouter.get("/campaigns/:id", requirePermission("CONVERSATIONS", "VIEW"), async (req, res) => {
@@ -16124,9 +16146,31 @@ adminRouter.get("/campaigns/:id", requirePermission("CONVERSATIONS", "VIEW"), as
     return;
   }
 
-  const sentNotice = req.query.sent ? '<p class="badge ok">Campaign processed.</p>' : "";
+  const doneRaw = typeof req.query.done === "string" ? req.query.done : "";
+  const statusRaw = typeof req.query.status === "string" ? req.query.status : campaign.status;
+  const errorRaw = typeof req.query.error === "string" ? decodeURIComponent(req.query.error) : "";
+  const sentNotice =
+    doneRaw === "1" && statusRaw === "SENT"
+      ? `<p class="badge ok">Campaign sent — ${campaign.sentOkCount} WhatsApp message(s) delivered.</p>`
+      : doneRaw === "1" && statusRaw === "PARTIAL"
+        ? `<p class="badge pending">Campaign partially sent — ${campaign.sentOkCount} delivered, ${campaign.sentFailedCount} failed. Check the delivery table below for errors (e.g. expired WhatsApp token or guests outside the 24-hour window).</p>`
+        : doneRaw === "1" && statusRaw === "FAILED"
+          ? `<p class="badge alert">No messages were delivered.${errorRaw ? ` ${escapeHtml(errorRaw)}` : campaign.sentFailedCount > 0 ? " See failed rows below for Meta/WhatsApp errors." : campaign.sentOkCount === 0 && campaign.attemptedCount === 0 ? " Everyone in the audience was skipped (no phone, DND, or marketing opt-out)." : ""}</p>`
+          : req.query.sent
+            ? '<p class="badge ok">Campaign processed.</p>'
+            : "";
   const filters = deserializeCampaignFilters(campaign.filtersJson);
   const filterSummary = escapeHtml(JSON.stringify(filters, null, 2).slice(0, 2000));
+
+  const skipAgg = await prisma.marketingCampaignRecipient.groupBy({
+    by: ["outcome"],
+    where: { campaignId: campaign.id },
+    _count: { _all: true }
+  });
+  const skipDnd =
+    skipAgg.find((r) => r.outcome === "SKIPPED_DO_NOT_DISTURB")?._count._all ?? 0;
+  const skipOptOut =
+    skipAgg.find((r) => r.outcome === "SKIPPED_MARKETING_OPT_OUT")?._count._all ?? 0;
 
   const sampleRows = campaign.recipients
     .map(
@@ -16154,6 +16198,8 @@ ${sentNotice}
         <tr><th>Sent (WhatsApp)</th><td>${campaign.sentOkCount}</td></tr>
         <tr><th>Failed</th><td>${campaign.sentFailedCount}</td></tr>
         <tr><th>Skipped (no phone)</th><td>${campaign.skippedNoPhoneCount}</td></tr>
+        <tr><th>Skipped (DND)</th><td>${skipDnd}</td></tr>
+        <tr><th>Skipped (marketing opt-out)</th><td>${skipOptOut}</td></tr>
         <tr><th>Channel</th><td>${escapeHtml(campaign.channel)}</td></tr>
         <tr><th>Linked offer ID</th><td>${campaign.linkedOfferId ? escapeHtml(campaign.linkedOfferId) : "—"}</td></tr>
       </tbody>
@@ -18197,17 +18243,62 @@ adminRouter.get("/bookings", requirePermission("BOOKINGS", "VIEW"), async (req, 
   <a class="btn-link" href="/admin/bookings/export?start=${encodeURIComponent(formatDateForInput(start))}&end=${encodeURIComponent(formatDateForInput(end))}&paymentStatus=LPO">Export LPO follow-up</a>
   <a class="btn-link" href="/admin/bookings/export?start=${encodeURIComponent(formatDateForInput(start))}&end=${encodeURIComponent(formatDateForInput(end))}&paymentStatus=FRIENDS_TRANSFER">Export friends transfer</a>
 </form>
-<div class="grid-4">
+<div class="grid-4 bookings-report-stats">
   <article class="stat"><h3>Total bookings</h3><p><a class="stat-link" href="${qsFor({ view: "all", status: "ALL" })}">${displayBookings.length}</a></p></article>
   <article class="stat"><h3>Confirmed</h3><p><a class="stat-link" href="${qsFor({ view: "confirmed", status: "ALL" })}">${confirmed}</a></p></article>
   <article class="stat"><h3>WhatsApp Confirmed</h3><p>${whatsappConfirmed}</p></article>
-  <article class="stat"><h3>Pending / Cancelled</h3><p><a class="stat-link" href="${qsFor({ view: "pending", status: "ALL" })}">${pending}</a> / <a class="stat-link" href="${qsFor({ view: "cancelled", status: "ALL" })}">${cancelled}</a></p></article>
+  <article class="stat"><h3>Pending / Cancelled</h3><p class="stat-inline-pair"><a class="stat-link" href="${qsFor({ view: "pending", status: "ALL" })}">${pending}</a><span class="stat-sep">/</span><a class="stat-link" href="${qsFor({ view: "cancelled", status: "ALL" })}">${cancelled}</a></p></article>
   <article class="stat"><h3>Checked-in rows</h3><p><a class="stat-link" href="${qsFor({ view: "in-house", status: "ALL" })}">${checkedIn}</a></p></article>
   <article class="stat"><h3>Revenue</h3><p><a class="stat-link" href="/admin/billing">${formatMoney(revenue, hotel.currency)}</a></p></article>
-  <article class="stat"><h3>Paid / Balance</h3><p>${formatMoney(paidTotal, hotel.currency)} / ${formatMoney(Math.max(0, revenue - paidTotal), hotel.currency)}</p></article>
+  <article class="stat"><h3>Paid / Balance</h3><p class="stat-money-pair"><span>${formatMoney(paidTotal, hotel.currency)}</span><span class="stat-sep">/</span><span>${formatMoney(Math.max(0, revenue - paidTotal), hotel.currency)}</span></p></article>
 </div>
 <p class="muted" style="margin-top:10px">Conversations in range: <strong><a class="inline-link" href="/admin/conversations?start=${formatDateForInput(start)}&end=${formatDateForInput(end)}">${conversationsCount}</a></strong> (opens conversations filtered by this date range)</p>
 <style>
+  .bookings-report-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+  .bookings-report-stats .stat {
+    min-width: 0;
+    overflow: visible;
+    padding: 12px 14px;
+  }
+  .bookings-report-stats .stat h3 {
+    font-size: 11px;
+    line-height: 1.25;
+    letter-spacing: 0.05em;
+  }
+  .bookings-report-stats .stat p,
+  .bookings-report-stats .stat .stat-link {
+    margin: 6px 0 0;
+    font-size: clamp(13px, 0.95vw, 16px) !important;
+    font-weight: 700 !important;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-variant-numeric: tabular-nums;
+    background: none !important;
+    -webkit-background-clip: unset !important;
+    background-clip: unset !important;
+    color: var(--wa-deep, #0e3d34) !important;
+  }
+  .bookings-report-stats .stat-money-pair,
+  .bookings-report-stats .stat-inline-pair {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 5px;
+    row-gap: 2px;
+    font-size: clamp(12px, 0.88vw, 15px) !important;
+  }
+  .bookings-report-stats .stat-sep {
+    color: var(--muted, #64748b);
+    font-weight: 600;
+    font-size: 0.95em;
+  }
   .booking-whatsapp-confirmed { background: #f3fff8; }
   .booking-view-row { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 14px; }
   .booking-view-chip { display:inline-flex; align-items:center; padding:7px 10px; border:1px solid #d8dee6; border-radius:999px; background:#fff; color:#075e54; text-decoration:none; font-size:12px; font-weight:800; }

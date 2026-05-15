@@ -77,6 +77,32 @@ function getWhatsAppConfig(phoneNumberIdOverride?: string): { token: string; pho
   return { token, phoneNumberId };
 }
 
+/** Whether outbound WhatsApp can be attempted (token + phone number id present). */
+export function resolveWhatsAppSendConfig(phoneNumberIdOverride?: string): { token: string; phoneNumberId: string } | null {
+  return getWhatsAppConfig(phoneNumberIdOverride);
+}
+
+type MetaSendMessageResponse = {
+  messages?: Array<{ id?: string }>;
+  error?: { message?: string; code?: number; error_subcode?: number };
+};
+
+function metaSendAccepted(payload: MetaSendMessageResponse): { ok: true; messageId: string } | { ok: false; errorMessage: string } {
+  const messageId = payload.messages?.[0]?.id?.trim();
+  if (messageId) {
+    return { ok: true, messageId };
+  }
+  if (payload.error?.message) {
+    const code = payload.error.code != null ? ` (Meta ${payload.error.code})` : "";
+    return { ok: false, errorMessage: `${payload.error.message}${code}` };
+  }
+  return {
+    ok: false,
+    errorMessage:
+      "WhatsApp API returned success but no message id — the message was not accepted for delivery. Check token, phone number id, and Meta template/window rules."
+  };
+}
+
 /** Call once at server startup — cannot fix Meta error 190 (expired token), but catches missing/placeholder env. */
 export function logWhatsAppStartupHints(): void {
   const token = process.env.WHATSAPP_TOKEN?.trim();
@@ -247,6 +273,16 @@ export async function trySendWhatsAppText({
   if (!response.ok) {
     const errorText = await response.text();
     return { ok: false, errorMessage: formatWhatsAppHttpError(response.status, errorText) };
+  }
+  let payload: MetaSendMessageResponse = {};
+  try {
+    payload = (await response.json()) as MetaSendMessageResponse;
+  } catch {
+    return { ok: false, errorMessage: "WhatsApp API returned an unreadable success response." };
+  }
+  const accepted = metaSendAccepted(payload);
+  if (!accepted.ok) {
+    return { ok: false, errorMessage: accepted.errorMessage };
   }
   await logWhatsAppMessage({
     conversationId,
