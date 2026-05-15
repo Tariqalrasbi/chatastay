@@ -1,4 +1,8 @@
 import { ChannelProvider, SegmentTagKind } from "@prisma/client";
+import {
+  type CampaignGuestPreviewRow,
+  summarizeCampaignPreview
+} from "../core/campaignAudiencePreview";
 import { SEGMENT_TAG_LABELS } from "../core/guestSegmentation";
 
 function esc(s: string): string {
@@ -54,8 +58,10 @@ export function renderCampaignComposePage(params: {
   formAction?: string;
   backHref?: string;
   whatsappStatusHtml?: string | null;
+  previewGuests?: CampaignGuestPreviewRow[] | null;
+  hasMarketingTemplate?: boolean;
 }): string {
-  const { body, previewCount, errorMsg, whatsappStatusHtml } = params;
+  const { body, previewCount, errorMsg, whatsappStatusHtml, previewGuests, hasMarketingTemplate } = params;
   const pageTitle = params.pageTitle ?? "Group messages";
   const formAction = params.formAction ?? "/admin/campaigns/new";
   const backHref = params.backHref ?? "/admin/campaigns";
@@ -72,10 +78,18 @@ export function renderCampaignComposePage(params: {
   const errBlock = errorMsg
     ? `<p class="badge alert" role="alert" style="max-width:720px">${esc(errorMsg)}</p>`
     : "";
+  const audiencePreviewed = body.audiencePreviewed === "1";
+  const previewSummary =
+    previewGuests && previewGuests.length > 0 ? summarizeCampaignPreview(previewGuests) : null;
+
   const previewBlock =
     previewCount !== null
-      ? `<p class="badge ok" style="max-width:720px"><strong>Audience preview:</strong> ${previewCount} guest(s) match these filters (with a usable phone on file).</p>`
+      ? previewSummary
+        ? `<p class="badge ok" style="max-width:760px"><strong>Audience preview:</strong> ${previewSummary.total} guest(s) match your filters · <strong id="campaign-selected-count">${previewGuests!.filter((g) => isGuestChecked(g, body)).length}</strong> selected to receive this send · ${previewSummary.willSend} can receive now${previewSummary.outside24h ? ` · ${previewSummary.outside24h} outside 24h window` : ""}${previewSummary.suppressed ? ` · ${previewSummary.suppressed} blocked (DND / opt-out / phone)` : ""}.</p>`
+        : `<p class="badge ok" style="max-width:720px"><strong>Audience preview:</strong> ${previewCount} guest(s) match these filters (with a usable phone on file).</p>`
       : "";
+
+  const previewTableBlock = renderCampaignPreviewTable(previewGuests, body, Boolean(hasMarketingTemplate));
 
   const tagAnyBoxes = (Object.keys(SEGMENT_TAG_LABELS) as SegmentTagKind[])
     .map(
@@ -137,7 +151,8 @@ export function renderCampaignComposePage(params: {
 ${whatsappStatusHtml ?? ""}
 ${errBlock}
 ${previewBlock}
-<form method="post" action="${esc(formAction)}" style="max-width:900px; display:grid; gap:14px">
+<form id="campaign-compose-form" method="post" action="${esc(formAction)}" style="max-width:900px; display:grid; gap:14px">
+  <input type="hidden" name="audiencePreviewed" id="audiencePreviewed" value="${audiencePreviewed ? "1" : "0"}" />
   <section style="padding:14px; background:var(--card); border:1px solid var(--border); border-radius:12px">
     <h3 style="margin:0 0 10px">1. Campaign details</h3>
     <label>Campaign name *
@@ -217,10 +232,154 @@ ${previewBlock}
     </label>
   </section>
 
+  ${previewTableBlock}
+
   <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-    <button type="submit" name="_action" value="preview" style="padding:10px 16px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:700">Preview audience</button>
-    <button type="submit" name="_action" value="send" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Send campaign</button>
+    <button type="submit" name="_action" value="preview" style="padding:10px 16px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:700">${audiencePreviewed ? "Refresh preview" : "Preview audience"}</button>
+    <button type="submit" name="_action" value="send" id="campaign-send-btn" style="padding:10px 16px;border:0;border-radius:10px;background:#128c7e;color:#fff;font-weight:700">Send to selected guests</button>
     <a class="btn-link" href="${esc(backHref)}">Back to group messages</a>
   </div>
-</form>`;
+</form>
+${campaignPreviewScript()}`;
+}
+
+function isGuestChecked(row: CampaignGuestPreviewRow, body: Record<string, unknown>): boolean {
+  if (body.audiencePreviewed === "1") {
+    const raw = body.includeGuestIds;
+    const ids = new Set(
+      Array.isArray(raw) ? raw.map(String) : raw != null && String(raw).length ? [String(raw)] : []
+    );
+    return ids.has(row.id);
+  }
+  return row.reachability === "will_send";
+}
+
+function reachabilityBadgeClass(r: CampaignGuestPreviewRow["reachability"]): string {
+  if (r === "will_send") return "ok";
+  if (r === "outside_24h") return "pending";
+  return "alert";
+}
+
+function reachabilityLabel(r: CampaignGuestPreviewRow["reachability"]): string {
+  switch (r) {
+    case "will_send":
+      return "Ready";
+    case "outside_24h":
+      return "Outside 24h";
+    case "dnd":
+      return "DND";
+    case "opt_out":
+      return "Opt-out";
+    case "bad_phone":
+      return "Bad phone";
+  }
+}
+
+function renderCampaignPreviewTable(
+  previewGuests: CampaignGuestPreviewRow[] | null | undefined,
+  body: Record<string, unknown>,
+  hasMarketingTemplate: boolean
+): string {
+  if (!previewGuests?.length) return "";
+
+  const rows = previewGuests
+    .map((g) => {
+      const checked = isGuestChecked(g, body);
+      const canToggle = g.reachability === "will_send" || g.reachability === "outside_24h";
+      return `<tr data-reachability="${esc(g.reachability)}">
+  <td style="width:36px;text-align:center"><input type="checkbox" class="campaign-guest-cb" name="includeGuestIds" value="${esc(g.id)}" ${checked ? "checked" : ""} ${canToggle ? "" : "disabled"} data-reachability="${esc(g.reachability)}" /></td>
+  <td>${esc(g.fullName?.trim() || "—")}</td>
+  <td>${esc(g.phoneE164)}</td>
+  <td><span class="badge ${reachabilityBadgeClass(g.reachability)}">${esc(reachabilityLabel(g.reachability))}</span></td>
+  <td class="muted" style="font-size:12px">${esc(g.note)}</td>
+</tr>`;
+    })
+    .join("");
+
+  const outsideCount = previewGuests.filter((g) => g.reachability === "outside_24h").length;
+  const templateHint = hasMarketingTemplate
+    ? "Guests outside the 24-hour window can be selected — they will receive via your configured marketing template."
+    : outsideCount
+      ? `${outsideCount} guest(s) have not messaged in 24 hours and are unchecked by default. Set WHATSAPP_CAMPAIGN_TEMPLATE_NAME on the server to reach them.`
+      : "Uncheck anyone you do not want in this send.";
+
+  return `
+  <section id="campaign-audience-review" style="padding:14px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+    <h3 style="margin:0 0 6px">4. Review &amp; choose recipients</h3>
+    <p class="muted" style="margin:0 0 10px;font-size:13px">${esc(templateHint)}</p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px">
+      <button type="button" class="btn-link" id="campaign-select-sendable" style="font-size:13px">Select sendable only</button>
+      <span class="muted">·</span>
+      <button type="button" class="btn-link" id="campaign-select-all" style="font-size:13px">Select all</button>
+      <span class="muted">·</span>
+      <button type="button" class="btn-link" id="campaign-select-none" style="font-size:13px">Clear all</button>
+    </div>
+    <div style="max-height:min(420px,50vh);overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table style="margin:0;font-size:13px">
+        <thead><tr><th></th><th>Guest</th><th>Phone</th><th>Status</th><th>Note</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+function campaignPreviewScript(): string {
+  return `<script>
+(function () {
+  var form = document.getElementById("campaign-compose-form");
+  if (!form) return;
+  var hidden = document.getElementById("audiencePreviewed");
+  var countEl = document.getElementById("campaign-selected-count");
+  var sendBtn = document.getElementById("campaign-send-btn");
+  function boxes() {
+    return form.querySelectorAll("input.campaign-guest-cb:not([disabled])");
+  }
+  function updateCount() {
+    var n = 0;
+    boxes().forEach(function (cb) { if (cb.checked) n++; });
+    if (countEl) countEl.textContent = String(n);
+    if (sendBtn) sendBtn.textContent = n ? ("Send to " + n + " guest" + (n === 1 ? "" : "s")) : "Send to selected guests";
+  }
+  form.addEventListener("change", function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains("campaign-guest-cb")) updateCount();
+  });
+  var selSendable = document.getElementById("campaign-select-sendable");
+  var selAll = document.getElementById("campaign-select-all");
+  var selNone = document.getElementById("campaign-select-none");
+  if (selSendable) selSendable.addEventListener("click", function () {
+    boxes().forEach(function (cb) {
+      cb.checked = cb.getAttribute("data-reachability") === "will_send";
+    });
+    updateCount();
+  });
+  if (selAll) selAll.addEventListener("click", function () {
+    boxes().forEach(function (cb) { cb.checked = true; });
+    updateCount();
+  });
+  if (selNone) selNone.addEventListener("click", function () {
+    boxes().forEach(function (cb) { cb.checked = false; });
+    updateCount();
+  });
+  form.addEventListener("submit", function (e) {
+    var action = e.submitter && e.submitter.name === "_action" ? e.submitter.value : "";
+    if (action === "preview" && hidden) hidden.value = "1";
+    if (action === "send") {
+      if (hidden && hidden.value !== "1") {
+        e.preventDefault();
+        alert("Please click Preview audience first, then review the list and send.");
+        return;
+      }
+      var n = 0;
+      boxes().forEach(function (cb) { if (cb.checked) n++; });
+      if (!n) {
+        e.preventDefault();
+        alert("Select at least one guest to send to.");
+        return;
+      }
+      if (!confirm("Send this campaign to " + n + " guest(s) now?")) e.preventDefault();
+    }
+  });
+  updateCount();
+})();
+</script>`;
 }

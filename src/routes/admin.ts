@@ -204,6 +204,11 @@ import {
   serializeCampaignFilters
 } from "../core/campaignAudience";
 import {
+  buildCampaignAudiencePreview,
+  parseCampaignIncludeGuestIds,
+  type CampaignGuestPreviewRow
+} from "../core/campaignAudiencePreview";
+import {
   deriveMarketingCampaignStatus,
   resolveCampaignTemplateConfig,
   sendMarketingCampaignWhatsApp,
@@ -16008,7 +16013,23 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
     ? `<p class="badge ok" style="max-width:760px;display:inline-block">WhatsApp API: connected${waProbePost.displayPhoneNumber ? ` · ${escapeHtml(waProbePost.displayPhoneNumber)}` : ""}.${templateCfgPost.templateName ? ` Marketing template: <strong>${escapeHtml(templateCfgPost.templateName)}</strong>.` : " No marketing template — only 24h-window guests get free-text."}</p>`
     : `<p class="badge alert" style="max-width:760px;display:inline-block">WhatsApp API: <strong>not ready</strong> — ${escapeHtml(waProbePost.errorMessage)}</p>`;
 
-  const renderForm = (previewCount: number | null, errorMsg: string | null) => {
+  const hasMarketingTemplate = Boolean(templateCfgPost.templateName);
+  const buildPreview = async (): Promise<CampaignGuestPreviewRow[]> =>
+    buildCampaignAudiencePreview({
+      hotelId: hotel.id,
+      guests,
+      hotelCountryIso: hotel.country ?? "OM",
+      hasMarketingTemplate
+    });
+
+  const renderForm = async (
+    previewCount: number | null,
+    errorMsg: string | null,
+    previewGuests: CampaignGuestPreviewRow[] | null = null
+  ) => {
+    const guestsForTable =
+      previewGuests ??
+      (previewCount !== null && previewCount > 0 ? await buildPreview() : null);
     const inner = renderCampaignComposePage({
       hotelDisplayName: hotel.displayName,
       roomTypes,
@@ -16019,13 +16040,15 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       pageTitle: "Compose group message",
       formAction: "/admin/campaigns/new",
       backHref: "/admin/conversations/group-messages",
-      whatsappStatusHtml: whatsappStatusHtmlPost
+      whatsappStatusHtml: whatsappStatusHtmlPost,
+      previewGuests: guestsForTable,
+      hasMarketingTemplate
     });
     res.type("html").send(renderLayout(inner, true));
   };
 
   if (isCampaignFiltersEmpty(filters) && !ackBroad) {
-    renderForm(
+    await renderForm(
       null,
       "Select at least one audience filter, or tick the acknowledgement to include all guests with a phone number."
     );
@@ -16035,12 +16058,22 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
   const { guests, count } = await resolveCampaignAudience(hotel.id, filters);
 
   if (action === "preview") {
-    renderForm(count, null);
+    body.audiencePreviewed = "1";
+    const previewGuests = count > 0 ? await buildPreview() : [];
+    await renderForm(count, null, previewGuests);
     return;
   }
 
   if (action !== "send") {
-    renderForm(null, "Unknown action.");
+    await renderForm(null, "Unknown action.");
+    return;
+  }
+
+  if (body.audiencePreviewed !== "1") {
+    await renderForm(
+      count,
+      "Click Preview audience first, review the recipient list (uncheck anyone to exclude), then send."
+    );
     return;
   }
 
@@ -16050,22 +16083,32 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
   const linkedOfferIdRaw = String(body.linkedOfferId ?? "").trim();
   const linkedOfferId = linkedOfferIdRaw.length ? linkedOfferIdRaw : null;
 
+  const includeIds = new Set(parseCampaignIncludeGuestIds(body));
+  const guestsToSend = guests.filter((g) => includeIds.has(g.id));
+
   if (!campaignName) {
-    renderForm(count, "Campaign name is required to send.");
+    await renderForm(count, "Campaign name is required to send.");
     return;
   }
   if (!messageBody) {
-    renderForm(count, "Message body is required to send.");
+    await renderForm(count, "Message body is required to send.");
     return;
   }
   if (count === 0) {
-    renderForm(count, "No guests match these filters. Adjust filters and preview again.");
+    await renderForm(count, "No guests match these filters. Adjust filters and preview again.");
+    return;
+  }
+  if (guestsToSend.length === 0) {
+    await renderForm(
+      count,
+      "Select at least one guest in the review list (step 4) before sending."
+    );
     return;
   }
 
   const waReady = await verifyCampaignWhatsAppReady(hotel.id, waPhoneNumberIdPost);
   if (!waReady.ok) {
-    renderForm(count, waReady.errorMessage);
+    await renderForm(count, waReady.errorMessage);
     return;
   }
 
@@ -16079,7 +16122,7 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       linkedOfferId,
       channel: "WHATSAPP",
       status: "SENDING",
-      audienceCount: count,
+      audienceCount: guestsToSend.length,
       attemptedCount: 0,
       sentOkCount: 0,
       sentFailedCount: 0,
@@ -16096,7 +16139,7 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       hotelDisplayName: hotel.displayName,
       hotelCountryIso: hotel.country,
       campaignId: campaign.id,
-      guests,
+      guests: guestsToSend,
       messageBody,
       offer: offerSnip
     });
@@ -16121,7 +16164,7 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       entityId: campaign.id,
       metadata: {
         name: campaignName,
-        audienceCount: count,
+        audienceCount: guestsToSend.length,
         status: campaignStatus,
         sentOk: result.sentOk,
         sentFailed: result.sentFailed,
