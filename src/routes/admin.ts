@@ -11528,7 +11528,7 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
       return;
     }
     res.redirect(
-      `/admin/room-board/unit/${encodeURIComponent(result.roomUnitId)}/details?date=${encodeURIComponent(result.departureDateKey)}&checkoutSuccess=1`
+      `/admin/room-board/unit/${encodeURIComponent(result.roomUnitId)}/details?date=${encodeURIComponent(result.departureDateKey)}&checkoutSuccess=1&manualCheckOut=1`
     );
   };
 

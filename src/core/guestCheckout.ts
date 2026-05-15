@@ -314,6 +314,16 @@ export async function performGuestCheckout(
   if (!pre.ok) {
     return { ok: false, message: pre.message };
   }
+  // Walk-in / direct / WhatsApp: policy may require manager-approved post-stay
+  // settlement (`requiresApproval`) — never complete checkout from the desk POST
+  // until payment is received or `allowOutstanding` captures that approval.
+  if ("outstanding" in pre && pre.outstanding && !pre.outstanding.policy.allowed && !params.allowOutstanding) {
+    const { amount, currency } = pre.outstanding;
+    return {
+      ok: false,
+      message: `Checkout cannot be completed because this reservation still has an outstanding balance of ${currency} ${amount.toFixed(3)}. Please add payment or settle the invoice first.`
+    };
+  }
   const discountRequested = Number.isFinite(params.discountRequested) && (params.discountRequested ?? 0) > 0 ? params.discountRequested! : 0;
   const departureDate = startOfDay(params.departureDate);
 
