@@ -1791,7 +1791,7 @@ function renderLayout(
       ...(canNavBookings
         ? [{ href: "/admin/bookings?view=checked-out&range=7d&rangeBy=checkOut&sort=checkout_desc", label: "Checked-out history" }]
         : []),
-      ...(canNavBookings ? [{ href: "/admin/guests", label: "Guests" }] : []),
+      ...(canNavBookings ? [{ href: "/admin/guests", label: "Guest CRM" }] : []),
       ...(canNavBookings ? [{ href: "/admin/bookings/search", label: "Guest bills &amp; folios" }] : []),
       ...(perm && hasPermission(perm, "ROOMS", "VIEW") ? [{ href: "/admin/handover-sheet", label: "Handover sheet" }] : []),
       ...(perm && hasPermission(perm, "BOOKINGS", "VIEW")
@@ -1875,7 +1875,7 @@ function renderLayout(
       { href: "/admin/setup", label: "Property setup" },
       { href: "/admin/knowledge-bank", label: "Knowledge bank" },
       ...(sess && isPlatformAcquisitionSession(sess)
-        ? [{ href: "/admin/leads", label: "Lead pipeline (platform)" }]
+        ? [{ href: "/admin/leads", label: "Partner CRM" }]
         : []),
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/users", label: "Staff &amp; permissions" }] : []),
       ...(perm && hasPermission(perm, "USERS", "VIEW") ? [{ href: "/admin/audit-trail", label: "Audit trail" }] : []),
@@ -8059,45 +8059,152 @@ function leadOutreachTemplate(template: "initial_intro" | "followup_1" | "follow
   return `Hello from ChatStay. We help hotels like ${leadHotelName} automate WhatsApp booking, guest operations, upsell, and follow-up in one platform. Would you like a quick walkthrough?`;
 }
 
+const PARTNER_LEAD_PIPELINE_STAGES: Array<{ value: string; label: string }> = [
+  { value: "new", label: "New Lead" },
+  { value: "contacted", label: "Contacted" },
+  { value: "responded", label: "Responded" },
+  { value: "demo_scheduled", label: "Demo Scheduled" },
+  { value: "proposal_sent", label: "Proposal Sent" },
+  { value: "trial_started", label: "Trial Started" },
+  { value: "onboarded", label: "Approved / Onboarded" },
+  { value: "active_subscriber", label: "Active Subscriber" },
+  { value: "interested", label: "Interested" },
+  { value: "converted", label: "Converted" },
+  { value: "not_interested", label: "Lost / Rejected" }
+];
+
+const PARTNER_LEAD_STATUS_VALUES = new Set(PARTNER_LEAD_PIPELINE_STAGES.map((s) => s.value));
+
+function partnerLeadStatusLabel(status: string): string {
+  return PARTNER_LEAD_PIPELINE_STAGES.find((s) => s.value === status)?.label ?? status;
+}
+
+function partnerLeadStatusBadgeClass(status: string): string {
+  if (status === "active_subscriber" || status === "converted" || status === "onboarded") return "ok";
+  if (status === "not_interested") return "pending";
+  if (status === "trial_started" || status === "interested" || status === "responded" || status === "demo_scheduled") {
+    return "ok";
+  }
+  return "badge";
+}
+
+function parseLeadNextFollowUpAt(raw: unknown): Date | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return startOfDay(parseDateInput(s, new Date()));
+  }
+  return null;
+}
+
+function appendLeadCrmNote(existing: string | null | undefined, line: string): string {
+  const prev = (existing ?? "").trim();
+  const next = `${line}`.trim();
+  if (!next) return prev;
+  return prev ? `${prev}\n\n${next}` : next;
+}
+
+function leadFollowUpCell(nextFollowUpAt: Date | null | undefined): string {
+  if (!nextFollowUpAt) return '<span class="muted">—</span>';
+  const day = startOfDay(nextFollowUpAt);
+  const today = startOfDay(new Date());
+  const label = formatDateForInput(day);
+  if (day.getTime() < today.getTime()) {
+    return `<span class="badge alert">Overdue · ${escapeHtml(label)}</span>`;
+  }
+  if (day.getTime() === today.getTime()) {
+    return `<span class="badge ok">Today · ${escapeHtml(label)}</span>`;
+  }
+  return escapeHtml(label);
+}
+
 adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, res) => {
   const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true, displayName: true } });
   if (!hotel) {
-    res.type("html").send(renderLayout("<h2>Leads</h2><p>No hotel data found.</p>", true));
+    res.type("html").send(renderLayout("<h2>Partner CRM</h2><p>No hotel data found.</p>", true));
     return;
   }
+  const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
   const status = String(req.query.status ?? "all").toLowerCase();
-  const where = {
-    hotelId: hotel.id,
-    ...(status !== "all" ? { status } : {})
-  };
+  const followup = String(req.query.followup ?? "").toLowerCase();
+  const todayStart = startOfDay(new Date());
+  const tomorrowStart = addDays(todayStart, 1);
+  const closedStatuses = ["not_interested", "active_subscriber"];
+
+  const where: Prisma.LeadWhereInput = { hotelId: hotel.id };
+  if (status !== "all") {
+    where.status = status;
+  }
+  if (followup === "due_today") {
+    where.nextFollowUpAt = { gte: todayStart, lt: tomorrowStart };
+    where.status = { notIn: closedStatuses };
+  } else if (followup === "overdue") {
+    where.nextFollowUpAt = { lt: todayStart };
+    where.status = { notIn: closedStatuses };
+  }
+  if (qRaw) {
+    where.OR = [
+      { hotelName: { contains: qRaw } },
+      { contactName: { contains: qRaw } },
+      { contactEmail: { contains: qRaw } },
+      { contactPhone: { contains: qRaw } },
+      { location: { contains: qRaw } }
+    ];
+  }
+
   const leads = await prisma.lead.findMany({
     where,
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ nextFollowUpAt: "asc" }, { createdAt: "desc" }],
     take: 300,
-    include: { outreachLogs: { orderBy: { createdAt: "desc" }, take: 1 }, convertedProperty: true }
+    include: { outreachLogs: { orderBy: { createdAt: "desc" }, take: 3 }, convertedProperty: true }
   });
+
+  const stageFilterLinks = PARTNER_LEAD_PIPELINE_STAGES.map(
+    (s) =>
+      `<a class="btn-link${status === s.value ? " primary" : ""}" href="/admin/leads?status=${encodeURIComponent(s.value)}">${escapeHtml(s.label)}</a>`
+  ).join("\n  ");
+
   const rows = leads
     .map((l) => {
       const latest = l.outreachLogs[0];
       const latestLine = latest ? `${latest.channel} · ${formatDateTime(latest.sentAt)} · ${latest.templateKey}` : "—";
-      const badgeClass =
-        l.status === "converted" ? "ok" : l.status === "not_interested" ? "pending" : l.status === "interested" ? "ok" : "badge";
+      const outreachTimeline =
+        l.outreachLogs.length === 0
+          ? '<p class="muted" style="margin:4px 0 0;font-size:12px">No outreach yet.</p>'
+          : `<ul style="margin:4px 0 0;padding-left:18px;font-size:12px">${l.outreachLogs
+              .map(
+                (o) =>
+                  `<li>${escapeHtml(o.channel)} · ${escapeHtml(formatDateTime(o.sentAt))} · ${escapeHtml(o.templateKey)} (${escapeHtml(o.status)})</li>`
+              )
+              .join("")}</ul>`;
+      const notesPreview = l.notes
+        ? `<details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px">Internal notes</summary><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">${escapeHtml(l.notes.slice(0, 1200))}</pre></details>`
+        : "";
+      const canOnboard = ["interested", "responded", "demo_scheduled", "proposal_sent", "trial_started"].includes(l.status);
       return `<tr>
 <td>${escapeHtml(l.hotelName)}</td>
 <td>${escapeHtml(l.contactName ?? "—")}</td>
 <td>${escapeHtml(l.contactEmail ?? "—")}<br/><span class="muted">${escapeHtml(l.contactPhone ?? "—")}</span></td>
 <td>${escapeHtml(l.location ?? "—")}</td>
-<td><span class="badge ${badgeClass}">${escapeHtml(l.status)}</span></td>
-<td>${escapeHtml(latestLine)}</td>
+<td><span class="badge ${partnerLeadStatusBadgeClass(l.status)}">${escapeHtml(partnerLeadStatusLabel(l.status))}</span></td>
+<td>${leadFollowUpCell(l.nextFollowUpAt)}</td>
+<td>${escapeHtml(latestLine)}${outreachTimeline}</td>
 <td>
   <form method="post" action="/admin/leads/${encodeURIComponent(l.id)}/status" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
-    <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
-      ${["new", "contacted", "responded", "interested", "converted", "not_interested"]
-        .map((s) => `<option value="${s}" ${l.status === s ? "selected" : ""}>${s}</option>`)
-        .join("")}
+    <select name="status" style="padding:6px; border:1px solid #d8dee6; border-radius:8px; max-width:200px">
+      ${PARTNER_LEAD_PIPELINE_STAGES.map((s) => `<option value="${s.value}" ${l.status === s.value ? "selected" : ""}>${escapeHtml(s.label)}</option>`).join("")}
     </select>
-    <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Update</button>
+    <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700">Stage</button>
   </form>
+  <form method="post" action="/admin/leads/${encodeURIComponent(l.id)}/followup" style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center">
+    <input type="date" name="nextFollowUpAt" value="${l.nextFollowUpAt ? escapeHtml(formatDateForInput(l.nextFollowUpAt)) : ""}" style="padding:6px; border:1px solid #d8dee6; border-radius:8px" />
+    <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#64748b; color:#fff; font-weight:700">Follow-up</button>
+  </form>
+  <form method="post" action="/admin/leads/${encodeURIComponent(l.id)}/notes" style="margin-top:6px; display:grid; gap:4px">
+    <textarea name="note" rows="2" placeholder="Add internal note…" style="width:100%; padding:6px; border:1px solid #d8dee6; border-radius:8px; font-family:inherit; font-size:12px"></textarea>
+    <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#334155; color:#fff; font-weight:700; width:fit-content">Save note</button>
+  </form>
+  ${notesPreview}
   <form method="post" action="/admin/leads/${encodeURIComponent(l.id)}/outreach" style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center">
     <select name="channel" style="padding:6px; border:1px solid #d8dee6; border-radius:8px">
       <option value="email">email</option>
@@ -8111,10 +8218,10 @@ adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, r
     <button type="submit" style="padding:6px 10px; border:0; border-radius:8px; background:#25d366; color:#083d2d; font-weight:700">Send</button>
   </form>
   ${
-    l.status === "interested" || l.status === "responded"
-      ? `<p style="margin-top:6px"><a class="inline-link" href="/admin/onboard?leadId=${encodeURIComponent(l.id)}">Convert & onboard</a></p>`
-      : l.status === "converted"
-        ? `<p class="muted" style="margin-top:6px">Converted${l.convertedProperty ? ` → ${escapeHtml(l.convertedProperty.name)}` : ""}</p>`
+    canOnboard
+      ? `<p style="margin-top:6px"><a class="inline-link" href="/admin/onboard?leadId=${encodeURIComponent(l.id)}">Convert &amp; onboard</a></p>`
+      : l.status === "converted" || l.status === "onboarded"
+        ? `<p class="muted" style="margin-top:6px">Onboarded${l.convertedProperty ? ` → ${escapeHtml(l.convertedProperty.name)}` : ""}</p>`
         : ""
   }
 </td>
@@ -8123,37 +8230,52 @@ adminRouter.get("/leads", requireAuth, requirePlatformAcquisition, async (req, r
     .join("");
 
   const content = `
-<h2>Lead pipeline</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — lightweight outreach and acquisition tracking.</p>
+<h2>Partner CRM</h2>
+<p class="muted">Platform acquisition — hotel leads, pipeline stages, follow-ups, and outreach. Hotel staff cannot access this page.</p>
 <div class="actions">
-  <a class="btn-link" href="/admin/profile">Back to profile</a>
-  <a class="btn-link" href="/admin/leads">All</a>
-  <a class="btn-link" href="/admin/leads?status=interested">Interested</a>
-  <a class="btn-link" href="/admin/leads?status=converted">Converted</a>
+  <a class="btn-link" href="/owner">Owner console (subscribers)</a>
+  <a class="btn-link" href="/admin/onboard">Onboard property</a>
+  <a class="btn-link" href="/admin/leads">All leads</a>
+  <a class="btn-link" href="/admin/leads?followup=due_today">Due today</a>
+  <a class="btn-link" href="/admin/leads?followup=overdue">Overdue</a>
+</div>
+<form method="get" action="/admin/leads" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:12px 0;max-width:920px">
+  <label style="flex:1;min-width:200px">Search
+    <input type="search" name="q" value="${escapeHtml(qRaw)}" placeholder="Hotel, contact, email, phone, location" style="width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
+  </label>
+  <button type="submit" style="padding:8px 14px;border:0;border-radius:8px;background:#0b6e6e;color:#fff;font-weight:700">Search</button>
+  <a class="btn-link" href="/admin/leads">Clear filters</a>
+</form>
+<div class="actions" style="flex-wrap:wrap;gap:6px;margin-bottom:12px">
+  ${stageFilterLinks}
 </div>
 <section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
   <h3 style="margin-top:0">Add lead</h3>
   <form method="post" action="/admin/leads" style="display:grid; gap:10px; max-width:760px">
-    <label>Hotel name<input name="hotelName" required style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Hotel / company name<input name="hotelName" required style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
     <label>Contact name (optional)<input name="contactName" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
     <label>Email<input type="email" name="contactEmail" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
     <label>Phone<input name="contactPhone" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
     <label>Location<input name="location" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
+    <label>Next follow-up (optional)<input type="date" name="nextFollowUpAt" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px" /></label>
     <label>Source
       <select name="source" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px">
         <option value="manual">manual</option>
         <option value="import">import</option>
         <option value="campaign">campaign</option>
+        <option value="referral">referral</option>
+        <option value="website">website</option>
       </select>
     </label>
+    <label>Initial notes<textarea name="notes" rows="2" style="width:100%; margin-top:4px; padding:8px; border:1px solid #d8dee6; border-radius:8px; font-family:inherit"></textarea></label>
     <button type="submit" style="padding:8px 14px; border:0; border-radius:8px; background:#0b6e6e; color:#fff; font-weight:700; width:fit-content">Add lead</button>
   </form>
 </section>
 <section>
-  <h3>Leads</h3>
+  <h3>Pipeline</h3>
   <table>
-    <thead><tr><th>Hotel</th><th>Contact</th><th>Email / Phone</th><th>Location</th><th>Status</th><th>Last outreach</th><th>Actions</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="7">No leads yet.</td></tr>'}</tbody>
+    <thead><tr><th>Hotel</th><th>Contact</th><th>Email / Phone</th><th>Location</th><th>Stage</th><th>Follow-up</th><th>Outreach</th><th>Actions</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="8">No leads yet.</td></tr>'}</tbody>
   </table>
 </section>`;
   res.type("html").send(renderLayout(content, true));
@@ -8171,10 +8293,17 @@ adminRouter.post("/leads", requireAuth, requirePlatformAcquisition, async (req, 
   const contactPhone = String(req.body.contactPhone ?? "").trim() || null;
   const location = String(req.body.location ?? "").trim() || null;
   const source = String(req.body.source ?? "manual").trim() || "manual";
+  const notesRaw = String(req.body.notes ?? "").trim();
+  const nextFollowUpAt = parseLeadNextFollowUpAt(req.body.nextFollowUpAt);
   if (!hotelName) {
     res.redirect("/admin/leads");
     return;
   }
+  const staff = getSession(req);
+  const notes =
+    notesRaw && staff?.email
+      ? appendLeadCrmNote(null, `[${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · ${staff.email}] ${notesRaw}`)
+      : notesRaw || null;
   await prisma.lead.create({
     data: {
       hotelId: hotel.id,
@@ -8184,7 +8313,9 @@ adminRouter.post("/leads", requireAuth, requirePlatformAcquisition, async (req, 
       contactPhone,
       location,
       source,
-      status: "new"
+      status: "new",
+      nextFollowUpAt,
+      notes
     }
   });
   res.redirect("/admin/leads");
@@ -8198,8 +8329,7 @@ adminRouter.post("/leads/:leadId/status", requireAuth, requirePlatformAcquisitio
   }
   const leadId = String(req.params.leadId ?? "");
   const status = String(req.body.status ?? "").trim();
-  const allowed = new Set(["new", "contacted", "responded", "interested", "converted", "not_interested"]);
-  if (!allowed.has(status)) {
+  if (!PARTNER_LEAD_STATUS_VALUES.has(status)) {
     res.redirect("/admin/leads");
     return;
   }
@@ -8224,6 +8354,49 @@ adminRouter.post("/leads/:leadId/status", requireAuth, requirePlatformAcquisitio
       metadata: { leadId: lead.id }
     });
   }
+  res.redirect("/admin/leads");
+});
+
+adminRouter.post("/leads/:leadId/followup", requireAuth, requirePlatformAcquisition, async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const leadId = String(req.params.leadId ?? "");
+  const lead = await prisma.lead.findFirst({ where: { id: leadId, hotelId: hotel.id }, select: { id: true } });
+  if (!lead) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const nextFollowUpAt = parseLeadNextFollowUpAt(req.body.nextFollowUpAt);
+  await prisma.lead.update({ where: { id: lead.id }, data: { nextFollowUpAt } });
+  res.redirect("/admin/leads");
+});
+
+adminRouter.post("/leads/:leadId/notes", requireAuth, requirePlatformAcquisition, async (req, res) => {
+  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() }, select: { id: true } });
+  if (!hotel) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const leadId = String(req.params.leadId ?? "");
+  const note = String(req.body.note ?? "").trim().slice(0, 2000);
+  if (!note) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const lead = await prisma.lead.findFirst({ where: { id: leadId, hotelId: hotel.id }, select: { id: true, notes: true } });
+  if (!lead) {
+    res.redirect("/admin/leads");
+    return;
+  }
+  const staff = getSession(req);
+  const stamp = `[${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC${staff?.email ? ` · ${staff.email}` : ""}]`;
+  await prisma.lead.update({
+    where: { id: lead.id },
+    data: { notes: appendLeadCrmNote(lead.notes, `${stamp} ${note}`) }
+  });
   res.redirect("/admin/leads");
 });
 
@@ -16827,8 +17000,8 @@ adminRouter.get("/guests", requirePermission("BOOKINGS", "VIEW"), async (req, re
     .join("");
 
   const content = `
-<h2>Guests</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — Guest directory for front desk lookup, VIP recognition, and recent-stay context.</p>
+<h2>Guest CRM</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Search guests by name, phone, or email. Property-scoped directory.</p>
 <form method="get" action="/admin/guests" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:0 0 14px;max-width:720px">
   <label style="flex:1;min-width:240px">Search guests
     <input type="search" name="q" value="${escapeHtml(qRaw)}" placeholder="Name, phone, or email" style="width:100%;margin-top:4px;padding:10px 12px;border:1px solid #d8dee6;border-radius:10px" />
@@ -16846,7 +17019,7 @@ adminRouter.get("/guests", requirePermission("BOOKINGS", "VIEW"), async (req, re
 adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
     where: { slug: activeHotelSlug() },
-    select: { id: true, displayName: true }
+    select: { id: true, displayName: true, currency: true }
   });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Guest</h2><p>No hotel data found.</p>", true));
@@ -16878,6 +17051,33 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
     res.status(404).type("html").send(renderLayout("<h2>Guest not found</h2><p>Check the link or open the guest from a booking.</p>", true));
     return;
   }
+
+  const bookingIds = g.bookings.map((b) => b.id);
+  const feedbackWhere: Prisma.GuestFeedbackWhereInput =
+    bookingIds.length > 0
+      ? { hotelId: hotel.id, OR: [{ guestId: g.id }, { bookingId: { in: bookingIds } }] }
+      : { hotelId: hotel.id, guestId: g.id };
+
+  const [conversations, feedbackRows, fbOrders] = await Promise.all([
+    prisma.conversation.findMany({
+      where: { hotelId: hotel.id, guestId: g.id },
+      orderBy: [{ lastMessageAt: "desc" }, { updatedAt: "desc" }],
+      take: 10,
+      select: { id: true, lastMessageAt: true, state: true, channel: true }
+    }),
+    prisma.guestFeedback.findMany({
+      where: feedbackWhere,
+      orderBy: { createdAt: "desc" },
+      take: 15,
+      select: { id: true, rating: true, bookingId: true, createdAt: true, status: true, comment: true }
+    }),
+    prisma.fbOrder.findMany({
+      where: { hotelId: hotel.id, guestId: g.id },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { id: true, totalAmount: true, createdAt: true, outletType: true, status: true, bookingId: true }
+    })
+  ]);
 
   const lightGuestMemoryJson =
     (g as { lightGuestMemoryJson?: string | null }).lightGuestMemoryJson ?? null;
@@ -16917,12 +17117,60 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
     )
     .join("");
 
+  const convTableRows =
+    conversations.length === 0
+      ? '<tr><td colspan="4" class="muted">No conversation linked to this guest.</td></tr>'
+      : conversations
+          .map(
+            (c) => `<tr>
+  <td><a class="inline-link" href="/admin/conversations/${encodeURIComponent(c.id)}">Open thread</a></td>
+  <td>${escapeHtml(String(c.channel))}</td>
+  <td><span class="badge pending">${escapeHtml(String(c.state))}</span></td>
+  <td>${c.lastMessageAt ? escapeHtml(formatDateTime(c.lastMessageAt)) : '<span class="muted">—</span>'}</td>
+</tr>`
+          )
+          .join("");
+
+  const feedbackTableRows =
+    feedbackRows.length === 0
+      ? '<tr><td colspan="5" class="muted">No feedback records yet.</td></tr>'
+      : feedbackRows
+          .map(
+            (f) => `<tr>
+  <td>${escapeHtml(String(f.rating))}</td>
+  <td><span class="badge pending">${escapeHtml(String(f.status))}</span></td>
+  <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(f.bookingId)}">${escapeHtml(f.bookingId.slice(0, 14))}…</a></td>
+  <td>${escapeHtml(formatDate(f.createdAt))}</td>
+  <td class="muted" style="max-width:240px">${f.comment ? escapeHtml(f.comment.slice(0, 140)) + (f.comment.length > 140 ? "…" : "") : "—"}</td>
+</tr>`
+          )
+          .join("");
+
+  const fbTableRows =
+    fbOrders.length === 0
+      ? '<tr><td colspan="4" class="muted">No posted F&amp;B orders for this guest.</td></tr>'
+      : fbOrders
+          .map(
+            (o) => `<tr>
+  <td>${escapeHtml(formatDate(o.createdAt))}</td>
+  <td>${escapeHtml(String(o.outletType))} · ${escapeHtml(String(o.status))}</td>
+  <td>${formatMoney(o.totalAmount, hotel.currency)}</td>
+  <td><a class="inline-link" href="/admin/bookings/${encodeURIComponent(o.bookingId)}">Booking</a></td>
+</tr>`
+          )
+          .join("");
+
   const content = `
-<h2>Guest profile</h2>
-<p class="muted">${escapeHtml(hotel.displayName)} — Segmentation, VIP, and recent bookings.</p>
+<h2>Guest CRM</h2>
+<p class="muted">${escapeHtml(hotel.displayName)} — Guest profile, stay history, WhatsApp, feedback, and F&amp;B context (property-scoped).</p>
 ${savedNotice}
 <div class="actions">
-  <a class="btn-link" href="/admin/conversations">Conversations</a>
+  <a class="btn-link" href="/admin/guests">All guests</a>
+  ${
+    conversations[0]
+      ? `<a class="btn-link primary" href="/admin/conversations/${encodeURIComponent(conversations[0].id)}">Open WhatsApp conversation</a>`
+      : `<a class="btn-link" href="/admin/conversations">Conversations</a>`
+  }
 </div>
 
 <section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">
@@ -16938,6 +17186,7 @@ ${savedNotice}
       <tr><th>Name</th><td>${escapeHtml(g.fullName ?? "—")}</td></tr>
       <tr><th>Phone</th><td>${escapeHtml(g.phoneE164)}</td></tr>
       <tr><th>Email</th><td>${escapeHtml(g.email ?? "—")}</td></tr>
+      <tr><th>Nationality</th><td>${escapeHtml(g.nationality ?? "—")}</td></tr>
     </tbody>
   </table>
 </section>
@@ -16979,7 +17228,31 @@ ${savedNotice}
 </section>
 
 <section style="margin:16px 0; max-width:920px">
-  <h3>Recent bookings</h3>
+  <h3>WhatsApp conversations</h3>
+  <table>
+    <thead><tr><th>Thread</th><th>Channel</th><th>State</th><th>Last message</th></tr></thead>
+    <tbody>${convTableRows}</tbody>
+  </table>
+</section>
+
+<section style="margin:16px 0; max-width:920px">
+  <h3>Feedback &amp; reviews</h3>
+  <table>
+    <thead><tr><th>Rating</th><th>Status</th><th>Booking</th><th>Date</th><th>Comment</th></tr></thead>
+    <tbody>${feedbackTableRows}</tbody>
+  </table>
+</section>
+
+<section style="margin:16px 0; max-width:920px">
+  <h3>Restaurant / café orders (folio)</h3>
+  <table>
+    <thead><tr><th>Posted</th><th>Outlet</th><th>Total</th><th>Stay</th></tr></thead>
+    <tbody>${fbTableRows}</tbody>
+  </table>
+</section>
+
+<section style="margin:16px 0; max-width:920px">
+  <h3>Stay history</h3>
   <table>
     <thead><tr><th>ID</th><th>Reference</th><th>Check-in</th><th>Check-out</th><th>Nights</th><th>Source</th><th>Status</th></tr></thead>
     <tbody>${bookingRows || '<tr><td colspan="7">No bookings yet.</td></tr>'}</tbody>

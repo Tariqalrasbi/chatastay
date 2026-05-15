@@ -623,6 +623,8 @@ model Lead {
   source              String            @default("manual")
   status              String            @default("new")
   lastContactedAt     DateTime?
+  /// Partner CRM: staff next touch date (optional).
+  nextFollowUpAt      DateTime?
   notes               String?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
@@ -631,6 +633,7 @@ model Lead {
   @@index([hotelId, status, createdAt])
   @@index([hotelId, contactEmail])
   @@index([hotelId, contactPhone])
+  @@index([hotelId, nextFollowUpAt])
 }
 
 model LeadOutreachLog {
