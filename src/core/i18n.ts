@@ -8,10 +8,10 @@ const messages: Record<Language, Record<string, string>> = {
     noAvailability: "Sorry, no rooms are available for those dates."
   },
   ar: {
-    welcome: "مرحبا بك في تشاتا ستاي! الرجاء إرسال تاريخ الوصول والمغادرة.",
-    missingDates: "يرجى إرسال التواريخ بهذا الشكل: YYYY-MM-DD to YYYY-MM-DD.",
-    quoteReady: "ممتاز! هذا هو عرض السعر.",
-    noAvailability: "عذرا، لا توجد غرف متاحة في هذه التواريخ."
+    welcome: "أهلاً بك في تشاتا ستاي! يُرجى إرسال تاريخ الوصول والمغادرة.",
+    missingDates: "يُرجى إرسال التواريخ بهذا الشكل: YYYY-MM-DD إلى YYYY-MM-DD.",
+    quoteReady: "ممتاز! هذا عرض السعر لإقامتك.",
+    noAvailability: "عذراً، لا تتوفر غرف في هذه التواريخ."
   }
 };
 

@@ -83,12 +83,12 @@ export function buildMealPlanSelectionOutbounds(lang: "en" | "ar"): FoodFlowOutb
   const header: FoodFlowOutbound = {
     kind: "text",
     body: ar
-      ? "🍽 *باقة الوجبات*\nاختر واحدة من القائمة التالية (اضغط *اختيار الباقة*)."
+      ? "🍽 *باقة الوجبات*\nاختر باقة واحدة من القائمة (اضغط *اختيار الباقة*)."
       : "🍽 *Meal plan*\nChoose one option below (tap *Choose plan*)."
   };
   const list: FoodFlowOutbound = {
     kind: "list",
-    body: ar ? "اختر خطة الوجبات الآن:" : "Choose your meal plan:",
+    body: ar ? "اختر باقة الوجبات:" : "Choose your meal plan:",
     buttonText: ar ? "اختيار الباقة" : "Choose plan",
     sections: [
       {

@@ -50,6 +50,20 @@ import {
 } from "../core/serviceOperatingHours";
 import { upsertGuestWithPhone, phoneSessionKeyPart } from "../core/guestPhoneService";
 import { toWhatsAppDigits } from "../core/phoneNumber";
+import {
+  bookingCopy,
+  bookingStartPrompt,
+  buildMainMenuMessage,
+  effectiveChatLang,
+  getBookingModeEntry,
+  getBookingSubmenuBody,
+  getBookingSubmenuFallbackList,
+  getLanguageSelectFallback,
+  getLanguageSelectPrompt,
+  getMainMenuBody,
+  missingBookingDetailsPrompt,
+  welcomeBackPrefix
+} from "./chatbotCopy";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import {
@@ -123,41 +137,6 @@ type TurnResult = {
   responseList?: { buttonText: string; sections: Array<{ title: string; rows: Array<{ id: string; title: string }> }> };
 };
 
-function bookingStartPrompt(opts?: { memory: LightGuestMemory; confirmedStayCount: number }): string {
-  const base = [
-    "Great, I can help with your booking.",
-    "Please share check-in, check-out, and guest count.",
-    "Examples:",
-    "- 2026-04-10 to 2026-04-12 for 2 guests",
-    "- 2 guests from 10 April to 12 April"
-  ];
-  if (opts && opts.confirmedStayCount >= 1) {
-    const room = opts.memory.preferredRoomTypeName?.trim();
-    if (room && room.length > 2) {
-      base.splice(
-        1,
-        0,
-        `Welcome back — when you have dates, we can look for availability similar to ${room} if you would like that again.`
-      );
-    } else {
-      base.splice(1, 0, "Welcome back — we are happy to help with another stay.");
-    }
-  }
-  return base.join("\n");
-}
-
-function missingBookingDetailsPrompt(parsed: ReturnType<typeof parseGuestMessage>): string {
-  const missingDates = !parsed.checkIn || !parsed.checkOut;
-  const missingGuests = parsed.guestCount === undefined;
-  if (missingDates && missingGuests) {
-    return "Please share your check-in, check-out, and guest count. Example: 2026-04-10 to 2026-04-12 for 2 guests.";
-  }
-  if (missingDates) {
-    return "Please share your check-in and check-out dates.";
-  }
-  return "How many guests will stay?";
-}
-
 function normalizeText(input: string): string {
   return input
     .toLowerCase()
@@ -228,39 +207,7 @@ function getConversationMode(raw: string | undefined): ConversationMode {
 
 /** Effective UI language: ar or en. Defaults to en when not set. */
 function effectiveLang(lang: string | undefined): "ar" | "en" {
-  return lang === "ar" ? "ar" : "en";
-}
-
-function getMainMenuBody(hotelName: string, lang: "ar" | "en"): string {
-  if (lang === "ar") {
-    return `أهلاً بك في ${hotelName}.\nاختر الخدمة المطلوبة:`;
-  }
-  return `Welcome to ${hotelName}.\nChoose what you need:`;
-}
-
-function buildMainMenuMessage(hotelName: string, lang: "ar" | "en"): string {
-  if (lang === "ar") {
-    return [
-      `أهلاً بك في ${hotelName}.`,
-      "اختر الخدمة المطلوبة:",
-      "1) حجز إقامة",
-      "2) معلومات الفندق والموقع",
-      "3) تصفح قائمة المطعم",
-      "4) طلب طعام للنزلاء داخل الفندق",
-      "5) تغيير اللغة",
-      "6) التحدث مع الاستقبال"
-    ].join("\n");
-  }
-  return [
-    `Welcome to ${hotelName}.`,
-    "Choose what you need:",
-    "1) Book a stay",
-    "2) Hotel info & location",
-    "3) Browse restaurant menu",
-    "4) Order food in-house",
-    "5) Change language",
-    "6) Chat with reception"
-  ].join("\n");
+  return effectiveChatLang(lang);
 }
 
 /** Optional welcome-back line for returning guests (throttled in stored memory). */
@@ -274,10 +221,7 @@ function personalizeMainMenuBodies(
   if (!ctx || ctx.confirmedStayCount < 1 || !shouldShowWelcomeBackLine(ctx.memory)) {
     return { menuBody, fallbackBody, stampedWelcomeBack: false };
   }
-  const prefix =
-    lang === "ar"
-      ? "أهلاً بك من جديد — يسعدنا تواصلك معنا مجدداً.\n\n"
-      : "Welcome back — we're glad you're in touch with us again.\n\n";
+  const prefix = welcomeBackPrefix(lang);
   return { menuBody: prefix + menuBody, fallbackBody: prefix + fallbackBody, stampedWelcomeBack: true };
 }
 
@@ -359,8 +303,6 @@ async function sendMainMenuForGuest(params: {
   }
 }
 
-const LANGUAGE_SELECT_PROMPT = "Please choose your language:";
-const LANGUAGE_SELECT_FALLBACK = "Please choose your language:\n• العربية\n• English";
 const LANGUAGE_BUTTONS: Array<{ id: string; title: string }> = [
   { id: "lang_ar", title: "العربية" },
   { id: "lang_en", title: "English" }
@@ -374,7 +316,7 @@ async function sendLanguageSelectionPrompt(params: {
   try {
     await sendWhatsAppButtons({
       to: params.to,
-      body: LANGUAGE_SELECT_PROMPT,
+      body: getLanguageSelectPrompt(),
       buttons: LANGUAGE_BUTTONS,
       phoneNumberId: params.phoneNumberId,
       conversationId: params.conversationId
@@ -383,17 +325,17 @@ async function sendLanguageSelectionPrompt(params: {
     console.error("WhatsApp language buttons send failed:", err instanceof Error ? err.message : String(err));
     await sendWhatsAppText({
       to: params.to,
-      body: LANGUAGE_SELECT_FALLBACK,
+      body: getLanguageSelectFallback(),
       phoneNumberId: params.phoneNumberId,
       conversationId: params.conversationId
     });
   }
 }
 
-const BOOKING_MODE_ENTRY =
-  "I'll help you book a stay. You can ask about room types or check availability. To get started, share your preferred dates and number of guests—e.g. 10–12 April for 2 guests.";
 const APP_BASE_URL = (process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
-const BOOKING_SUBMENU_BODY = "What would you like to do?";
+function bookingSubmenuBody(lang: string | undefined): string {
+  return getBookingSubmenuBody(effectiveLang(lang));
+}
 const BOOKING_SUBMENU_LIST = {
   buttonText: "Choose an option",
   sections: [
@@ -813,73 +755,6 @@ function isUniversalChangeBookingRequest(text: string): boolean {
 
 function bookingLang(lang: string | undefined): "ar" | "en" {
   return effectiveLang(lang);
-}
-
-function bookingCopy(langRaw: string | undefined) {
-  const ar = bookingLang(langRaw) === "ar";
-  return {
-    noSingleRoomPrefix: ar ? "لا توجد غرفة واحدة مناسبة لهذا العدد من الضيوف." : "No single room fits this group.",
-    largestOptions: ar ? "أكبر الغرف المتاحة:" : "Our largest options:",
-    splitPrompt: ar
-      ? "يمكننا تقسيم الضيوف على أكثر من غرفة. اختر عدد الغرف للمتابعة:"
-      : "We can split the guests across multiple rooms. Choose how many rooms to continue:",
-    splitButton: ar ? "تقسيم الغرف" : "Split rooms",
-    splitSection: ar ? "خيارات الغرف" : "Room options",
-    splitInto: (rooms: number) => (ar ? `تقسيم إلى ${rooms} غرف` : `Split into ${rooms} rooms`),
-    splitDesc: (rooms: number, guests: number) =>
-      ar ? `متوسط ${Math.ceil(guests / rooms)} ضيوف لكل غرفة` : `About ${Math.ceil(guests / rooms)} guests per room`,
-    changeGuests: ar ? "تغيير عدد الضيوف" : "Change guests",
-    changeGuestsDesc: ar ? "العودة للبالغين والأطفال" : "Back to adults and children",
-    splitFallback: ar ? "اكتب عدد الغرف مثل 2 أو 3، أو اكتب back لتغيير عدد الضيوف." : "Reply with the number of rooms, such as 2 or 3, or reply back to change guests.",
-    invalidSplit: ar ? "اختر عدد الغرف من القائمة أو اكتب 2 أو 3." : "Please choose a room count from the list, or reply 2 or 3.",
-    noSplitAvailability: ar
-      ? "عذرًا، لا توجد غرف كافية لهذه التواريخ. جرّب عدد غرف مختلف أو تواريخ أخرى."
-      : "Sorry, there are not enough rooms for those dates. Try a different room count or dates.",
-    noSingleRoomChoiceBody: ar
-      ? "لا توجد غرفة واحدة تناسب هذا العدد من الضيوف. ماذا تفضل؟"
-      : "No single room fits this group. What would you like to do?",
-    splitNow: ar ? "قسّم الغرف الآن" : "Split rooms now",
-    splitNowDesc: ar ? "اختر غرفتين أو أكثر واكمل الحجز" : "Choose 2+ rooms and continue booking",
-    talkReception: ar ? "تحدث مع الاستقبال" : "Talk to reception",
-    talkReceptionDesc: ar ? "يساعدك الموظف مباشرة" : "A staff member will help directly",
-    noAvailabilityBody: ar
-      ? "لا توجد غرف متاحة لهذا الاختيار. اختر ما تريد تغييره:"
-      : "No rooms are available for this choice. What would you like to change?",
-    availabilityRecoveryButton: ar ? "تعديل الطلب" : "Change request",
-    changeDates: ar ? "تغيير التواريخ" : "Change dates",
-    changeDatesDesc: ar ? "اختر وصول ومغادرة جديدة" : "Pick new check-in/out dates",
-    changeRooms: ar ? "تغيير عدد الغرف" : "Change room count",
-    changeRoomsDesc: ar ? "جرّب غرفة أكثر أو أقل" : "Try more or fewer rooms",
-    changeRoomType: ar ? "تغيير نوع الغرفة" : "Change room type",
-    changeRoomTypeDesc: ar ? "اختر نوع غرفة آخر" : "Choose another room type",
-    changeMenuBody: ar ? "ما الذي تريد تغييره في الحجز؟" : "What would you like to change in the booking?",
-    changeMenuButton: ar ? "تعديل الحجز" : "Change booking",
-    changeMealPlan: ar ? "تغيير الوجبات" : "Change meal plan",
-    changeMealPlanDesc: ar ? "غرفة فقط أو نصف/كامل إقامة" : "Room only or board options",
-    changePayment: ar ? "تغيير الدفع" : "Change payment",
-    changePaymentDesc: ar ? "الدفع الآن أو لاحقاً" : "Pay now or pay later",
-    paymentChoiceBody: ar ? "كيف تفضل إكمال الدفع؟" : "How would you like to handle payment?",
-    payOnline: ar ? "الدفع الإلكتروني" : "Pay online",
-    payOnlineDesc: ar ? "إرسال رابط دفع آمن عند التأكيد" : "Send a secure link after confirmation",
-    payAtHotel: ar ? "الدفع في الفندق" : "Pay at hotel",
-    payAtHotelDesc: ar ? "يكمل الاستقبال الدفع لاحقاً" : "Reception can follow up later",
-    nearestDatesIntro: ar ? "أقرب خيارات متاحة:" : "Nearest available options:",
-    tryDate: (date: string) => (ar ? `جرّب ${date}` : `Try ${date}`),
-    checkInBody: ar
-      ? "اختر تاريخ *الوصول*:\n\nافتح القائمة واختر التاريخ، أو اختر *تاريخ آخر* واكتب YYYY-MM-DD."
-      : "Choose your *check-in* date:\n\nOpen the list below and tap a date, or choose *Other date* to type YYYY-MM-DD.",
-    checkInButton: ar ? "تاريخ الوصول" : "Pick check-in",
-    checkOutBody: ar
-      ? "اختر تاريخ *المغادرة* (يجب أن يكون بعد الوصول):\n\nافتح القائمة، أو اختر *تاريخ آخر* واكتب YYYY-MM-DD."
-      : "Choose your *check-out* date (must be after check-in):\n\nOpen the list below, or *Other date* to type YYYY-MM-DD.",
-    checkOutButton: ar ? "تاريخ المغادرة" : "Pick check-out",
-    adultsPrompt: ar ? "كم عدد البالغين؟" : "How many adults will be staying?",
-    adultsButton: ar ? "البالغون" : "Adults",
-    adultsFallback: ar ? "اكتب عدد البالغين، مثل 2." : "Reply with the number of adults, e.g. 2.",
-    childrenPrompt: ar ? "كم عدد الأطفال؟" : "How many children will be staying?",
-    childrenButton: ar ? "الأطفال" : "Children",
-    childrenFallback: ar ? "اكتب عدد الأطفال، مثل 0 أو 2." : "Reply with the number of children, e.g. 0 or 2."
-  };
 }
 
 async function getEligibleRoomTypesForBookingFlow(
@@ -2724,9 +2599,11 @@ async function buildTurnResult(params: {
   guestId: string;
   conversationId: string;
   sessionData: Record<string, unknown>;
+  language?: string;
   guestMemoryCtx?: { memory: LightGuestMemory; confirmedStayCount: number };
   optimizationCtx?: { upsellFrequencyFactor: number; upsellMessageVariant: "standard" | "soft" | "premium" };
 }): Promise<TurnResult> {
+  const lang = effectiveLang(params.language);
   const upsellMem: UpsellMemoryCtx | undefined = params.guestMemoryCtx
     ? {
         memory: params.guestMemoryCtx.memory,
@@ -2755,6 +2632,7 @@ async function buildTurnResult(params: {
       nextState: next,
       conversationState: DbConversationState.NEW,
       responseBody: bookingStartPrompt(
+        lang,
         params.guestMemoryCtx
           ? { memory: params.guestMemoryCtx.memory, confirmedStayCount: params.guestMemoryCtx.confirmedStayCount }
           : undefined
@@ -2769,7 +2647,10 @@ async function buildTurnResult(params: {
       return {
         nextState: "collecting_dates",
         conversationState: DbConversationState.QUALIFYING,
-        responseBody: parsed.checkIn || parsed.checkOut || parsed.guestCount !== undefined ? missingBookingDetailsPrompt(parsed) : validation.message,
+        responseBody:
+          parsed.checkIn || parsed.checkOut || parsed.guestCount !== undefined
+            ? missingBookingDetailsPrompt(lang, parsed)
+            : validation.message,
         updateSession: {}
       };
     }
@@ -2908,11 +2789,12 @@ async function buildTurnResult(params: {
       conversationState: DbConversationState.QUALIFYING,
       responseBody: validation.ok
         ? bookingStartPrompt(
+            lang,
             params.guestMemoryCtx
               ? { memory: params.guestMemoryCtx.memory, confirmedStayCount: params.guestMemoryCtx.confirmedStayCount }
               : undefined
           )
-        : missingBookingDetailsPrompt(parsed),
+        : missingBookingDetailsPrompt(lang, parsed),
       responseList: onlyGuestsMissing ? GUEST_COUNT_LIST : undefined,
       updateSession: { awaitingGuestName: false }
     };
@@ -4120,7 +4002,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: LANGUAGE_SELECT_PROMPT,
+        body: getLanguageSelectPrompt(),
         aiIntent: "LANGUAGE_SELECT",
         aiConfidence: 0.98
       }
@@ -4262,7 +4144,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     try {
       await sendWhatsAppButtons({
         to: normalizedPhone,
-        body: LANGUAGE_SELECT_PROMPT,
+        body: getLanguageSelectPrompt(),
         buttons: LANGUAGE_BUTTONS,
         phoneNumberId: hotel.phoneNumberId,
         conversationId: conversation.id
@@ -4271,7 +4153,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       console.error("WhatsApp language buttons send failed:", err instanceof Error ? err.message : String(err));
       await sendWhatsAppText({
         to: normalizedPhone,
-        body: LANGUAGE_SELECT_FALLBACK,
+        body: getLanguageSelectFallback(),
         phoneNumberId: hotel.phoneNumberId,
         conversationId: conversation.id
       });
@@ -4281,7 +4163,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: LANGUAGE_SELECT_PROMPT,
+        body: getLanguageSelectPrompt(),
         aiIntent: "LANGUAGE_SELECT",
         aiConfidence: 0.98
       }
@@ -4364,7 +4246,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
-          body: LANGUAGE_SELECT_PROMPT,
+          body: getLanguageSelectPrompt(),
           buttons: LANGUAGE_BUTTONS,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
@@ -4373,7 +4255,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         console.error("WhatsApp language buttons send failed (global reset):", err instanceof Error ? err.message : String(err));
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: LANGUAGE_SELECT_FALLBACK,
+          body: getLanguageSelectFallback(),
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -4383,7 +4265,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: LANGUAGE_SELECT_PROMPT,
+          body: getLanguageSelectPrompt(),
           aiIntent: "LANGUAGE_SELECT",
           aiConfidence: 0.98
         }
@@ -4659,7 +4541,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppList({
           to: normalizedPhone,
-          body: BOOKING_SUBMENU_BODY,
+          body: bookingSubmenuBody(persisted.language),
           buttonText: BOOKING_SUBMENU_LIST.buttonText,
           sections: BOOKING_SUBMENU_LIST.sections,
           phoneNumberId: hotel.phoneNumberId,
@@ -4694,7 +4576,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppList({
           to: normalizedPhone,
-          body: BOOKING_SUBMENU_BODY,
+          body: bookingSubmenuBody(persisted.language),
           buttonText: BOOKING_SUBMENU_LIST.buttonText,
           sections: BOOKING_SUBMENU_LIST.sections,
           phoneNumberId: hotel.phoneNumberId,
@@ -4729,7 +4611,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppList({
           to: normalizedPhone,
-          body: BOOKING_SUBMENU_BODY,
+          body: bookingSubmenuBody(persisted.language),
           buttonText: BOOKING_SUBMENU_LIST.buttonText,
           sections: BOOKING_SUBMENU_LIST.sections,
           phoneNumberId: hotel.phoneNumberId,
@@ -4777,7 +4659,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     try {
       await sendWhatsAppList({
         to: normalizedPhone,
-        body: BOOKING_SUBMENU_BODY,
+        body: bookingSubmenuBody(persisted.language),
         buttonText: BOOKING_SUBMENU_LIST.buttonText,
         sections: BOOKING_SUBMENU_LIST.sections,
         phoneNumberId: hotel.phoneNumberId,
@@ -4786,7 +4668,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     } catch {
       await sendWhatsAppText({
         to: normalizedPhone,
-        body: "What would you like to do?\n1) Check availability\n2) View room types\n3) View offers\n4) View location and hotel information",
+        body: getBookingSubmenuFallbackList(effectiveLang(persisted.language)),
         phoneNumberId: hotel.phoneNumberId,
         conversationId: conversation.id
       });
@@ -4796,7 +4678,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         hotelId: hotel.id,
         conversationId: conversation.id,
         direction: MessageDirection.OUTBOUND,
-        body: BOOKING_SUBMENU_BODY,
+        body: bookingSubmenuBody(persisted.language),
         aiIntent: "BOOKING_BACK_TO_SUBMENU_NO_STEP",
         aiConfidence: 0.95
       }
@@ -5740,7 +5622,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         try {
           await sendWhatsAppList({
             to: normalizedPhone,
-            body: BOOKING_SUBMENU_BODY,
+            body: bookingSubmenuBody(persisted.language),
             buttonText: BOOKING_SUBMENU_LIST.buttonText,
             sections: BOOKING_SUBMENU_LIST.sections,
             phoneNumberId: hotel.phoneNumberId,
@@ -5750,13 +5632,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           console.error("WhatsApp booking sub-menu list send failed (back):", err instanceof Error ? err.message : String(err));
           await sendWhatsAppText({
             to: normalizedPhone,
-            body: [
-              BOOKING_SUBMENU_BODY,
-              "1) Check availability",
-              "2) View room types",
-              "3) View offers",
-              "4) View location and hotel information"
-            ].join("\n"),
+            body: getBookingSubmenuFallbackList(effectiveLang(persisted.language)),
             phoneNumberId: hotel.phoneNumberId,
             conversationId: conversation.id
           });
@@ -5766,7 +5642,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             hotelId: hotel.id,
             conversationId: conversation.id,
             direction: MessageDirection.OUTBOUND,
-            body: BOOKING_SUBMENU_BODY,
+            body: bookingSubmenuBody(persisted.language),
             aiIntent: "BOOKING_BACK_TO_SUBMENU",
             aiConfidence: 0.95
           }
@@ -8328,7 +8204,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         try {
           await sendWhatsAppButtons({
             to: normalizedPhone,
-            body: LANGUAGE_SELECT_PROMPT,
+            body: getLanguageSelectPrompt(),
             buttons: LANGUAGE_BUTTONS,
             phoneNumberId: hotel.phoneNumberId,
             conversationId: conversation.id
@@ -8337,7 +8213,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           console.error("WhatsApp language buttons send failed (reset from My booking):", err instanceof Error ? err.message : String(err));
           await sendWhatsAppText({
             to: normalizedPhone,
-            body: LANGUAGE_SELECT_FALLBACK,
+            body: getLanguageSelectFallback(),
             phoneNumberId: hotel.phoneNumberId,
             conversationId: conversation.id
           });
@@ -8347,7 +8223,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
             hotelId: hotel.id,
             conversationId: conversation.id,
             direction: MessageDirection.OUTBOUND,
-            body: LANGUAGE_SELECT_PROMPT,
+            body: getLanguageSelectPrompt(),
             aiIntent: "LANGUAGE_SELECT",
             aiConfidence: 0.98
           }
@@ -8677,7 +8553,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
-          body: LANGUAGE_SELECT_PROMPT,
+          body: getLanguageSelectPrompt(),
           buttons: LANGUAGE_BUTTONS,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
@@ -8686,7 +8562,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         console.error("WhatsApp language buttons send failed (greeting/menu):", err instanceof Error ? err.message : String(err));
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: LANGUAGE_SELECT_FALLBACK,
+          body: getLanguageSelectFallback(),
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -8696,7 +8572,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: LANGUAGE_SELECT_PROMPT,
+          body: getLanguageSelectPrompt(),
           aiIntent: "LANGUAGE_SELECT",
           aiConfidence: 0.98
         }
@@ -8908,7 +8784,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       try {
         await sendWhatsAppButtons({
           to: normalizedPhone,
-          body: LANGUAGE_SELECT_PROMPT,
+          body: getLanguageSelectPrompt(),
           buttons: LANGUAGE_BUTTONS,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
@@ -8917,7 +8793,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         console.error("WhatsApp language buttons send failed (menu fallback):", err instanceof Error ? err.message : String(err));
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: LANGUAGE_SELECT_FALLBACK,
+          body: getLanguageSelectFallback(),
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -8927,7 +8803,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           hotelId: hotel.id,
           conversationId: conversation.id,
           direction: MessageDirection.OUTBOUND,
-          body: LANGUAGE_SELECT_PROMPT,
+          body: getLanguageSelectPrompt(),
           aiIntent: "LANGUAGE_SELECT",
           aiConfidence: 0.98
         }
@@ -9045,6 +8921,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     currency: hotel.currency,
     guestId: guest.id,
     conversationId: conversation.id,
+    language: persisted.language,
     sessionData: {
       checkIn: persisted.checkIn,
       checkOut: persisted.checkOut,

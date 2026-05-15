@@ -456,8 +456,10 @@ export function describeAuditAction(
     case "GUEST_PHONE_UPDATED":
       return {
         icon: "📱",
-        label: "Guest phone updated",
-        tone: "neutral" as const
+        headline: "Updated guest WhatsApp number",
+        detail: joinDetail(guest, str(metadata.phoneE164)),
+        category: "Front Desk",
+        accent: "slate"
       };
     case "GUEST_SEGMENTATION_UPDATED":
       return {

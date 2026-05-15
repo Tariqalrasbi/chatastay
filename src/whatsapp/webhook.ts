@@ -308,6 +308,17 @@ import { ChannelProvider, ConversationState, MessageDirection, PropertyStatus } 
 import { prisma } from "../db";
 import { upsertGuestWithPhone, phoneSessionKeyPart } from "../core/guestPhoneService";
 import {
+  buildCheckInPickerText,
+  buildCheckOutPickerText,
+  buildMissingFieldsPrompt,
+  getConfirmButtons,
+  getConfirmMenuHint,
+  getPrimaryButtons,
+  getPrimaryMenuHint,
+  getWebhookTexts,
+  type ChatLang
+} from "./chatbotCopy";
+import {
   findAvailableRoomType as findAvailableRoomTypeShared,
   getAvailableCheckInDates as getAvailableCheckInDatesShared,
   getAvailableCheckOutDates as getAvailableCheckOutDatesShared
@@ -322,7 +333,7 @@ import { WhatsAppWebhookPayload } from "./types";
 export const whatsappWebhookRouter = Router();
 const processedInboundMessageIds = new Map<string, number>();
 const inboundMessageDedupTtlMs = 10 * 60 * 1000;
-type ConversationLanguage = "en" | "ar" | "es" | "fr";
+type ConversationLanguage = ChatLang;
 type ConversationStage =
   | "IDLE"
   | "WAITING_BOOKING_INTENT"
@@ -503,141 +514,7 @@ function isLikelyQuestion(text: string): boolean {
 }
 
 function getTexts(language: ConversationLanguage, hotelName: string): Record<string, string> {
-  if (language === "ar") {
-    return {
-      welcome: `اهلا بك في ${hotelName}. كيف نقدر نخدمك اليوم؟`,
-      askIntent: "اذا حاب تبدأ الحجز، اختر ابدأ الحجز أو ارسل تفاصيل الإقامة مباشرة.",
-      askDetails:
-        "رائع. ارسل بيانات الحجز بطريقة بسيطة.\nمثال: من 2026-04-10 الى 2026-04-12، لشخصين.\nيمكنك اضافة عدد الغرف والاسم إذا رغبت.",
-      invalidFormat:
-        "لم نتمكن من قراءة التفاصيل كاملة. فضلا ارسل تاريخ الدخول والخروج وعدد الضيوف. عدد الغرف اختياري (الافتراضي 1).",
-      oneDateOnly: "تم العثور على تاريخ واحد فقط. رجاء ارسل تاريخ الدخول والخروج معًا.",
-      invalidGuests: "عدد الضيوف يجب ان يكون بين 1 و 16.",
-      invalidRooms: "عدد الغرف يجب ان يكون بين 1 و 6.",
-      invalidDates: "تاريخ الخروج يجب ان يكون بعد تاريخ الدخول، والاقامة لا تزيد عن 30 ليلة.",
-      unavailable: "عذرًا، لا يوجد نوع غرفة مناسب حاليا للتواريخ او عدد الضيوف المطلوب.",
-      quoteIntro: "هذه التفاصيل متاحة:",
-      askConfirm: "هل تريد تاكيد الحجز؟ ارسل نعم او لا.",
-      confirmed: "شكرًا لحجزك معنا. هذا رابط متابعة الحجز:",
-      editPrompt: "ما البيانات التي تريد تعديلها؟ ارسل التعديل بالطريقة التي تناسبك.",
-      qaIntro: "هذا هو المساعد الذكي للفندق. يمكنك سؤاله عن الاسعار، المرافق، الموقع، وقت الدخول والخروج، الدفع، وسياسة الالغاء.",
-      qaExamples: "مثال: هل يوجد واي فاي؟ | ما سعر الليلة؟ | اين موقع الفندق؟",
-      qaContinue: "يمكنك سؤال المزيد من الاسئلة، او اختر 1 لبدء الحجز.",
-      menuLabel: "القائمة السريعة",
-      bookingStatusMissing: "للاطلاع على الحجز، ارسل رقم الحجز أو استخدم رابط متابعة الحجز الذي وصلك.",
-      bookingStatusPrefix: "اخر حالة حجز لديك:"
-    };
-  }
-  if (language === "es") {
-    return {
-      welcome: `Bienvenido a ${hotelName}. Como podemos ayudarte hoy?`,
-      askIntent: "Si quieres reservar, escribe que deseas reservar o pulsa Book now.",
-      askDetails:
-        "Perfecto. Comparte los datos de forma simple.\nEjemplo: del 2026-04-10 al 2026-04-12 para 2 personas.\nTambien puedes agregar habitaciones y nombre.",
-      invalidFormat: "No pudimos leer todos los datos. Envia check-in, check-out y guests. Rooms es opcional (por defecto 1).",
-      oneDateOnly: "Encontramos solo una fecha. Envia check-in y check-out.",
-      invalidGuests: "Guests debe estar entre 1 y 16.",
-      invalidRooms: "Rooms debe estar entre 1 y 6.",
-      invalidDates: "Check-out debe ser despues de check-in y la estancia max es 30 noches.",
-      unavailable: "No hay habitacion disponible para esas fechas y capacidad.",
-      quoteIntro: "Disponibilidad encontrada:",
-      askConfirm: "Quieres confirmar la reserva? Responde YES o NO.",
-      confirmed: "Gracias por reservar con nosotros. Aqui tienes tu portal de reserva:",
-      editPrompt: "Que informacion deseas editar? Enviala como prefieras.",
-      qaIntro: "Este es nuestro chatbot inteligente. Puedes preguntar sobre tarifas, servicios, ubicacion, horarios de check-in/check-out, pagos y cancelacion.",
-      qaExamples: "Ejemplo: Do you have WiFi? | What is the nightly rate? | Where are you located?",
-      qaContinue: "Puedes hacer mas preguntas o elegir 1 para empezar la reserva.",
-      menuLabel: "Quick menu",
-      bookingStatusMissing: "Please share your booking ID or open your booking portal link to check latest status.",
-      bookingStatusPrefix: "Your latest booking status:"
-    };
-  }
-  if (language === "fr") {
-    return {
-      welcome: `Bienvenue chez ${hotelName}. Comment pouvons-nous vous aider?`,
-      askIntent: "Pour reserver, dites que vous souhaitez reserver ou appuyez sur Book now.",
-      askDetails:
-        "Parfait. Envoyez vos details simplement.\nExemple: du 2026-04-10 au 2026-04-12 pour 2 personnes.\nVous pouvez aussi ajouter le nombre de chambres et votre nom.",
-      invalidFormat: "Nous n'avons pas pu lire tous les details. Envoyez check-in, check-out et guests. Rooms est optionnel (defaut 1).",
-      oneDateOnly: "Une seule date detectee. Envoyez check-in et check-out.",
-      invalidGuests: "Guests doit etre entre 1 et 16.",
-      invalidRooms: "Rooms doit etre entre 1 et 6.",
-      invalidDates: "Check-out doit etre apres check-in et sejour max 30 nuits.",
-      unavailable: "Aucune chambre disponible pour ces dates et cette capacite.",
-      quoteIntro: "Disponibilite trouvee:",
-      askConfirm: "Voulez-vous confirmer la reservation? Repondez YES ou NO.",
-      confirmed: "Merci pour votre reservation. Voici votre portail de reservation:",
-      editPrompt: "Quelles informations souhaitez-vous modifier?",
-      qaIntro: "Voici notre chatbot intelligent. Vous pouvez poser des questions sur les tarifs, services, emplacement, check-in/check-out, paiements et annulation.",
-      qaExamples: "Exemple: Do you have WiFi? | What is the nightly rate? | Where are you located?",
-      qaContinue: "Vous pouvez poser plusieurs questions ou choisir 1 pour commencer la reservation.",
-      menuLabel: "Quick menu",
-      bookingStatusMissing: "Please share your booking ID or open your booking portal link to check latest status.",
-      bookingStatusPrefix: "Your latest booking status:"
-    };
-  }
-  return {
-    welcome: `Welcome to ${hotelName}. How can we help you today?`,
-    askIntent: "If you would like to reserve, just say you want to book or tap Book now.",
-    askDetails:
-      "Great. Please share your booking details in a simple sentence.\nExample: from 2026-04-10 to 2026-04-12 for 2 guests.\nYou can add room count and your name anytime.",
-    invalidFormat: "I could not read all details yet. Please send check-in, check-out, and guest count. Room count is optional (default is 1).",
-    oneDateOnly: "I found one date only. Please send check-in and check-out.",
-    invalidGuests: "Guest count must be between 1 and 16.",
-    invalidRooms: "Room count must be between 1 and 6.",
-    invalidDates: "Check-out must be after check-in, and max stay is 30 nights.",
-    unavailable: "No suitable room is available for the provided dates and capacity.",
-    quoteIntro: "Availability found:",
-    askConfirm: "Do you want to confirm your booking? Reply YES or NO.",
-    confirmed: "Thank you for booking with us. Here is your booking portal link:",
-    editPrompt: "What would you like to change? Send the updated details in any natural way.",
-    qaIntro: "This is our intelligent chatbot. You can ask about rates, amenities, location, check-in/check-out, payment, and cancellation policy.",
-    qaExamples: "Example: Do you have WiFi? | What is the nightly rate? | Where are you located?",
-    qaContinue: "You can ask multiple questions, or choose 1 to start booking.",
-    menuLabel: "Quick menu",
-    bookingStatusMissing: "Please share your booking ID or open your booking portal link to check latest status.",
-    bookingStatusPrefix: "Your latest booking status:"
-  };
-}
-
-function getPrimaryButtons(language: ConversationLanguage): Array<{ id: string; title: string }> {
-  if (language === "ar") {
-    return [
-      { id: "book_now", title: "ابدأ الحجز" },
-      { id: "ask_question", title: "عندي سؤال" },
-      { id: "talk_agent", title: "تواصل مع موظف" }
-    ];
-  }
-  return [
-    { id: "book_now", title: "Book now" },
-    { id: "ask_question", title: "Ask question" },
-    { id: "talk_agent", title: "Talk to agent" }
-  ];
-}
-
-function getConfirmButtons(language: ConversationLanguage): Array<{ id: string; title: string }> {
-  if (language === "ar") {
-    return [
-      { id: "confirm_booking", title: "تاكيد الحجز" },
-      { id: "edit_booking", title: "تعديل البيانات" },
-      { id: "talk_agent", title: "تواصل مع موظف" }
-    ];
-  }
-  return [
-    { id: "confirm_booking", title: "Confirm" },
-    { id: "edit_booking", title: "Edit details" },
-    { id: "talk_agent", title: "Talk to agent" }
-  ];
-}
-
-function getPrimaryMenuHint(language: ConversationLanguage): string {
-  if (language === "ar") return "1) ابدأ الحجز\n2) اسأل المساعد الذكي\n3) تواصل مع موظف";
-  return "1) Book now\n2) Ask the intelligent assistant\n3) Talk to agent";
-}
-
-function getConfirmMenuHint(language: ConversationLanguage): string {
-  if (language === "ar") return "اختر رقم:\n1) تاكيد الحجز\n2) تعديل البيانات\n3) تواصل مع موظف";
-  return "Reply with a number:\n1) Confirm booking\n2) Edit details\n3) Talk to agent";
+  return getWebhookTexts(language, hotelName);
 }
 
 function parseRoomCount(text: string): number | undefined {
@@ -654,22 +531,6 @@ function parseGuestName(text: string): string | undefined {
   const intro = text.match(/(?:i am|i'm|my name is|انا|اسمي)\s+([^\n,;.]+)/i);
   if (intro) return intro[1].trim();
   return undefined;
-}
-
-function buildMissingFieldsPrompt(language: ConversationLanguage, missing: string[]): string {
-  const has = (key: string) => missing.includes(key);
-  if (language === "ar") {
-    const parts: string[] = [];
-    if (has("dates")) parts.push("تاريخ الدخول والخروج");
-    if (has("guests")) parts.push("عدد الضيوف");
-    if (has("rooms")) parts.push("عدد الغرف");
-    return `يرجى تزويدنا بـ: ${parts.join("، ")}.`;
-  }
-  const parts: string[] = [];
-  if (has("dates")) parts.push("check-in and check-out dates");
-  if (has("guests")) parts.push("guest count");
-  if (has("rooms")) parts.push("room count");
-  return `Please provide: ${parts.join(", ")}.`;
 }
 
 function buildBookingPortalLink(bookingId: string): string {
@@ -699,22 +560,6 @@ function buildDateRangeChoices(start: Date, days: number): string[] {
     choices.push(toIsoDate(d));
   }
   return choices;
-}
-
-function buildCheckInPickerText(language: ConversationLanguage, options: string[]): string {
-  const lines = options.map((date, idx) => `${idx + 1}) ${date}`);
-  if (language === "ar") {
-    return `هذه هي تواريخ الدخول المتاحة فقط. اختر من القائمة التفاعلية أو ارسل التاريخ مباشرة (YYYY-MM-DD):\n${lines.join("\n")}`;
-  }
-  return `These are available check-in dates only. Tap from the interactive list, or type date directly (YYYY-MM-DD):\n${lines.join("\n")}`;
-}
-
-function buildCheckOutPickerText(language: ConversationLanguage, options: string[]): string {
-  const lines = options.map((date, idx) => `${idx + 1}) ${date}`);
-  if (language === "ar") {
-    return `هذه هي تواريخ الخروج المتاحة فقط لتاريخ الدخول المحدد. اختر من القائمة التفاعلية أو ارسل التاريخ مباشرة (YYYY-MM-DD):\n${lines.join("\n")}`;
-  }
-  return `These are available checkout dates only for your selected check-in. Tap from the interactive list, or type date directly (YYYY-MM-DD):\n${lines.join("\n")}`;
 }
 
 function extractChoiceNumber(text: string): number | null {
