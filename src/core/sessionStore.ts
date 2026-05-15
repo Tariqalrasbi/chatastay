@@ -366,7 +366,7 @@ export async function saveConversationSession(params: {
   const expiresAt = new Date(Date.now() + (params.ttlMs ?? conversationInactivityTtlMs));
   const prevRow = await prisma.conversationSession.findUnique({
     where: { hotelId_guestId: { hotelId: params.hotelId, guestId: params.guestId } },
-    select: { metadataJson: true }
+    select: { metadataJson: true, language: true }
   });
   const prevMeta = parseMetadata(prevRow?.metadataJson);
   const metadata = {
@@ -465,6 +465,18 @@ export async function saveConversationSession(params: {
       return null;
     })()
   };
+  const prevLanguage = typeof prevRow?.language === "string" ? prevRow.language : undefined;
+  const incoming = params.state.language;
+  const language = (() => {
+    if (incoming === "ar" || incoming === "es" || incoming === "fr" || incoming === "en") return incoming;
+    if (incoming === "") {
+      if (prevLanguage && prevLanguage.length > 0) return prevLanguage;
+      return "";
+    }
+    if (prevLanguage && prevLanguage.length > 0) return prevLanguage;
+    return "en";
+  })();
+
   await prisma.conversationSession.upsert({
     where: { hotelId_guestId: { hotelId: params.hotelId, guestId: params.guestId } },
     create: {
@@ -472,7 +484,7 @@ export async function saveConversationSession(params: {
       guestId: params.guestId,
       conversationId: params.conversationId,
       phoneE164: params.phoneE164,
-      language: params.state.language,
+      language,
       stage: params.state.stage,
       metadataJson: JSON.stringify(metadata),
       expiresAt
@@ -480,7 +492,7 @@ export async function saveConversationSession(params: {
     update: {
       conversationId: params.conversationId,
       phoneE164: params.phoneE164,
-      language: params.state.language,
+      language,
       stage: params.state.stage,
       metadataJson: JSON.stringify(metadata),
       expiresAt

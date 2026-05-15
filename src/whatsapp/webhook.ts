@@ -328,6 +328,11 @@ import { mergeGuestProfileFromBooking } from "../core/guestProfile";
 import { applyPartnerTemplate, loadPartnerSetupConfig } from "../core/partnerSetup";
 import { createCalendarSessionLink, loadConversationSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { sendWhatsAppButtons, sendWhatsAppList, sendWhatsAppText } from "./send";
+import {
+  detectInboundLanguage as detectLanguage,
+  isExplicitEnglishGreeting,
+  shouldSwitchConversationLanguage as shouldSwitchLanguage
+} from "./languageDetect";
 import { WhatsAppWebhookPayload } from "./types";
 
 export const whatsappWebhookRouter = Router();
@@ -398,36 +403,6 @@ function normalizeInput(text: string): string {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function isExplicitEnglishGreeting(text: string): boolean {
-  const normalized = normalizeInput(text);
-  return /(^|\s)(hi|hello|hey)(\s|$)/i.test(normalized);
-}
-
-function detectLanguage(text: string): ConversationLanguage {
-  const normalized = normalizeInput(text);
-  if (/^(hi|hello|hey|good morning|good evening)$/i.test(normalized)) {
-    return "en";
-  }
-  if (
-    /[\u0600-\u06FF]/.test(text) ||
-    /(السلام|مرحبا|اهلا|أهلا|هلا|شلونك|صباح الخير|مساء الخير|asalam|salam|assalamu)/i.test(normalized)
-  ) {
-    return "ar";
-  }
-  if (/\b(hola|buenas|gracias|reservar)\b/i.test(normalized)) return "es";
-  if (/\b(bonjour|salut|merci|reserver)\b/i.test(normalized)) return "fr";
-  return "en";
-}
-
-function shouldSwitchLanguage(current: ConversationLanguage, inferred: ConversationLanguage, text: string): boolean {
-  if (current === inferred) return false;
-  const normalized = normalizeInput(text);
-  if (isGreeting(normalized)) return true;
-  if (/(english|arabic|spanish|french|انجليزي|عربي|اسباني|فرنسي)/i.test(normalized)) return true;
-  if (/[\u0600-\u06FF]/.test(text) && inferred === "ar") return true;
-  return false;
 }
 
 function isGreeting(text: string): boolean {

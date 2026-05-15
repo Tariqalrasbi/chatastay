@@ -680,6 +680,30 @@ function ownerLayout(content: string, authenticated: boolean): string {
 })();
 </script>`;
 
+  const ownerMobileSidebarScript = authenticated
+    ? `<script>
+(function () {
+  var shell = document.getElementById("ownerShell");
+  var toggle = document.getElementById("ownerSidebarToggle");
+  var backdrop = document.getElementById("ownerSidebarBackdrop");
+  if (!shell || !toggle) return;
+  function setOpen(open) {
+    shell.classList.toggle("sidebar-open", open);
+    document.body.classList.toggle("sidebar-open-mobile", open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (backdrop) backdrop.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+  toggle.addEventListener("click", function () { setOpen(!shell.classList.contains("sidebar-open")); });
+  if (backdrop) backdrop.addEventListener("click", function () { setOpen(false); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
+  window.addEventListener("resize", function () { if (window.innerWidth > 980) setOpen(false); });
+  shell.querySelectorAll("nav a, nav button").forEach(function (link) {
+    link.addEventListener("click", function () { if (window.innerWidth <= 980) setOpen(false); });
+  });
+})();
+</script>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -1124,11 +1148,77 @@ function ownerLayout(content: string, authenticated: boolean): string {
         -webkit-backdrop-filter: blur(12px);
       }
       ::selection { background: rgba(37, 211, 102, 0.3); color: #053b18; }
+
+      html, body { overflow-x: clip; max-width: 100%; }
+      .shell { max-width: 100%; overflow-x: clip; }
+      main.content { max-width: 100%; min-width: 0; overflow-x: clip; }
+      .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+      .stack-sm { display: grid; gap: 10px; }
+      .stack-sm--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      @media (max-width: 640px) { .stack-sm--2 { grid-template-columns: 1fr; } }
+      .sidebar-menu-toggle { display: none; }
+      .sidebar-backdrop { display: none; }
+      @media (max-width: 980px) {
+        .sidebar-menu-toggle {
+          display: inline-flex;
+          align-items: center;
+          min-height: 44px;
+          padding: 10px 16px;
+          margin-bottom: 12px;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          background: var(--card);
+          color: var(--brand);
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .sidebar-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 899;
+          background: rgba(15, 23, 42, 0.45);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.2s ease;
+        }
+        .shell.sidebar-open .sidebar-backdrop {
+          display: block;
+          opacity: 1;
+          pointer-events: auto;
+        }
+        .sidebar {
+          position: fixed !important;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          width: min(300px, 90vw);
+          height: 100dvh !important;
+          z-index: 900;
+          transform: translateX(-105%);
+          transition: transform 0.22s ease;
+          overflow-y: auto;
+        }
+        .shell.sidebar-open .sidebar { transform: translateX(0); }
+        .shell .sidebar nav {
+          flex-direction: column !important;
+          overflow-x: visible !important;
+        }
+        .shell .sidebar nav a,
+        .shell .sidebar nav button {
+          white-space: normal;
+          min-height: 44px;
+        }
+        .btn-link { min-height: 44px; padding: 10px 14px; display: inline-flex; align-items: center; }
+        body.sidebar-open-mobile { overflow: hidden; }
+        .content { padding: 18px; }
+        .panel { padding: 18px; }
+      }
     </style>
   </head>
   <body>
-    <div class="shell">
-      <aside class="sidebar">
+    <div class="sidebar-backdrop" id="ownerSidebarBackdrop" aria-hidden="true"></div>
+    <div class="shell" id="ownerShell">
+      <aside class="sidebar" id="owner-sidebar">
         <div class="brand">
           <h1>ChatStay Platform</h1>
           <p>Platform operations console</p>
@@ -1136,6 +1226,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
         <nav>${navHtml}</nav>
       </aside>
       <main class="content">
+        <button type="button" class="sidebar-menu-toggle" id="ownerSidebarToggle" aria-controls="owner-sidebar" aria-expanded="false">Menu</button>
         <div class="owner-topbar">
           <div style="position:relative">
             <button id="ownerNotifBell" type="button" style="border:1px solid var(--border);background:#fff;border-radius:999px;width:36px;height:36px;cursor:pointer">🔔</button>
@@ -1149,7 +1240,7 @@ function ownerLayout(content: string, authenticated: boolean): string {
         <section class="panel">${content}</section>
       </main>
     </div>
-    ${passwordRevealScript}${ownerNotifScript}
+    ${passwordRevealScript}${ownerNotifScript}${ownerMobileSidebarScript}
   </body>
 </html>`;
 }

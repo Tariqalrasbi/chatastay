@@ -58,12 +58,17 @@ import {
   getBookingModeEntry,
   getBookingSubmenuBody,
   getBookingSubmenuFallbackList,
+  getBookingSubmenuList,
+  getBookingNavHint,
   getLanguageSelectFallback,
   getLanguageSelectPrompt,
   getMainMenuBody,
   missingBookingDetailsPrompt,
+  toChatLang,
+  type ChatLang,
   welcomeBackPrefix
 } from "./chatbotCopy";
+import { detectInboundLanguage } from "./languageDetect";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import {
@@ -241,9 +246,10 @@ async function sendMainMenuForGuest(params: {
   conversationId: string;
   menuBody: string;
   fallbackBody: string;
+  menuLang?: ChatLang;
 }): Promise<{ recordedBody: string }> {
   const stay = await findGuestActiveStayBooking(params.hotel.id, params.guestId, params.hotel.timezone);
-  const isArabic = /[\u0600-\u06FF]/.test(params.menuBody);
+  const isArabic = params.menuLang === "ar";
   const rows = isArabic
     ? [
         { id: "book_a_stay", title: "حجز إقامة", description: "التواريخ، الغرف، الوجبات، الدفع" },
@@ -336,22 +342,9 @@ const APP_BASE_URL = (process.env.APP_BASE_URL ?? "http://localhost:3000").repla
 function bookingSubmenuBody(lang: string | undefined): string {
   return getBookingSubmenuBody(effectiveLang(lang));
 }
-const BOOKING_SUBMENU_LIST = {
-  buttonText: "Choose an option",
-  sections: [
-    {
-      title: "Booking options",
-      rows: [
-        { id: "check_availability", title: "Check availability" },
-        { id: "view_room_types", title: "View room types" },
-        { id: "view_offers", title: "View offers" },
-        { id: "view_location_info", title: "View location and hotel information" }
-      ]
-    }
-  ]
-};
-
-const BOOKING_NAV_HINT = "\n\nTip: reply *back* for the previous step, or *menu* for the main menu.";
+function bookingSubmenuList(lang: string | undefined) {
+  return getBookingSubmenuList(effectiveLang(lang));
+}
 
 type UpsellMemoryCtx = {
   memory: LightGuestMemory | null;
@@ -526,16 +519,82 @@ function normalizeLanguageButtonText(text: string): string {
   return text.replace(/[\u200B-\u200D\uFEFF\u2060]/g, "").trim().normalize("NFC");
 }
 
-function isLanguageChoice(text: string): "ar" | "en" | null {
+function isLanguageChoice(text: string): ChatLang | null {
   const nfc = normalizeLanguageButtonText(text);
   const t = nfc.toLowerCase();
   if (t === "lang_ar" || t === "arabic" || t === "ar" || nfc === "العربية") return "ar";
   if (t === "lang_en" || t === "english" || t === "en") return "en";
+  if (t === "lang_es" || t === "spanish" || t === "es" || t === "español" || t === "espanol") return "es";
+  if (t === "lang_fr" || t === "french" || t === "fr" || t === "français" || t === "francais") return "fr";
   return null;
 }
 
 function needsLanguageSelection(lang: string | undefined): boolean {
   return !lang || lang === "";
+}
+
+/** Resolve language for this turn; once set (especially ar), stay locked until guest picks another via language menu/buttons. */
+function resolveInboundConversationLanguage(
+  persistedLang: string | undefined,
+  inboundText: string
+): ChatLang {
+  const explicit = isLanguageChoice(inboundText);
+  if (explicit) return explicit;
+  if (needsLanguageSelection(persistedLang)) return detectInboundLanguage(inboundText);
+  const current: ChatLang =
+    persistedLang === "ar" || persistedLang === "es" || persistedLang === "fr" || persistedLang === "en"
+      ? persistedLang
+      : "en";
+  if (current === "ar") return "ar";
+  if (current === "es") return "es";
+  if (current === "fr") return "fr";
+  if (/[\u0600-\u06FF]/.test(inboundText)) return "ar";
+  return current;
+}
+
+function languageChangedAckBody(lang: ChatLang): string {
+  if (lang === "ar") return "تم تغيير اللغة إلى العربية. يمكنك المتابعة من نفس المكان.";
+  if (lang === "es") return "Idioma cambiado al español. Puede continuar desde aquí.";
+  if (lang === "fr") return "Langue changée en français. Vous pouvez continuer ici.";
+  return "Language changed to English. You can continue from the same place.";
+}
+
+async function sendWelcomeMainMenu(params: {
+  hotel: { id: string; displayName: string; phoneNumberId?: string; timezone?: string | null };
+  guestId: string;
+  normalizedPhone: string;
+  conversationId: string;
+  lang: ChatLang;
+  guestMemoryBundle: { memory: LightGuestMemory; confirmedStayCount: number };
+  aiIntent: string;
+}): Promise<void> {
+  const menuLang = effectiveChatLang(params.lang);
+  const menuPersonalized = personalizeMainMenuBodies(params.hotel.displayName, menuLang, {
+    memory: params.guestMemoryBundle.memory,
+    confirmedStayCount: params.guestMemoryBundle.confirmedStayCount
+  });
+  const { recordedBody: outboundRecordedBody } = await sendMainMenuForGuest({
+    hotel: params.hotel,
+    guestId: params.guestId,
+    to: params.normalizedPhone,
+    conversationId: params.conversationId,
+    menuBody: menuPersonalized.menuBody,
+    fallbackBody: menuPersonalized.fallbackBody,
+    menuLang: params.lang
+  });
+  if (menuPersonalized.stampedWelcomeBack) {
+    await recordWelcomeBackMenuShown(params.guestId).catch(() => undefined);
+  }
+  await prisma.message.create({
+    data: {
+      hotelId: params.hotel.id,
+      conversationId: params.conversationId,
+      direction: MessageDirection.OUTBOUND,
+      body: outboundRecordedBody,
+      aiIntent: params.aiIntent,
+      aiConfidence: 0.98
+    }
+  });
 }
 type BookingSubMenuChoice = "check_availability" | "view_room_types" | "view_offers" | "view_location_info";
 function getBookingSubMenuChoice(text: string): BookingSubMenuChoice | undefined {
@@ -2677,25 +2736,38 @@ async function buildTurnResult(params: {
       return {
         nextState: "collecting_dates",
         conversationState: DbConversationState.QUALIFYING,
-        responseBody: "Those dates are unavailable. Please send another date range.",
+        responseBody:
+          lang === "ar"
+            ? "هذه التواريخ غير متاحة. يُرجى إرسال نطاق تواريخ آخر."
+            : "Those dates are unavailable. Please send another date range.",
         updateSession: {}
       };
     }
 
     const awaiting = nextState("quoted", "quote_sent");
+    const quoteConfirmLine =
+      lang === "ar"
+        ? "اضغط زراً أدناه أو أرسل نعم للتأكيد، تعديل للتغيير، لا للإلغاء."
+        : "Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.";
     return {
       nextState: awaiting,
       conversationState: DbConversationState.QUOTED,
       responseBody: [
-        "Here is your quote:",
-        `Room type: ${offer.roomTypeName}`,
-        `Check-in: ${checkIn.toISOString().slice(0, 10)}`,
-        `Check-out: ${checkOut.toISOString().slice(0, 10)}`,
-        formatPartySummaryLine(partyForQuote, false),
-        `Nights: ${offer.nights}`,
-        `Total price: ${offer.total.toFixed(2)} ${params.currency}`,
+        lang === "ar" ? "عرض السعر:" : "Here is your quote:",
+        lang === "ar" ? `نوع الغرفة: ${offer.roomTypeName}` : `Room type: ${offer.roomTypeName}`,
+        lang === "ar"
+          ? `الوصول: ${checkIn.toISOString().slice(0, 10)}`
+          : `Check-in: ${checkIn.toISOString().slice(0, 10)}`,
+        lang === "ar"
+          ? `المغادرة: ${checkOut.toISOString().slice(0, 10)}`
+          : `Check-out: ${checkOut.toISOString().slice(0, 10)}`,
+        formatPartySummaryLine(partyForQuote, lang === "ar"),
+        lang === "ar" ? `الليالي: ${offer.nights}` : `Nights: ${offer.nights}`,
+        lang === "ar"
+          ? `الإجمالي: ${offer.total.toFixed(2)} ${params.currency}`
+          : `Total price: ${offer.total.toFixed(2)} ${params.currency}`,
         "",
-        `Tap a button below or reply YES to confirm, EDIT to change, NO to cancel.\n${getSmartUpsellTimingLine(
+        `${quoteConfirmLine}\n${getSmartUpsellTimingLine(
           {
             totalAmount: offer.total,
             nights: offer.nights,
@@ -2725,7 +2797,8 @@ async function buildTurnResult(params: {
       return {
         nextState: "awaiting_confirmation",
         conversationState: DbConversationState.QUOTED,
-        responseBody: "Great! Please share the guest name for the reservation.",
+        responseBody:
+          lang === "ar" ? "رائع! يُرجى إرسال اسم الضيف للحجز." : "Great! Please share the guest name for the reservation.",
         updateSession: { awaitingGuestName: true }
       };
     }
@@ -2737,14 +2810,20 @@ async function buildTurnResult(params: {
       return {
         nextState: "cancelled",
         conversationState: DbConversationState.CLOSED,
-        responseBody: "Booking cancelled. If you want, I can start a new booking anytime.",
+        responseBody:
+          lang === "ar"
+            ? "تم إلغاء الحجز. يمكنك بدء حجز جديد في أي وقت."
+            : "Booking cancelled. If you want, I can start a new booking anytime.",
         updateSession: { awaitingGuestName: false }
       };
     }
     return {
       nextState: "collecting_dates",
       conversationState: DbConversationState.QUALIFYING,
-      responseBody: "Sure. What would you like to change: dates, guests, rooms, or meal plan?",
+      responseBody:
+        lang === "ar"
+          ? "بالتأكيد. ماذا تود تغييره: التواريخ، الضيوف، الغرف، أو باقة الوجبات؟"
+          : "Sure. What would you like to change: dates, guests, rooms, or meal plan?",
       updateSession: { awaitingGuestName: false }
     };
   }
@@ -2753,7 +2832,8 @@ async function buildTurnResult(params: {
     return {
       nextState: "awaiting_confirmation",
       conversationState: DbConversationState.QUOTED,
-      responseBody: "Great! Please share the guest name for the reservation.",
+      responseBody:
+        lang === "ar" ? "رائع! يُرجى إرسال اسم الضيف للحجز." : "Great! Please share the guest name for the reservation.",
       updateSession: { awaitingGuestName: true }
     };
   }
@@ -3572,7 +3652,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: persisted.stage || "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode,
@@ -3632,7 +3712,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: persisted.stage || "new",
           lastActivityAt: new Date().toISOString(),
           conversationMode: conversationMode === "QUESTION_MODE" ? "QUESTION_MODE" : "IDLE",
@@ -3743,7 +3823,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: nextStage ?? persisted.stage,
         lastActivityAt: new Date().toISOString(),
         conversationMode: persisted.conversationMode || "BOOKING_MODE",
@@ -3882,7 +3962,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: "quoted",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "BOOKING_MODE",
@@ -3946,48 +4026,21 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (needsLanguageSelection(persisted.language) && hasOperationalBookingContext) {
-    // Keep guests in the active booking/service thread; avoid re-onboarding prompts mid-journey.
-    persisted.language = "en";
+    // Mid-booking: infer language from this message instead of defaulting to English.
+    const inferred = detectInboundLanguage(input.text);
+    persisted.language = inferred;
     await saveConversationSession({
       hotelId: hotel.id,
       guestId: guest.id,
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: "en",
-        stage: persisted.stage || "new",
+        ...persisted,
+        language: inferred,
         lastActivityAt: new Date().toISOString(),
-        conversationMode: persisted.conversationMode || "BOOKING_MODE",
-        awaitingGuestName: persisted.awaitingGuestName,
-        awaitingBookingLookup: persisted.awaitingBookingLookup,
-        myBookingCandidateIds: persisted.myBookingCandidateIds,
-        phoneNumberId: hotel.phoneNumberId,
-        checkIn: persisted.checkIn,
-        checkOut: persisted.checkOut,
-        checkInOptions: persisted.checkInOptions,
-        checkOutOptions: persisted.checkOutOptions,
-        manualCheckInDate: persisted.manualCheckInDate,
-        manualCheckOutDate: persisted.manualCheckOutDate,
-        guestCount: persisted.guestCount,
-        roomCount: persisted.roomCount,
-        capacityPickRoomTypes: persisted.capacityPickRoomTypes,
-        adultCount: persisted.adultCount,
-        childCount: persisted.childCount,
-        bookingRoomOffers: persisted.bookingRoomOffers,
-        suggestedRoomTypeId: persisted.suggestedRoomTypeId,
-        suggestedRoomTypeName: persisted.suggestedRoomTypeName,
-        suggestedPropertyId: persisted.suggestedPropertyId,
-        nightlyRate: persisted.nightlyRate,
-        nights: persisted.nights,
-        totalAmount: persisted.totalAmount,
-        bookingStep: persisted.bookingStep,
-        bookingMealPlanCode: persisted.bookingMealPlanCode,
-        fbCartDraft: persisted.fbCartDraft,
-        pendingPrebookOrder: persisted.pendingPrebookOrder,
-        bookingFlowReturn: persisted.bookingFlowReturn
+        phoneNumberId: hotel.phoneNumberId
       }
     });
-    persisted.language = "en";
   }
 
   const explicitLanguageChoice = isLanguageChoice(input.text);
@@ -4030,10 +4083,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     const hasActiveBookingProgress =
       persisted.conversationMode === "BOOKING_MODE" && (Boolean(persisted.bookingStep) || Boolean(persisted.awaitingGuestName));
     if (hasActiveBookingProgress || persisted.conversationMode === "AGENT_MODE") {
-      const body =
-        lang === "ar"
-          ? "تم تغيير اللغة إلى العربية. يمكنك المتابعة من نفس المكان."
-          : "Language changed to English. You can continue from the same place.";
+      const body = languageChangedAckBody(lang);
       await sendWhatsAppText({
         to: normalizedPhone,
         body,
@@ -4054,128 +4104,30 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       return;
     }
 
-    const menuPersonalizedLanguageChange = personalizeMainMenuBodies(hotel.displayName, lang, {
-      memory: guestMemoryBundle.memory,
-      confirmedStayCount: guestMemoryBundle.confirmedStayCount
-    });
-    const { recordedBody: languageMenuRecorded } = await sendMainMenuForGuest({
+    await sendWelcomeMainMenu({
       hotel,
       guestId: guest.id,
-      to: normalizedPhone,
+      normalizedPhone,
       conversationId: conversation.id,
-      menuBody: menuPersonalizedLanguageChange.menuBody,
-      fallbackBody: menuPersonalizedLanguageChange.fallbackBody
-    });
-    if (menuPersonalizedLanguageChange.stampedWelcomeBack) {
-      await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
-    }
-    await prisma.message.create({
-      data: {
-        hotelId: hotel.id,
-        conversationId: conversation.id,
-        direction: MessageDirection.OUTBOUND,
-        body: languageMenuRecorded,
-        aiIntent: "LANGUAGE_CHANGED_MAIN_MENU",
-        aiConfidence: 0.98
-      }
+      lang,
+      guestMemoryBundle,
+      aiIntent: "LANGUAGE_CHANGED_MAIN_MENU"
     });
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
     return;
   }
 
   if (needsLanguageSelection(persisted.language)) {
-    const chosenLang = explicitLanguageChoice;
-    if (chosenLang === "ar" || chosenLang === "en") {
-      const lang = chosenLang;
-      persisted.language = lang;
-      await saveConversationSession({
-        hotelId: hotel.id,
-        guestId: guest.id,
-        conversationId: conversation.id,
-        phoneE164: normalizedPhone,
-        state: {
-          language: lang,
-          stage: "new",
-          lastActivityAt: new Date().toISOString(),
-          conversationMode: "IDLE",
-          awaitingGuestName: false,
-          awaitingBookingLookup: false,
-          myBookingCandidateIds: [],
-          phoneNumberId: hotel.phoneNumberId,
-          checkIn: persisted.checkIn,
-          checkOut: persisted.checkOut,
-          guestCount: persisted.guestCount,
-          roomCount: persisted.roomCount,
-          suggestedRoomTypeId: persisted.suggestedRoomTypeId,
-          suggestedRoomTypeName: persisted.suggestedRoomTypeName,
-          suggestedPropertyId: persisted.suggestedPropertyId,
-          nights: persisted.nights,
-          totalAmount: persisted.totalAmount
-        }
-      });
-      const menuPersonalized = personalizeMainMenuBodies(hotel.displayName, lang, {
-        memory: guestMemoryBundle.memory,
-        confirmedStayCount: guestMemoryBundle.confirmedStayCount
-      });
-      const { recordedBody: outboundRecordedBody } = await sendMainMenuForGuest({
-        hotel,
-        guestId: guest.id,
-        to: normalizedPhone,
-        conversationId: conversation.id,
-        menuBody: menuPersonalized.menuBody,
-        fallbackBody: menuPersonalized.fallbackBody
-      });
-      if (menuPersonalized.stampedWelcomeBack) {
-        await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
-      }
-      await prisma.message.create({
-        data: {
-          hotelId: hotel.id,
-          conversationId: conversation.id,
-          direction: MessageDirection.OUTBOUND,
-          body: outboundRecordedBody,
-          aiIntent: "LANGUAGE_SELECTED_MAIN_MENU",
-          aiConfidence: 0.98
-        }
-      });
-      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-      return;
-    }
-    try {
-      await sendWhatsAppButtons({
-        to: normalizedPhone,
-        body: getLanguageSelectPrompt(),
-        buttons: LANGUAGE_BUTTONS,
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    } catch (err) {
-      console.error("WhatsApp language buttons send failed:", err instanceof Error ? err.message : String(err));
-      await sendWhatsAppText({
-        to: normalizedPhone,
-        body: getLanguageSelectFallback(),
-        phoneNumberId: hotel.phoneNumberId,
-        conversationId: conversation.id
-      });
-    }
-    await prisma.message.create({
-      data: {
-        hotelId: hotel.id,
-        conversationId: conversation.id,
-        direction: MessageDirection.OUTBOUND,
-        body: getLanguageSelectPrompt(),
-        aiIntent: "LANGUAGE_SELECT",
-        aiConfidence: 0.98
-      }
-    });
+    const lang = resolveInboundConversationLanguage(persisted.language, input.text);
+    persisted.language = lang;
     await saveConversationSession({
       hotelId: hotel.id,
       guestId: guest.id,
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: "",
-        stage: "IDLE",
+        language: lang,
+        stage: "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "IDLE",
         awaitingGuestName: false,
@@ -4192,6 +4144,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         nights: persisted.nights,
         totalAmount: persisted.totalAmount
       }
+    });
+    await sendWelcomeMainMenu({
+      hotel,
+      guestId: guest.id,
+      normalizedPhone,
+      conversationId: conversation.id,
+      lang,
+      guestMemoryBundle,
+      aiIntent: "LANGUAGE_AUTO_DETECTED_MAIN_MENU"
     });
     await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
     return;
@@ -4243,35 +4204,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     });
     if (needsLanguageSelection(persisted.language)) {
-      try {
-        await sendWhatsAppButtons({
-          to: normalizedPhone,
-          body: getLanguageSelectPrompt(),
-          buttons: LANGUAGE_BUTTONS,
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      } catch (err) {
-        console.error("WhatsApp language buttons send failed (global reset):", err instanceof Error ? err.message : String(err));
-        await sendWhatsAppText({
-          to: normalizedPhone,
-          body: getLanguageSelectFallback(),
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      }
-      await prisma.message.create({
-        data: {
-          hotelId: hotel.id,
-          conversationId: conversation.id,
-          direction: MessageDirection.OUTBOUND,
-          body: getLanguageSelectPrompt(),
-          aiIntent: "LANGUAGE_SELECT",
-          aiConfidence: 0.98
-        }
-      });
-      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-      return;
+      persisted.language = detectInboundLanguage(input.text);
     }
     const lang = effectiveLang(persisted.language);
     // MENU/RESET context routing per hospitality best practice:
@@ -4330,7 +4263,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       to: normalizedPhone,
       conversationId: conversation.id,
       menuBody: menuPersonalizedReset.menuBody,
-      fallbackBody: menuPersonalizedReset.fallbackBody
+      fallbackBody: menuPersonalizedReset.fallbackBody,
+      menuLang: toChatLang(persisted.language)
     });
     if (menuPersonalizedReset.stampedWelcomeBack) {
       await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
@@ -4378,7 +4312,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       phoneE164: normalizedPhone,
       state: {
         ...persisted,
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: persisted.stage || "new",
         lastActivityAt: new Date().toISOString(),
         preHandoffConversationMode:
@@ -4433,7 +4367,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "BOOKING_MODE",
@@ -4475,7 +4409,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     const choice = getBookingSubMenuChoice(input.text)!;
     if (choice === "check_availability") {
       const copy = bookingCopy(persisted.language);
-      const stepBody = copy.adultsPrompt + (bookingLang(persisted.language) === "ar" ? "\n\nاكتب back للرجوع." : BOOKING_NAV_HINT);
+      const stepBody = copy.adultsPrompt + getBookingNavHint(bookingLang(persisted.language));
       await sendWhatsAppText({
         to: normalizedPhone,
         body: stepBody,
@@ -4498,7 +4432,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: "new",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "BOOKING_MODE",
@@ -4542,15 +4476,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         await sendWhatsAppList({
           to: normalizedPhone,
           body: bookingSubmenuBody(persisted.language),
-          buttonText: BOOKING_SUBMENU_LIST.buttonText,
-          sections: BOOKING_SUBMENU_LIST.sections,
+          buttonText: bookingSubmenuList(persisted.language).buttonText,
+          sections: bookingSubmenuList(persisted.language).sections,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Reply with: Check availability, View room types, View offers, or View location and hotel information.",
+          body: getBookingSubmenuFallbackList(effectiveLang(persisted.language)),
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -4577,15 +4511,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         await sendWhatsAppList({
           to: normalizedPhone,
           body: bookingSubmenuBody(persisted.language),
-          buttonText: BOOKING_SUBMENU_LIST.buttonText,
-          sections: BOOKING_SUBMENU_LIST.sections,
+          buttonText: bookingSubmenuList(persisted.language).buttonText,
+          sections: bookingSubmenuList(persisted.language).sections,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Reply with: Check availability, View room types, View offers, or View location and hotel information.",
+          body: getBookingSubmenuFallbackList(effectiveLang(persisted.language)),
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -4612,15 +4546,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         await sendWhatsAppList({
           to: normalizedPhone,
           body: bookingSubmenuBody(persisted.language),
-          buttonText: BOOKING_SUBMENU_LIST.buttonText,
-          sections: BOOKING_SUBMENU_LIST.sections,
+          buttonText: bookingSubmenuList(persisted.language).buttonText,
+          sections: bookingSubmenuList(persisted.language).sections,
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
       } catch {
         await sendWhatsAppText({
           to: normalizedPhone,
-          body: "Reply with: Check availability, View room types, View offers, or View location and hotel information.",
+          body: getBookingSubmenuFallbackList(effectiveLang(persisted.language)),
           phoneNumberId: hotel.phoneNumberId,
           conversationId: conversation.id
         });
@@ -4632,7 +4566,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "BOOKING_MODE",
@@ -4660,8 +4594,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       await sendWhatsAppList({
         to: normalizedPhone,
         body: bookingSubmenuBody(persisted.language),
-        buttonText: BOOKING_SUBMENU_LIST.buttonText,
-        sections: BOOKING_SUBMENU_LIST.sections,
+        buttonText: bookingSubmenuList(persisted.language).buttonText,
+        sections: bookingSubmenuList(persisted.language).sections,
         phoneNumberId: hotel.phoneNumberId,
         conversationId: conversation.id
       });
@@ -4748,7 +4682,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
     }
 
     const baseUpdateState = {
-      language: persisted.language || "en",
+      language: persisted.language,
       stage: "new",
       lastActivityAt: new Date().toISOString(),
       conversationMode: "BOOKING_MODE" as const,
@@ -5000,7 +4934,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: "awaiting_confirmation",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "BOOKING_MODE",
@@ -5136,7 +5070,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: persisted.stage || "new",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "BOOKING_MODE",
@@ -5190,7 +5124,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: persisted.stage || "new",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "BOOKING_MODE",
@@ -5306,7 +5240,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   if (conversationMode === "BOOKING_MODE" && persisted.bookingStep) {
     const step = persisted.bookingStep as BookingStep;
     const baseState = {
-      language: persisted.language || "en",
+      language: persisted.language,
       stage: persisted.stage || "new",
       lastActivityAt: new Date().toISOString(),
       conversationMode: "BOOKING_MODE" as const,
@@ -5623,8 +5557,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           await sendWhatsAppList({
             to: normalizedPhone,
             body: bookingSubmenuBody(persisted.language),
-            buttonText: BOOKING_SUBMENU_LIST.buttonText,
-            sections: BOOKING_SUBMENU_LIST.sections,
+            buttonText: bookingSubmenuList(persisted.language).buttonText,
+            sections: bookingSubmenuList(persisted.language).sections,
             phoneNumberId: hotel.phoneNumberId,
             conversationId: conversation.id
           });
@@ -5670,7 +5604,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
       let backBody = "";
       if (prev === "adults") {
-        backBody = "How many adults will be staying? (Reply with a number, e.g. 2)" + BOOKING_NAV_HINT;
+        backBody =
+          (bookingLang(persisted.language) === "ar"
+            ? "كم عدد البالغين؟ (اكتب رقماً، مثل 2)"
+            : "How many adults will be staying? (Reply with a number, e.g. 2)") +
+          getBookingNavHint(bookingLang(persisted.language));
       } else if (prev === "children") {
         backBody = "How many children will be staying? (Reply with a number, e.g. 0 or 2)";
       } else if (prev === "rooms") {
@@ -5772,7 +5710,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
 
       const commonBack = {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: "new" as const,
         lastActivityAt: new Date().toISOString(),
         conversationMode: "BOOKING_MODE" as const,
@@ -7658,7 +7596,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: persisted.stage || "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "QUESTION_MODE",
@@ -7716,7 +7654,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: persisted.stage || "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "QUESTION_MODE",
@@ -7762,7 +7700,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: persisted.stage || "new",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "IDLE",
@@ -7857,7 +7795,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: "collecting_dates",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "BOOKING_MODE",
@@ -8102,7 +8040,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: "confirmed",
         lastActivityAt: new Date().toISOString(),
         conversationMode: "BOOKING_MODE",
@@ -8143,7 +8081,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: currentState,
         lastActivityAt: new Date().toISOString(),
         conversationMode: "BOOKING_MODE",
@@ -8328,7 +8266,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           conversationId: conversation.id,
           phoneE164: normalizedPhone,
           state: {
-            language: persisted.language || "en",
+            language: persisted.language,
             stage: persisted.stage || "new",
             lastActivityAt: new Date().toISOString(),
             conversationMode: conversationMode,
@@ -8373,7 +8311,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           conversationId: conversation.id,
           phoneE164: normalizedPhone,
           state: {
-            language: persisted.language || "en",
+            language: persisted.language,
             stage: persisted.stage || "new",
             lastActivityAt: new Date().toISOString(),
             conversationMode: conversationMode,
@@ -8437,7 +8375,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: persisted.stage || "new",
           lastActivityAt: new Date().toISOString(),
           conversationMode: conversationMode,
@@ -8482,7 +8420,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: persisted.language || "en",
+          language: persisted.language,
           stage: persisted.stage || "new",
           lastActivityAt: new Date().toISOString(),
           conversationMode: conversationMode,
@@ -8526,7 +8464,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
-        language: persisted.language || "en",
+        language: persisted.language,
         stage: persisted.stage || "new",
         lastActivityAt: new Date().toISOString(),
         awaitingGuestName: false,
@@ -8550,57 +8488,33 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
   if (isGreeting(normalizedInputText) || normalizedInputText === "menu") {
     if (needsLanguageSelection(persisted.language)) {
-      try {
-        await sendWhatsAppButtons({
-          to: normalizedPhone,
-          body: getLanguageSelectPrompt(),
-          buttons: LANGUAGE_BUTTONS,
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      } catch (err) {
-        console.error("WhatsApp language buttons send failed (greeting/menu):", err instanceof Error ? err.message : String(err));
-        await sendWhatsAppText({
-          to: normalizedPhone,
-          body: getLanguageSelectFallback(),
-          phoneNumberId: hotel.phoneNumberId,
-          conversationId: conversation.id
-        });
-      }
-      await prisma.message.create({
-        data: {
-          hotelId: hotel.id,
-          conversationId: conversation.id,
-          direction: MessageDirection.OUTBOUND,
-          body: getLanguageSelectPrompt(),
-          aiIntent: "LANGUAGE_SELECT",
-          aiConfidence: 0.98
-        }
-      });
+      const lang = resolveInboundConversationLanguage(persisted.language, input.text);
+      persisted.language = lang;
       await saveConversationSession({
         hotelId: hotel.id,
         guestId: guest.id,
         conversationId: conversation.id,
         phoneE164: normalizedPhone,
         state: {
-          language: "",
+          ...persisted,
+          language: lang,
           stage: "IDLE",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "IDLE",
           awaitingGuestName: false,
           awaitingBookingLookup: false,
           myBookingCandidateIds: [],
-          phoneNumberId: hotel.phoneNumberId,
-          checkIn: persisted.checkIn,
-          checkOut: persisted.checkOut,
-          guestCount: persisted.guestCount,
-          roomCount: persisted.roomCount,
-          suggestedRoomTypeId: persisted.suggestedRoomTypeId,
-          suggestedRoomTypeName: persisted.suggestedRoomTypeName,
-          suggestedPropertyId: persisted.suggestedPropertyId,
-          nights: persisted.nights,
-          totalAmount: persisted.totalAmount
+          phoneNumberId: hotel.phoneNumberId
         }
+      });
+      await sendWelcomeMainMenu({
+        hotel,
+        guestId: guest.id,
+        normalizedPhone,
+        conversationId: conversation.id,
+        lang,
+        guestMemoryBundle,
+        aiIntent: "LANGUAGE_AUTO_DETECTED_GREETING_MENU"
       });
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
       return;
@@ -8667,7 +8581,8 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       to: normalizedPhone,
       conversationId: conversation.id,
       menuBody: menuPersonalizedGreeting.menuBody,
-      fallbackBody: menuPersonalizedGreeting.fallbackBody
+      fallbackBody: menuPersonalizedGreeting.fallbackBody,
+      menuLang: toChatLang(persisted.language)
     });
     if (menuPersonalizedGreeting.stampedWelcomeBack) {
       await recordWelcomeBackMenuShown(guest.id).catch(() => undefined);
@@ -8749,7 +8664,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       }
     });
     const updatedState = {
-      language: persisted.language || "en",
+      language: persisted.language,
       stage: persisted.stage || "new",
       lastActivityAt: new Date().toISOString(),
       conversationMode: conversationMode,
@@ -8995,7 +8910,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   });
 
   const nextSessionState = {
-    language: persisted.language || "en",
+    language: persisted.language,
     stage: turn.nextState,
     lastActivityAt: new Date().toISOString(),
     conversationMode: "BOOKING_MODE" as const,

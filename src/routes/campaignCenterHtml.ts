@@ -177,15 +177,15 @@ ${previewBlock}
       <strong style="font-size:13px">Segment tags — match all (stricter)</strong>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px;margin-top:6px">${tagAllBoxes}</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+    <div class="stack-sm stack-sm--2" style="margin-top:10px">
       <label>Min completed stays <input type="number" name="filterMinCompletedStays" min="0" value="${esc(val(body, "filterMinCompletedStays"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
       <label>Max completed stays <input type="number" name="filterMaxCompletedStays" min="0" value="${esc(val(body, "filterMaxCompletedStays"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+    <div class="stack-sm stack-sm--2" style="margin-top:10px">
       <label>Min lifetime spend (confirmed bookings) <input type="number" name="filterMinLifetimeSpend" min="0" step="0.01" value="${esc(val(body, "filterMinLifetimeSpend"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
       <label>Max lifetime spend <input type="number" name="filterMaxLifetimeSpend" min="0" step="0.01" value="${esc(val(body, "filterMaxLifetimeSpend"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+    <div class="stack-sm stack-sm--2" style="margin-top:10px">
       <label>Had a completed stay within last (days) <input type="number" name="filterLastStayWithinDays" min="1" value="${esc(val(body, "filterLastStayWithinDays"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
       <label>No completed stay since (days) — lapsed guests <input type="number" name="filterNoStaySinceDays" min="1" value="${esc(val(body, "filterNoStaySinceDays"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
     </div>
@@ -208,7 +208,7 @@ ${previewBlock}
       <strong style="font-size:13px">Meal plan on any stay</strong>
       <div style="display:flex;flex-wrap:wrap;margin-top:6px">${mealBoxes}</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+    <div class="stack-sm stack-sm--2" style="margin-top:10px">
       <label>Min nights (any one stay) <input type="number" name="filterMinNights" min="1" value="${esc(val(body, "filterMinNights"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
       <label>Max nights (any one stay) <input type="number" name="filterMaxNights" min="1" value="${esc(val(body, "filterMaxNights"))}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px" /></label>
     </div>

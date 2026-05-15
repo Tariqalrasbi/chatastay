@@ -333,6 +333,48 @@ export function getBookingSubmenuBody(lang: "ar" | "en"): string {
   return lang === "ar" ? "ماذا تود أن تفعل؟" : "What would you like to do?";
 }
 
+export function getBookingSubmenuList(lang: "ar" | "en"): {
+  buttonText: string;
+  sections: Array<{ title: string; rows: Array<{ id: string; title: string }> }>;
+} {
+  if (lang === "ar") {
+    return {
+      buttonText: "اختر خياراً",
+      sections: [
+        {
+          title: "خيارات الحجز",
+          rows: [
+            { id: "check_availability", title: "التحقق من التوفر" },
+            { id: "view_room_types", title: "عرض أنواع الغرف" },
+            { id: "view_offers", title: "عرض العروض" },
+            { id: "view_location_info", title: "معلومات الفندق والموقع" }
+          ]
+        }
+      ]
+    };
+  }
+  return {
+    buttonText: "Choose an option",
+    sections: [
+      {
+        title: "Booking options",
+        rows: [
+          { id: "check_availability", title: "Check availability" },
+          { id: "view_room_types", title: "View room types" },
+          { id: "view_offers", title: "View offers" },
+          { id: "view_location_info", title: "View location and hotel information" }
+        ]
+      }
+    ]
+  };
+}
+
+export function getBookingNavHint(lang: "ar" | "en"): string {
+  return lang === "ar"
+    ? "\n\nاكتب *back* للخطوة السابقة، أو *menu* للقائمة الرئيسية."
+    : "\n\nTip: reply *back* for the previous step, or *menu* for the main menu.";
+}
+
 export function getBookingSubmenuFallbackList(lang: "ar" | "en"): string {
   if (lang === "ar") {
     return [

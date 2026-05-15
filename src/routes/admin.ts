@@ -2142,6 +2142,11 @@ const pmsWorkspacePageStyles = `<style>
 .pms-card,.pms-picker button { border-color:#dce8e3; border-radius:18px; box-shadow:0 10px 30px rgba(15,44,38,.07); }
 .pms-card:hover,.pms-picker button:hover { border-color:#25d366; box-shadow:0 16px 34px rgba(15,44,38,.11); }
 .pms-card a { color:#075e54; }
+@media (max-width:900px) {
+  .pms-hero { padding:18px; }
+  .pms-hero h1 { font-size:20px; }
+  .pms-grid { grid-template-columns:1fr; }
+}
 </style>`;
 
 const buffetCountCardStyles = `<style>
@@ -3121,8 +3126,9 @@ function renderWhatsAppPhoneFields(opts: {
   const requiredAttr = opts.required ? " required" : "";
   const phoneStyle =
     opts.phoneInputStyle ?? "width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px";
-  const groupStyle = opts.groupStyle ?? "display:grid;grid-template-columns:120px 96px minmax(180px,1fr);gap:8px;align-items:end";
-  return `<div style="${groupStyle}">
+  const groupStyle = opts.groupStyle ?? "";
+  const groupAttr = groupStyle ? ` style="${groupStyle}"` : "";
+  return `<div class="wa-phone-grid"${groupAttr}>
     <label style="font-size:12px;font-weight:700">Country<br/>
       <select name="${escapeHtml(opts.countryCodeName)}" style="width:100%;padding:9px 8px;border:1px solid #cbd5e1;border-radius:8px">
         <option value="+968" selected>Oman +968</option>
@@ -13781,7 +13787,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
         <label style="display:block;font-size:12px;font-weight:600;color:#5f6b7a;margin-bottom:4px">Reason
           <input type="text" id="rud-checkout-out-reason" placeholder="e.g. LPO 2026-007 - settle within 7 days" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
         </label>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px">
+        <div class="stack-sm stack-sm--2" style="margin-top:8px">
           <label style="font-size:12px;font-weight:600;color:#5f6b7a">Due date
             <input type="date" id="rud-checkout-out-due" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
           </label>
@@ -13804,7 +13810,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
       <div id="rud-checkout-credit" style="display:none;margin-top:16px;padding:12px;border:1px solid #34d399;background:#ecfdf5;border-radius:10px">
         <p style="margin:0 0 8px;font-weight:700;color:#065f46">Credit balance / refund due</p>
         <p class="muted" style="margin:0 0 10px;font-size:12px">Guest overpaid. Record the refund details (or leave blank to handle later from the Guest Ledger).</p>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="stack-sm stack-sm--2">
           <label style="font-size:12px;font-weight:600;color:#5f6b7a">Refund method
             <select id="rud-checkout-credit-method" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px">
               <option value="">— defer —</option>
@@ -13840,7 +13846,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     <div class="rud-drawer-scroll" style="padding:14px 18px">
       <p class="muted" style="margin:0 0 10px;font-size:13px">Posts a REFUND line against the selected payment. Updates Booking.paymentStatus when fully reversed.</p>
       <p id="folio-refund-parent-label" style="margin:0 0 12px;font-size:13px"><strong>Parent line:</strong> <span class="muted">—</span></p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+      <div class="stack-sm stack-sm--2" style="margin-bottom:10px">
         <label style="font-size:12px;font-weight:600;color:#5f6b7a">Refund amount (${escapeHtml(cur)})
           <input type="number" id="folio-refund-amount" min="0" step="0.001" style="display:block;width:100%;margin-top:4px;padding:8px;border:1px solid #d8dee6;border-radius:8px" />
         </label>
@@ -17700,7 +17706,7 @@ ${guestHubSectionHtml}
       customCountryCodeName: "guestPhoneCountryCodeCustom",
       label: "WhatsApp number",
       phoneInputStyle: "width:100%;padding:8px;border:1px solid var(--border);border-radius:8px",
-      groupStyle: "display:grid;grid-template-columns:100px 88px 1fr;gap:8px;align-items:end"
+      groupStyle: ""
     })}
     <button type="submit" style="padding:8px 14px;border:0;border-radius:8px;background:#128c7e;color:#fff;font-weight:600;width:fit-content">Update phone</button>
   </form>
@@ -20177,7 +20183,7 @@ adminRouter.get("/fb/menu", requireFbOperationsView(), async (req, res) => {
                 customCountryCodeName: "guest_whatsapp_country_code_custom",
                 label: "Guest WhatsApp number",
                 phoneInputStyle: "min-width:220px;padding:8px 10px;border:1px solid #86efac;border-radius:8px",
-                groupStyle: "display:grid;grid-template-columns:120px 96px minmax(220px,1fr);gap:8px;align-items:end"
+                groupStyle: ""
               })}
               <button type="submit" class="btn-link" style="padding:8px 12px">Send receipt</button>
             </form>
@@ -25708,10 +25714,12 @@ adminRouter.get("/conversations", requirePermission("CONVERSATIONS", "VIEW"), as
   <button type="submit" style="padding:9px 13px; border:0; border-radius:8px; background:#075e54; color:#fff; font-weight:700">Apply</button>
 </form>
 <p class="muted" style="margin-bottom:10px">Showing <strong>${conversations.length}</strong> conversation(s) in range ${formatDateForInput(start)} – ${formatDateForInput(end)}.</p>
-<table>
+<div class="table-scroll">
+<table class="conversations-table">
   <thead><tr><th>Guest</th><th>Phone</th><th>Latest Message</th><th>State</th><th>Linked Booking</th><th>Last Activity</th><th>Actions</th></tr></thead>
   <tbody>${rows || '<tr><td colspan="7">No conversations in this date range.</td></tr>'}</tbody>
-</table>`;
+</table>
+</div>`;
 
   res.type("html").send(renderLayout(content, true));
 });
@@ -25843,8 +25851,8 @@ ${replyError}
   <a class="btn-link" href="/admin/conversations/${encodeURIComponent(conversation.id)}/create-booking">Start structured booking flow</a>
 </div>
 
-<div class="chat-layout" style="display:grid; grid-template-columns:1fr 280px; gap:16px; align-items:start; max-width:1200px;">
-  <div class="chat-main" data-chat-conversation-id="${escapeHtml(conversation.id)}" data-chat-last-msg-at="${escapeHtml(lastMsgAt)}" style="background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:420px;">
+<div class="chat-layout">
+  <div class="chat-main" data-chat-conversation-id="${escapeHtml(conversation.id)}" data-chat-last-msg-at="${escapeHtml(lastMsgAt)}">
     <div class="chat-header" style="padding:12px 16px; border-bottom:1px solid var(--border); background:#f8fafc; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
       <div style="flex:1; min-width:200px">
         <div>

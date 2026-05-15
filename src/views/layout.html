@@ -1642,12 +1642,200 @@
         .admin-notif-bell.admin-notif-bell-pulse { animation: none !important; }
         * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
       }
+
+      /* ===== Responsive operations (mobile / tablet) ===== */
+      html {
+        overflow-x: clip;
+        max-width: 100%;
+      }
+      body {
+        overflow-x: clip;
+        max-width: 100%;
+      }
+      .shell {
+        max-width: 100%;
+        overflow-x: clip;
+      }
+      main.content {
+        max-width: 100%;
+        min-width: 0;
+        overflow-x: clip;
+      }
+      #adminPanelContent {
+        max-width: 100%;
+        min-width: 0;
+      }
+      .table-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        max-width: 100%;
+        margin-top: 10px;
+      }
+      .stack-sm {
+        display: grid;
+        gap: 10px;
+      }
+      .stack-sm--2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      @media (max-width: 640px) {
+        .stack-sm--2 {
+          grid-template-columns: 1fr;
+        }
+      }
+      .wa-phone-grid {
+        display: grid;
+        grid-template-columns: 120px 96px minmax(0, 1fr);
+        gap: 8px;
+        align-items: end;
+      }
+      @media (max-width: 640px) {
+        .wa-phone-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+        .wa-phone-grid > label:last-child {
+          grid-column: 1 / -1;
+        }
+      }
+      .chat-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) min(280px, 34%);
+        gap: 16px;
+        align-items: start;
+        max-width: 1200px;
+      }
+      .chat-main {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-height: 420px;
+        min-width: 0;
+        max-width: 100%;
+      }
+      @media (max-width: 900px) {
+        .chat-layout {
+          grid-template-columns: 1fr;
+        }
+        .chat-sidebar {
+          order: -1;
+        }
+      }
+      .conversations-table {
+        min-width: 640px;
+      }
+      .sidebar-menu-toggle {
+        display: none;
+      }
+      .sidebar-backdrop {
+        display: none;
+      }
+      @media (max-width: 980px) {
+        .sidebar-menu-toggle {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          min-height: 44px;
+          padding: 10px 16px;
+          margin-bottom: 12px;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          background: var(--card);
+          color: var(--wa-deep);
+          font-weight: 700;
+          font-size: 14px;
+          cursor: pointer;
+          box-shadow: var(--shadow-sm, 0 4px 12px rgba(15, 44, 38, 0.08));
+        }
+        .sidebar-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 899;
+          background: rgba(15, 23, 42, 0.45);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.2s ease;
+        }
+        .shell.sidebar-open .sidebar-backdrop {
+          display: block;
+          opacity: 1;
+          pointer-events: auto;
+        }
+        .sidebar {
+          position: fixed !important;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          width: min(288px, 90vw);
+          height: 100dvh !important;
+          max-height: 100dvh;
+          z-index: 900;
+          transform: translateX(-105%);
+          transition: transform 0.22s ease;
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+        html[dir="rtl"] .sidebar {
+          left: auto;
+          right: 0;
+          transform: translateX(105%);
+        }
+        .shell.sidebar-open .sidebar {
+          transform: translateX(0);
+        }
+        .shell .sidebar .sidebar-nav {
+          flex-direction: column !important;
+          overflow-x: visible !important;
+          overflow-y: auto;
+          flex-wrap: nowrap;
+          padding-bottom: 8px;
+        }
+        .shell .sidebar .sidebar-nav a,
+        .shell .sidebar .sidebar-nav button {
+          white-space: normal;
+          flex: 1 1 auto;
+          min-height: 44px;
+          display: flex;
+          align-items: center;
+        }
+        .btn-link,
+        .section-tabs a,
+        nav a,
+        nav button,
+        button[type="submit"],
+        input[type="submit"] {
+          min-height: 44px;
+        }
+        .btn-link {
+          padding: 10px 14px;
+          display: inline-flex;
+          align-items: center;
+        }
+        .section-tabs {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          flex-wrap: nowrap;
+          padding-bottom: 4px;
+          max-width: 100%;
+        }
+        .top-subnav {
+          max-width: 100%;
+          overflow-x: clip;
+        }
+        body.sidebar-open-mobile {
+          overflow: hidden;
+        }
+      }
     </style>
   </head>
   <body{{uiErrorContextAttrs}}>
     <script src="/static/ui-error-tracker.js"></script>
-    <div class="shell">
-      <aside class="sidebar">
+    <div class="sidebar-backdrop" id="adminSidebarBackdrop" aria-hidden="true"></div>
+    <div class="shell" id="adminShell">
+      <aside class="sidebar" id="admin-sidebar">
         <div class="brand">
           <div class="brand-logo">CS</div>
           <div>
@@ -1665,6 +1853,7 @@
         <nav class="sidebar-nav">{{navLinks}}</nav>
       </aside>
       <main class="content">
+        <button type="button" class="sidebar-menu-toggle" id="adminSidebarToggle" aria-controls="admin-sidebar" aria-expanded="false">Menu</button>
         <div class="top-subnav">
           <div class="top-subnav-main">{{sectionTabs}}</div>
         </div>
@@ -2014,6 +2203,33 @@
           });
         };
         bindInstantLinks(document);
+        (function bindMobileSidebar() {
+          var shell = document.getElementById("adminShell");
+          var toggle = document.getElementById("adminSidebarToggle");
+          var backdrop = document.getElementById("adminSidebarBackdrop");
+          if (!shell || !toggle) return;
+          function setOpen(open) {
+            shell.classList.toggle("sidebar-open", open);
+            document.body.classList.toggle("sidebar-open-mobile", open);
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+            if (backdrop) backdrop.setAttribute("aria-hidden", open ? "false" : "true");
+          }
+          toggle.addEventListener("click", function () {
+            setOpen(!shell.classList.contains("sidebar-open"));
+          });
+          if (backdrop) backdrop.addEventListener("click", function () { setOpen(false); });
+          document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") setOpen(false);
+          });
+          window.addEventListener("resize", function () {
+            if (window.innerWidth > 980) setOpen(false);
+          });
+          shell.querySelectorAll(".sidebar-nav a").forEach(function (link) {
+            link.addEventListener("click", function () {
+              if (window.innerWidth <= 980) setOpen(false);
+            });
+          });
+        })();
         window.addEventListener("popstate", function () {
           navigateInstant(window.location.href, false).catch(function () {
             window.location.reload();

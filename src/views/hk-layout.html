@@ -454,17 +454,84 @@
         box-shadow: 0 10px 24px -6px rgba(15, 44, 38, 0.14);
       }
       ::selection { background: rgba(37, 211, 102, 0.3); color: #053b18; }
+
+      /* Responsive (align with admin shell) */
+      html, body { overflow-x: clip; max-width: 100%; }
+      .shell { max-width: 100%; overflow-x: clip; }
+      main { max-width: 100%; min-width: 0; overflow-x: clip; }
+      .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+      .stack-sm { display: grid; gap: 10px; }
+      .stack-sm--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      @media (max-width: 640px) { .stack-sm--2 { grid-template-columns: 1fr; } }
+      .hk-menu-toggle { display: none; }
+      .hk-sidebar-backdrop { display: none; }
+      @media (max-width: 980px) {
+        .hk-menu-toggle {
+          display: inline-flex;
+          align-items: center;
+          min-height: 44px;
+          padding: 10px 16px;
+          margin-bottom: 12px;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          background: #fff;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .hk-sidebar-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 899;
+          background: rgba(15, 23, 42, 0.45);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.2s ease;
+        }
+        .shell.hk-sidebar-open .hk-sidebar-backdrop {
+          display: block;
+          opacity: 1;
+          pointer-events: auto;
+        }
+        .shell aside {
+          position: fixed !important;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          width: min(260px, 90vw);
+          height: 100dvh !important;
+          z-index: 900;
+          transform: translateX(-105%);
+          transition: transform 0.22s ease;
+          flex-direction: column !important;
+          flex-wrap: nowrap !important;
+          overflow-y: auto;
+        }
+        .shell.hk-sidebar-open aside { transform: translateX(0); }
+        .shell aside nav {
+          flex-direction: column !important;
+          width: 100%;
+        }
+        .shell aside nav a {
+          min-height: 44px;
+          text-align: left;
+        }
+        body.hk-sidebar-open-mobile { overflow: hidden; }
+        main { padding: 18px; }
+        .panel { padding: 18px; }
+      }
     </style>
   </head>
   <body{{uiErrorContextAttrs}}>
     <script src="/static/ui-error-tracker.js"></script>
-    <div class="shell">
-      <aside>
+    <div class="hk-sidebar-backdrop" id="hkSidebarBackdrop" aria-hidden="true"></div>
+    <div class="shell" id="hkShell">
+      <aside id="hk-sidebar">
         <div class="brand">ChatStay <span>Housekeeping</span></div>
         <nav>{{navLinks}}</nav>
         <div class="logout">{{logoutForm}}</div>
       </aside>
       <main>
+        <button type="button" class="hk-menu-toggle" id="hkSidebarToggle" aria-controls="hk-sidebar" aria-expanded="false">Menu</button>
         <div class="hk-topbar">
           <div class="admin-notif-wrap">
             <button id="adminNotifBell" class="admin-notif-bell" type="button">🔔</button>
@@ -797,9 +864,38 @@
           });
         }
 
+        function bindHkMobileSidebar() {
+          var shell = g.document.getElementById("hkShell");
+          var toggle = g.document.getElementById("hkSidebarToggle");
+          var backdrop = g.document.getElementById("hkSidebarBackdrop");
+          if (!shell || !toggle) return;
+          function setOpen(open) {
+            shell.classList.toggle("hk-sidebar-open", open);
+            g.document.body.classList.toggle("hk-sidebar-open-mobile", open);
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+            if (backdrop) backdrop.setAttribute("aria-hidden", open ? "false" : "true");
+          }
+          toggle.addEventListener("click", function () {
+            setOpen(!shell.classList.contains("hk-sidebar-open"));
+          });
+          if (backdrop) backdrop.addEventListener("click", function () { setOpen(false); });
+          g.document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") setOpen(false);
+          });
+          g.window.addEventListener("resize", function () {
+            if (g.innerWidth > 980) setOpen(false);
+          });
+          shell.querySelectorAll("aside nav a").forEach(function (link) {
+            link.addEventListener("click", function () {
+              if (g.innerWidth <= 980) setOpen(false);
+            });
+          });
+        }
+
         function boot() {
           selfHeal();
           bindLoginFormsSafely();
+          bindHkMobileSidebar();
         }
 
         if (g.document.readyState === "loading") {
