@@ -15,7 +15,16 @@ import { formatHotelOfferDetails, readActiveHotelOffers } from "../core/hotelOff
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { hashPassword, verifyPassword } from "../core/authSecurity";
-import { parseGuestPhone, toWhatsAppDigits } from "../core/phoneNumber";
+import {
+  consumeTravellerPasswordReset,
+  issueTravellerVerificationEmail,
+  isTravellerEmailVerified,
+  requestTravellerPasswordReset,
+  travellerPasswordResetTokenValid,
+  travellerRequireEmailVerification,
+  verifyTravellerEmailToken
+} from "../core/travellerAuth";
+import { parseGuestPhone, parseGuestPhoneFromFormFields, toWhatsAppDigits } from "../core/phoneNumber";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
 
 export const guestRouter = Router();
@@ -142,6 +151,99 @@ function redirectToTravellerLogin(res: { redirect(url: string): void }, next: st
   res.redirect(`/guest/account/login?next=${encodeURIComponent(next)}`);
 }
 
+function redirectToVerifyPending(res: { redirect(url: string): void }, email: string): void {
+  res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(email)}`);
+}
+
+async function requireVerifiedTraveller(
+  req: { headers: { cookie?: string } },
+  res: { redirect(url: string): void }
+): Promise<Awaited<ReturnType<typeof getTravellerAccount>>> {
+  const account = await getTravellerAccount(req);
+  if (!account) return null;
+  if (travellerRequireEmailVerification() && !isTravellerEmailVerified(account)) {
+    redirectToVerifyPending(res, account.email);
+    return null;
+  }
+  return account;
+}
+
+const PHONE_COUNTRY_OPTIONS: Array<{ iso: string; label: string; code: string }> = [
+  { iso: "OM", label: "Oman (+968)", code: "+968" },
+  { iso: "AE", label: "UAE (+971)", code: "+971" },
+  { iso: "SA", label: "Saudi Arabia (+966)", code: "+966" },
+  { iso: "KW", label: "Kuwait (+965)", code: "+965" },
+  { iso: "BH", label: "Bahrain (+973)", code: "+973" },
+  { iso: "QA", label: "Qatar (+974)", code: "+974" },
+  { iso: "GB", label: "United Kingdom (+44)", code: "+44" },
+  { iso: "US", label: "United States (+1)", code: "+1" },
+  { iso: "IN", label: "India (+91)", code: "+91" },
+  { iso: "EG", label: "Egypt (+20)", code: "+20" }
+];
+
+function phoneCountrySelectHtml(selectedIso = "OM"): string {
+  return PHONE_COUNTRY_OPTIONS.map(
+    (c) =>
+      `<option value="${escapeHtml(c.iso)}" data-code="${escapeHtml(c.code)}"${c.iso === selectedIso ? " selected" : ""}>${escapeHtml(c.label)}</option>`
+  ).join("");
+}
+
+const NATIONALITY_OPTIONS = [
+  "Oman",
+  "United Arab Emirates",
+  "Saudi Arabia",
+  "Kuwait",
+  "Bahrain",
+  "Qatar",
+  "United Kingdom",
+  "United States",
+  "India",
+  "Egypt",
+  "Other"
+];
+
+function nationalitySelectHtml(selected = ""): string {
+  const opts = NATIONALITY_OPTIONS.map(
+    (n) => `<option value="${escapeHtml(n)}"${n === selected ? " selected" : ""}>${escapeHtml(n)}</option>`
+  ).join("");
+  return `<option value="">— Optional —</option>${opts}`;
+}
+
+type GuestLayoutOpts = {
+  title?: string;
+  variant?: "default" | "auth";
+  hidePartnerNav?: boolean;
+  showPartnerFooter?: boolean;
+};
+
+const GUEST_OVERFLOW_STYLES = `
+    html, body { overflow-x: clip; max-width: 100%; }
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+`;
+
+const GUEST_AUTH_STYLES = `
+    .guest-auth-page main { max-width: 440px; margin: 32px auto 48px; padding: 0; background: transparent; border: 0; box-shadow: none; animation: none; }
+    .guest-auth-card { background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(252,255,253,.94)); border: 1px solid rgba(220,232,227,.9); border-radius: 24px; padding: 28px 24px 22px; box-shadow: 0 28px 70px -18px rgba(7,68,58,.22), inset 0 1px 0 rgba(255,255,255,.85); }
+    .guest-auth-card h1 { font-size: 1.55rem; margin: 0 0 6px; color: #0b1f1c; background: none; -webkit-text-fill-color: unset; }
+    .guest-auth-card .auth-lead { margin: 0 0 18px; color: #64748b; font-size: 14.5px; line-height: 1.5; }
+    .guest-auth-logo { display: inline-flex; align-items: center; gap: 8px; font-weight: 900; font-size: 18px; color: #075e54; text-decoration: none; letter-spacing: -.03em; margin-bottom: 18px; }
+    .guest-auth-logo::before { content: ""; width: 28px; height: 28px; border-radius: 10px; background: linear-gradient(135deg,#25d366,#b9f7d3); box-shadow: 0 8px 18px rgba(37,211,102,.22); }
+    .guest-auth-card form { max-width: none; gap: 10px; }
+    .guest-auth-card label { display: grid; gap: 5px; font-size: 13px; }
+    .guest-auth-card .field-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; align-items: end; }
+  @media (max-width: 480px) { .guest-auth-card .field-row { grid-template-columns: 1fr; } }
+    .guest-auth-links { margin-top: 16px; font-size: 13.5px; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+    .guest-auth-links a { color: #0b6e6e; font-weight: 700; text-decoration: none; }
+    .guest-auth-links a:hover { text-decoration: underline; }
+    .guest-auth-foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e6efeb; font-size: 12.5px; text-align: center; }
+    .guest-auth-foot a { color: #64748b; font-weight: 700; }
+    @media (max-width: 640px) {
+      .guest-topbar.guest-topbar--auth .links .hotel-login { display: none; }
+      .guest-topbar .links a { font-size: 12px; padding: 6px 9px; }
+      .guest-auth-page main { margin: 12px auto 24px; padding: 0 12px; }
+    }
+`;
+
 function travellerBookingWhereClauses(account: {
   guestId?: string | null;
   email: string;
@@ -153,15 +255,27 @@ function travellerBookingWhereClauses(account: {
   return clauses;
 }
 
-function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
+function guestLayout(content: string, lang: "en" | "ar" = "en", opts: GuestLayoutOpts = {}): string {
   const dir = lang === "ar" ? "rtl" : "ltr";
+  const title = opts.title ?? "ChatAstay — Traveller";
+  const isAuth = opts.variant === "auth";
+  const bodyClass = isAuth ? "guest-auth-page" : "";
+  const topbarClass = isAuth || opts.hidePartnerNav ? "guest-topbar guest-topbar--auth" : "guest-topbar";
+  const partnerNav = opts.hidePartnerNav
+    ? ""
+    : `<a class="hotel-login" href="/admin/login">Hotel / Partner</a>`;
+  const partnerFooter = opts.showPartnerFooter
+    ? `<p class="guest-auth-foot muted">Hotel or partner? <a href="/admin/login">Sign in to the extranet</a></p>`
+    : "";
   return `<!doctype html>
 <html lang="${lang}" dir="${dir}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ChatStay Guest Portal</title>
+  <title>${escapeHtml(title)}</title>
   <style>
+    ${GUEST_OVERFLOW_STYLES}
+    ${isAuth ? GUEST_AUTH_STYLES : ""}
     body { font-family: Inter, Arial, sans-serif; margin: 0; background: radial-gradient(circle at 12% -10%, rgba(37,211,102,.22), transparent 30%), radial-gradient(circle at 92% 8%, rgba(18,140,126,.15), transparent 28%), linear-gradient(180deg, #f9fffc 0%, #eef7f4 100%); color: #0b1f1c; }
     main { max-width: 900px; margin: 24px auto; background: rgba(255,255,255,.96); border: 1px solid #dce8e3; border-radius: 24px; padding: 24px; box-shadow: 0 24px 70px rgba(15,44,38,.12); }
     h1, h2 { margin-top: 0; letter-spacing: -.03em; }
@@ -208,6 +322,7 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
     @media (max-width: 700px) {
       .row { grid-template-columns: 1fr; }
       main { margin: 0; min-height: 100vh; border-radius: 0; border: 0; padding: 14px; }
+      .guest-topbar { padding: 0 10px; margin-top: 10px; }
     }
 
     /* ===== Polish layer 2: hierarchy, spacing, animations ===== */
@@ -317,23 +432,31 @@ function guestLayout(content: string, lang: "en" | "ar" = "en"): string {
   <link rel="stylesheet" href="/static/guest-calendar.css" />
   <script src="/static/guest-calendar.js" defer></script>
 </head>
-<body>
-  <div class="guest-topbar">
+<body class="${bodyClass}">
+  <div class="${topbarClass}">
     <a class="brand" href="/">ChatAstay</a>
     <div class="links">
-      <a class="hotel-login" href="/admin/login">Hotel / Partner Extranet</a>
-      <a href="/guest/account">Traveller Login</a>
+      ${partnerNav}
+      <a href="/guest/account/login">Sign in</a>
       <a href="/guest/trips">My Trips</a>
     </div>
   </div>
-  <main>${content}</main>
+  <main>${isAuth ? `<div class="guest-auth-card">${content}${partnerFooter}</div>` : content}</main>
 </body>
 </html>`;
+}
+
+function guestAuthLayout(content: string, opts: Omit<GuestLayoutOpts, "variant"> = {}): string {
+  return guestLayout(content, "en", { ...opts, variant: "auth", hidePartnerNav: true });
 }
 
 guestRouter.get("/account", async (req, res) => {
   const account = await getTravellerAccount(req);
   if (account) {
+    if (travellerRequireEmailVerification() && !isTravellerEmailVerified(account)) {
+      redirectToVerifyPending(res, account.email);
+      return;
+    }
     res.redirect("/guest/trips");
     return;
   }
@@ -354,37 +477,86 @@ guestRouter.get("/account", async (req, res) => {
     <p><a class="inline-link" href="/guest/account/register">Create account</a></p>
   </article>
 </div>
-<p class="muted" style="margin-top:14px">Hotel teams should use <a href="/admin/login">Hotel / Partner Extranet Login</a>.</p>`;
-  res.type("html").send(guestLayout(content));
+<p class="muted" style="margin-top:14px">Hotel or partner? <a href="/admin/login">Sign in to the extranet</a> (separate from traveller access).</p>`;
+  res.type("html").send(guestLayout(content, "en", { title: "Traveller account · ChatAstay" }));
 });
 
 guestRouter.get("/account/register", (_req, res) => {
   const content = `
-<h1>Create Traveller Account</h1>
-<p class="muted">Use this account for My Trips, loyalty, saved details, booking history, and reviews.</p>
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Create account</h1>
+<p class="auth-lead">For My Trips, booking history, and post-stay reviews. This is separate from hotel staff login.</p>
 <form method="post" action="/guest/account/register">
   <label>Full name <input name="fullName" required autocomplete="name" /></label>
   <label>Email <input name="email" type="email" required autocomplete="email" /></label>
-  <label>Phone / WhatsApp number <input name="phone" autocomplete="tel" placeholder="9689XXXXXXX" /></label>
+  <label>Mobile / WhatsApp
+    <span class="field-row">
+      <select name="phoneCountry" aria-label="Country code">${phoneCountrySelectHtml()}</select>
+      <input name="phone" type="tel" autocomplete="tel" placeholder="9XXXXXXX" />
+    </span>
+  </label>
+  <label>Nationality (optional) <select name="nationality">${nationalitySelectHtml()}</select></label>
+  <label>Preferred language
+    <select name="preferredLanguage">
+      <option value="en">English</option>
+      <option value="ar">Arabic</option>
+      <option value="es">Spanish</option>
+      <option value="fr">French</option>
+    </select>
+  </label>
   <label>Password <input name="password" type="password" minlength="8" required autocomplete="new-password" /></label>
-  <button type="submit">Create Traveller Account</button>
+  <label>Confirm password <input name="confirmPassword" type="password" minlength="8" required autocomplete="new-password" /></label>
+  <button type="submit">Create account</button>
 </form>
-<p><a href="/guest/account/login">Already have an account? Login</a></p>`;
-  res.type("html").send(guestLayout(content));
+<div class="guest-auth-links"><a href="/guest/account/login">Already have an account? Sign in</a></div>`;
+  res.type("html").send(guestAuthLayout(content, { title: "Create account · ChatAstay" }));
 });
 
 guestRouter.post("/account/register", async (req, res) => {
   const fullName = String(req.body.fullName ?? "").trim().slice(0, 160);
   const email = normalizeEmail(req.body.email);
-  const phone = normalizePhone(String(req.body.phone ?? ""));
+  const phoneCountryIso = String(req.body.phoneCountry ?? "OM").trim().toUpperCase();
+  const phoneRaw = String(req.body.phone ?? "").trim();
   const password = String(req.body.password ?? "");
-  if (!fullName || !email || password.length < 8) {
-    res.type("html").status(400).send(guestLayout(`<h1>Create Traveller Account</h1><p class="badge alert">Name, valid email, and an 8+ character password are required.</p><p><a href="/guest/account/register">Try again</a></p>`));
+  const confirmPassword = String(req.body.confirmPassword ?? "");
+  const nationality = String(req.body.nationality ?? "").trim().slice(0, 80) || null;
+  const preferredLanguage = String(req.body.preferredLanguage ?? "en").trim().slice(0, 8) || "en";
+  const parsedPhone = phoneRaw
+    ? parseGuestPhoneFromFormFields({
+        countryCodeRaw: PHONE_COUNTRY_OPTIONS.find((c) => c.iso === phoneCountryIso)?.code ?? "+968",
+        phoneRaw,
+        defaultCountryIso: phoneCountryIso
+      })
+    : null;
+  const normalizedPhone = parsedPhone?.isValid ? parsedPhone.phoneE164 : phoneRaw ? normalizePhone(phoneRaw, phoneCountryIso) : "";
+
+  if (!fullName || !email || password.length < 8 || password !== confirmPassword) {
+    res
+      .type("html")
+      .status(400)
+      .send(
+        guestAuthLayout(
+          `<h1>Create account</h1><p class="badge alert">Name, valid email, matching passwords (8+ characters) are required.</p><p class="guest-auth-links"><a href="/guest/account/register">Try again</a></p>`,
+          { title: "Create account · ChatAstay" }
+        )
+      );
     return;
   }
+  if (phoneRaw && parsedPhone && !parsedPhone.isValid && !normalizedPhone) {
+    res
+      .type("html")
+      .status(400)
+      .send(
+        guestAuthLayout(
+          `<h1>Create account</h1><p class="badge alert">Please enter a valid mobile number or leave it blank.</p><p class="guest-auth-links"><a href="/guest/account/register">Try again</a></p>`,
+          { title: "Create account · ChatAstay" }
+        )
+      );
+    return;
+  }
+
   const hotel = await prisma.hotel.findUnique({ where: { slug: defaultHotelSlug }, select: { id: true } });
-  const normalizedPhone = phone ? `+${phone}` : "";
-  const guest =
+  const guestRecord =
     hotel && normalizedPhone
       ? await prisma.guest.upsert({
           where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedPhone } },
@@ -392,36 +564,58 @@ guestRouter.post("/account/register", async (req, res) => {
           create: { hotelId: hotel.id, phoneE164: normalizedPhone, fullName, email }
         })
       : null;
+
+  const needsVerify = travellerRequireEmailVerification();
   try {
     const account = await prisma.travellerAccount.create({
       data: {
-        guestId: guest?.id ?? null,
+        guestId: guestRecord?.id ?? null,
         email,
         fullName,
         phoneE164: normalizedPhone || null,
-        passwordHash: await hashPassword(password)
+        nationality,
+        preferredLanguage,
+        passwordHash: await hashPassword(password),
+        emailVerifiedAt: needsVerify ? null : new Date()
       }
     });
     setTravellerCookie(res, account.id);
+    if (needsVerify) {
+      await issueTravellerVerificationEmail(account.id);
+      redirectToVerifyPending(res, email);
+      return;
+    }
     res.redirect("/guest/trips?created=1");
   } catch {
-    res.type("html").status(409).send(guestLayout(`<h1>Create Traveller Account</h1><p class="badge alert">A traveller account already exists for this email.</p><p><a href="/guest/account/login">Login instead</a></p>`));
+    res
+      .type("html")
+      .status(409)
+      .send(
+        guestAuthLayout(
+          `<h1>Create account</h1><p class="badge alert">An account already exists for this email.</p><p class="guest-auth-links"><a href="/guest/account/login">Sign in instead</a></p>`,
+          { title: "Create account · ChatAstay" }
+        )
+      );
   }
 });
 
 guestRouter.get("/account/login", (req, res) => {
   const next = typeof req.query.next === "string" ? req.query.next : "/guest/trips";
   const content = `
-<h1>Traveller Login</h1>
-<p class="muted">For guests. Hotel staff should use the Partner Extranet login.</p>
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Sign in</h1>
+<p class="auth-lead">Access My Trips and your booking history.</p>
 <form method="post" action="/guest/account/login">
   <input type="hidden" name="next" value="${escapeHtml(next)}" />
   <label>Email <input name="email" type="email" required autocomplete="email" /></label>
   <label>Password <input name="password" type="password" required autocomplete="current-password" /></label>
-  <button type="submit">Login to My Trips</button>
+  <button type="submit">Sign in</button>
 </form>
-<p><a href="/guest/account/register">Create Traveller Account</a> · <a href="/admin/login">Hotel / Partner Extranet Login</a></p>`;
-  res.type("html").send(guestLayout(content));
+<div class="guest-auth-links">
+  <a href="/guest/account/forgot-password">Forgot password?</a>
+  <a href="/guest/account/register">Create account</a>
+</div>`;
+  res.type("html").send(guestAuthLayout(content, { title: "Sign in · ChatAstay" }));
 });
 
 guestRouter.post("/account/login", async (req, res) => {
@@ -430,12 +624,174 @@ guestRouter.post("/account/login", async (req, res) => {
   const next = String(req.body.next ?? "/guest/trips");
   const account = await prisma.travellerAccount.findUnique({ where: { email } });
   if (!account?.isActive || !(await verifyPassword(password, account.passwordHash))) {
-    res.type("html").status(401).send(guestLayout(`<h1>Traveller Login</h1><p class="badge alert">Invalid email or password.</p><p><a href="/guest/account/login">Try again</a></p>`));
+    res
+      .type("html")
+      .status(401)
+      .send(
+        guestAuthLayout(
+          `<h1>Sign in</h1><p class="badge alert">Invalid email or password.</p><p class="guest-auth-links"><a href="/guest/account/login">Try again</a></p>`,
+          { title: "Sign in · ChatAstay" }
+        )
+      );
     return;
   }
   await prisma.travellerAccount.update({ where: { id: account.id }, data: { lastLoginAt: new Date() } });
   setTravellerCookie(res, account.id);
+  if (travellerRequireEmailVerification() && !isTravellerEmailVerified(account)) {
+    redirectToVerifyPending(res, email);
+    return;
+  }
   res.redirect(next.startsWith("/guest/") ? next : "/guest/trips");
+});
+
+guestRouter.get("/account/verify-pending", async (req, res) => {
+  const email = typeof req.query.email === "string" ? req.query.email : "";
+  const account = await getTravellerAccount(req);
+  const displayEmail = account?.email ?? email;
+  const devHint =
+    account && travellerRequireEmailVerification() && !isTravellerEmailVerified(account)
+      ? `<form method="post" action="/guest/account/resend-verification" style="margin-top:12px"><button type="submit">Resend verification email</button></form>`
+      : "";
+  const content = `
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Verify your email</h1>
+<p class="auth-lead">We sent a verification link${displayEmail ? ` to <strong>${escapeHtml(displayEmail)}</strong>` : ""}. Open it to access My Trips.</p>
+<p class="muted">Check your inbox and spam folder. Links expire after 24 hours.</p>
+${devHint}
+<div class="guest-auth-links"><a href="/guest/account/login">Back to sign in</a></div>`;
+  res.type("html").send(guestAuthLayout(content, { title: "Verify email · ChatAstay" }));
+});
+
+guestRouter.post("/account/resend-verification", async (req, res) => {
+  const account = await getTravellerAccount(req);
+  if (!account) {
+    redirectToTravellerLogin(res, "/guest/trips");
+    return;
+  }
+  if (isTravellerEmailVerified(account)) {
+    res.redirect("/guest/trips");
+    return;
+  }
+  const result = await issueTravellerVerificationEmail(account.id);
+  const extra =
+    result.verifyLink && !result.sent
+      ? `<p class="badge pending">Email is not configured on this server. Use this link to verify:<br /><a href="${escapeHtml(result.verifyLink)}">${escapeHtml(result.verifyLink)}</a></p>`
+      : result.sent
+        ? `<p class="badge ok">Verification email sent.</p>`
+        : `<p class="badge alert">Could not send email. Try again later.</p>`;
+  res
+    .type("html")
+    .send(
+      guestAuthLayout(
+        `<h1>Verify your email</h1>${extra}<p class="guest-auth-links"><a href="/guest/account/verify-pending?email=${encodeURIComponent(account.email)}">Back</a></p>`,
+        { title: "Verify email · ChatAstay" }
+      )
+    );
+});
+
+guestRouter.get("/account/verify-email", async (req, res) => {
+  const token = String(req.query.token ?? "").trim();
+  const result = await verifyTravellerEmailToken(token);
+  if (!result.ok) {
+    res
+      .type("html")
+      .status(400)
+      .send(
+        guestAuthLayout(
+          `<h1>Verification failed</h1><p class="badge alert">This link is invalid or has expired.</p><p class="guest-auth-links"><a href="/guest/account/verify-pending">Request a new link</a></p>`,
+          { title: "Verify email · ChatAstay" }
+        )
+      );
+    return;
+  }
+  res
+    .type("html")
+    .send(
+      guestAuthLayout(
+        `<h1>Email verified</h1><p class="badge ok">Your email is confirmed. You can now access My Trips.</p><p class="guest-auth-links"><a href="/guest/trips">Go to My Trips</a></p>`,
+        { title: "Email verified · ChatAstay" }
+      )
+    );
+});
+
+guestRouter.get("/account/forgot-password", (_req, res) => {
+  const sent = _req.query.sent === "1";
+  const content = `
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Forgot password</h1>
+<p class="auth-lead">Enter your traveller account email. We will send a secure reset link (15 minutes).</p>
+${sent ? `<p class="badge ok">If an account exists for that email, we sent a reset link.</p>` : ""}
+<form method="post" action="/guest/account/forgot-password">
+  <label>Email <input name="email" type="email" required autocomplete="email" /></label>
+  <button type="submit">Send reset link</button>
+</form>
+<div class="guest-auth-links"><a href="/guest/account/login">Back to sign in</a></div>`;
+  res.type("html").send(guestAuthLayout(content, { title: "Forgot password · ChatAstay" }));
+});
+
+guestRouter.post("/account/forgot-password", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  if (email) await requestTravellerPasswordReset(email, req);
+  res.redirect("/guest/account/forgot-password?sent=1");
+});
+
+guestRouter.get("/account/reset-password", async (req, res) => {
+  const token = String(req.query.token ?? "").trim();
+  const valid = await travellerPasswordResetTokenValid(token);
+  if (!valid) {
+    res
+      .type("html")
+      .status(400)
+      .send(
+        guestAuthLayout(
+          `<h1>Reset password</h1><p class="badge alert">This link is invalid or has expired.</p><p class="guest-auth-links"><a href="/guest/account/forgot-password">Request a new link</a></p>`,
+          { title: "Reset password · ChatAstay" }
+        )
+      );
+    return;
+  }
+  const content = `
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Set new password</h1>
+<p class="auth-lead">Choose a new password (at least 8 characters).</p>
+<form method="post" action="/guest/account/reset-password">
+  <input type="hidden" name="token" value="${escapeHtml(token)}" />
+  <label>New password <input name="newPassword" type="password" minlength="8" required autocomplete="new-password" /></label>
+  <label>Confirm password <input name="confirmPassword" type="password" minlength="8" required autocomplete="new-password" /></label>
+  <button type="submit">Update password</button>
+</form>`;
+  res.type("html").send(guestAuthLayout(content, { title: "Reset password · ChatAstay" }));
+});
+
+guestRouter.post("/account/reset-password", async (req, res) => {
+  const token = String(req.body.token ?? "").trim();
+  const newPassword = String(req.body.newPassword ?? "");
+  const confirmPassword = String(req.body.confirmPassword ?? "");
+  const result = await consumeTravellerPasswordReset(token, newPassword, confirmPassword);
+  if (!result.ok) {
+    const msg =
+      result.reason === "password_mismatch"
+        ? "Passwords must match and be at least 8 characters."
+        : "This reset link is invalid or has expired.";
+    res
+      .type("html")
+      .status(400)
+      .send(
+        guestAuthLayout(
+          `<h1>Reset password</h1><p class="badge alert">${escapeHtml(msg)}</p><p class="guest-auth-links"><a href="/guest/account/forgot-password">Request a new link</a></p>`,
+          { title: "Reset password · ChatAstay" }
+        )
+      );
+    return;
+  }
+  res
+    .type("html")
+    .send(
+      guestAuthLayout(
+        `<h1>Password updated</h1><p class="badge ok">You can now sign in with your new password.</p><p class="guest-auth-links"><a href="/guest/account/login">Sign in</a></p>`,
+        { title: "Reset password · ChatAstay" }
+      )
+    );
 });
 
 guestRouter.post("/account/logout", (_req, res) => {
@@ -444,11 +800,8 @@ guestRouter.post("/account/logout", (_req, res) => {
 });
 
 guestRouter.get("/trips", async (req, res) => {
-  const account = await getTravellerAccount(req);
-  if (!account) {
-    redirectToTravellerLogin(res, "/guest/trips");
-    return;
-  }
+  const account = await requireVerifiedTraveller(req, res);
+  if (!account) return;
   const bookings = await prisma.booking.findMany({
     where: { OR: travellerBookingWhereClauses(account) },
     include: { hotel: true, property: true, roomType: true, guest: true, feedbacks: true },
@@ -477,19 +830,18 @@ guestRouter.get("/trips", async (req, res) => {
 <h1>My Trips</h1>
 <p class="muted">Signed in as ${escapeHtml(account.fullName || account.email)}.</p>
 <form method="post" action="/guest/account/logout" style="display:inline"><button type="submit">Logout</button></form>
+<div class="table-scroll">
 <table>
   <thead><tr><th>Reference</th><th>Hotel</th><th>Room</th><th>Stay</th><th>Status</th><th>Payment</th><th>Review</th></tr></thead>
   <tbody>${rows || '<tr><td colspan="7">No trips found yet. Future website bookings will appear here.</td></tr>'}</tbody>
-</table>`;
+</table>
+</div>`;
   res.type("html").send(guestLayout(content));
 });
 
 guestRouter.get("/review/:bookingId", async (req, res) => {
-  const account = await getTravellerAccount(req);
-  if (!account) {
-    redirectToTravellerLogin(res, `/guest/review/${encodeURIComponent(String(req.params.bookingId ?? ""))}`);
-    return;
-  }
+  const account = await requireVerifiedTraveller(req, res);
+  if (!account) return;
   const booking = await prisma.booking.findFirst({
     where: {
       id: String(req.params.bookingId ?? ""),
@@ -521,11 +873,8 @@ ${existing ? '<p class="badge ok">Review already received. You can update it bel
 });
 
 guestRouter.post("/review/:bookingId", async (req, res) => {
-  const account = await getTravellerAccount(req);
-  if (!account) {
-    redirectToTravellerLogin(res, `/guest/review/${encodeURIComponent(String(req.params.bookingId ?? ""))}`);
-    return;
-  }
+  const account = await requireVerifiedTraveller(req, res);
+  if (!account) return;
   const rating = Math.min(5, Math.max(1, parseIntSafe(req.body.rating, 5, 1, 5)));
   const comment = String(req.body.comment ?? "").trim().slice(0, 2000) || null;
   const booking = await prisma.booking.findFirst({

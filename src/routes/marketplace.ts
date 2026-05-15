@@ -106,6 +106,7 @@ function wantsJsonHealth(req: Request): boolean {
 const PAGE_BASE_STYLES = `
 :root{--brand:#064e46;--brand-2:#128c7e;--accent:#25d366;--mint:#dcfce7;--bg:#eef7f3;--ink:#0b1f1c;--muted:#64736f;--card:#fff;--border:#dce8e3;--shadow:0 18px 55px rgba(15,44,38,.10);--shadow-card:0 10px 30px rgba(15,44,38,.08)}
 *{box-sizing:border-box}
+html,body{overflow-x:clip;max-width:100%}
 body{font-family:Inter,Arial,sans-serif;margin:0;background:radial-gradient(circle at 12% -10%,rgba(37,211,102,.22),transparent 30%),radial-gradient(circle at 90% 8%,rgba(18,140,126,.16),transparent 28%),linear-gradient(180deg,#f9fffc 0%,var(--bg) 54%,#e8f2ee 100%);color:var(--ink);font-feature-settings:"cv02","cv03","cv04","cv11"}
 a{color:var(--brand)}
 .wrap{max-width:1160px;margin:0 auto;padding:22px}
@@ -332,6 +333,12 @@ body{font-family:"Inter","SF Pro Display","Segoe UI",-apple-system,BlinkMacSyste
 .pricing-reveal{opacity:0;transform:translateY(28px);transition:opacity .65s cubic-bezier(.22,1,.36,1),transform .65s cubic-bezier(.22,1,.36,1);will-change:opacity,transform}
 .pricing-reveal.is-visible{opacity:1;transform:translateY(0)}
 @media (max-width:560px){.nav .nav-link{padding:7px 11px;font-size:13.5px}.nav .nav-link-pricing{padding:7px 12px}}
+@media (max-width:640px){
+  .nav{flex-direction:column;align-items:stretch;gap:10px}
+  .nav .brand{font-size:20px}
+  .nav .links{justify-content:flex-start;gap:6px}
+  .nav .nav-pill,.nav .nav-link{font-size:12.5px;padding:7px 10px}
+}
 @media (prefers-reduced-motion:reduce){.pricing-reveal{opacity:1;transform:none;transition:none}}
 /* ===== Pricing polish menu: best-for badge, sizer, currency, trust strip, FAQ chevron, floating CTA ===== */
 .plan-card .plan-best-for{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--brand-2);background:linear-gradient(135deg,#dcfce7,#ecfff5);border:1px solid #c7f5d6;padding:5px 10px;border-radius:999px;margin:-2px 0 2px}
@@ -581,8 +588,8 @@ function renderShell(opts: {
       <div class="links">
         <a class="nav-link" href="/search">Search</a>
         <a class="nav-link nav-link-pricing" href="/pricing">Pricing</a>
-        <a class="nav-pill hotel" href="/admin/login">Hotel / Partner Extranet</a>
-        <a class="nav-pill traveller" href="/guest/account">Traveller Account</a>
+        <a class="nav-pill hotel" href="/admin/login">Hotel / Partner</a>
+        <a class="nav-pill traveller" href="/guest/account/login">Sign in</a>
       </div>
     </nav>
     ${opts.body}
@@ -1542,7 +1549,7 @@ function renderPathComparisonTable(): string {
       <thead>
         <tr>
           <th>Feature</th>
-          <th class="recommended-col">Full ChatStay Partner</th>
+          <th class="recommended-col">Full ChatAstay Partner</th>
           <th>Marketplace Connected</th>
           <th>Marketplace Basic</th>
         </tr>
@@ -1719,7 +1726,7 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
         <p class="section-header-note"><span aria-hidden="true">&#9733;</span> Best for hotels wanting full digital operations and automation.</p>
       </div>
       <div class="section-header-cta">
-        <a class="btn btn-whatsapp" href="/admin/onboard?plan=growth">Become a ChatStay Partner</a>
+        <a class="btn btn-whatsapp" href="/admin/onboard?plan=growth">Become a ChatAstay Partner</a>
         <a class="btn btn-ghost" href="/admin/onboard?plan=starter">Start Full Platform Setup</a>
       </div>
     </section>
@@ -1753,7 +1760,7 @@ marketplaceRouter.get("/pricing", (_req: Request, res: Response) => {
 
     <section class="card compare-card pricing-reveal">
       <h2>Compare every Partner plan</h2>
-      <p class="lead">A detailed feature matrix for the Full ChatStay Partner plans above. Scroll horizontally on small screens.</p>
+      <p class="lead">A detailed feature matrix for the Full ChatAstay Partner plans above. Scroll horizontally on small screens.</p>
       ${renderPricingComparisonTable()}
     </section>
 

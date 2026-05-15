@@ -832,12 +832,22 @@ model TravellerAccount {
   passwordHash String
   fullName     String?
   phoneE164    String?
+  nationality  String?
+  preferredLanguage String?
+  emailVerifiedAt DateTime?
+  emailVerificationTokenHash String?
+  emailVerificationExpiresAt DateTime?
+  passwordResetTokenHash String?
+  passwordResetExpiresAt DateTime?
+  passwordResetRequestedAt DateTime?
   isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   @@index([guestId])
+  @@index([emailVerificationTokenHash])
+  @@index([passwordResetTokenHash])
 }
 
 /// Targeted WhatsApp campaign (filters JSON + aggregates + per-guest outcomes).

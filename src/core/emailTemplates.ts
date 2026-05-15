@@ -3,21 +3,76 @@ type PasswordResetEmailInput = {
   expiresMinutes: number;
 };
 
+type TravellerVerificationEmailInput = {
+  verifyLink: string;
+  fullName?: string | null;
+  expiresHours: number;
+};
+
+export function buildTravellerVerificationEmail(input: TravellerVerificationEmailInput): { html: string; text: string } {
+  const greeting = input.fullName ? `Hello ${escapeHtml(input.fullName)},` : "Hello,";
+  const html = [
+    `<p>${greeting}</p>`,
+    "<p>Thanks for creating a ChatAstay traveller account. Please verify your email to access My Trips and booking history.</p>",
+    `<p><a href="${escapeHtml(input.verifyLink)}" style="display:inline-block;background:#128c7e;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600">Verify email</a></p>`,
+    `<p>If the button does not work, copy this link:<br /><a href="${escapeHtml(input.verifyLink)}">${escapeHtml(input.verifyLink)}</a></p>`,
+    `<p>This link expires in ${input.expiresHours} hours.</p>`,
+    "<p>If you did not create this account, you can ignore this email.</p>",
+    "<p>Regards,<br />ChatAstay</p>"
+  ].join("");
+  const text = [
+    greeting.replace(/<[^>]+>/g, ""),
+    "",
+    "Verify your ChatAstay traveller account:",
+    input.verifyLink,
+    "",
+    `This link expires in ${input.expiresHours} hours.`,
+    "",
+    "Regards,",
+    "ChatAstay"
+  ].join("\n");
+  return { html, text };
+}
+
+export function buildTravellerPasswordResetEmail(input: PasswordResetEmailInput): { html: string; text: string } {
+  const html = [
+    "<p>Hello,</p>",
+    "<p>We received a request to reset your ChatAstay traveller account password.</p>",
+    `<p><a href="${escapeHtml(input.resetLink)}" style="display:inline-block;background:#128c7e;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600">Reset password</a></p>`,
+    `<p>If the button does not work, use this link:<br /><a href="${escapeHtml(input.resetLink)}">${escapeHtml(input.resetLink)}</a></p>`,
+    `<p>This link expires in ${input.expiresMinutes} minutes and can only be used once.</p>`,
+    "<p>If you did not request this, you can safely ignore this email.</p>",
+    "<p>Regards,<br />ChatAstay</p>"
+  ].join("");
+  const text = [
+    "Hello,",
+    "",
+    "Reset your ChatAstay traveller password:",
+    input.resetLink,
+    "",
+    `This link expires in ${input.expiresMinutes} minutes.`,
+    "",
+    "Regards,",
+    "ChatAstay"
+  ].join("\n");
+  return { html, text };
+}
+
 export function buildPasswordResetEmail(input: PasswordResetEmailInput): { html: string; text: string } {
   const html = [
     "<p>Hello,</p>",
-    "<p>We received a request to reset your ChatStay account password.</p>",
+    "<p>We received a request to reset your ChatAstay hotel account password.</p>",
     `<p><a href="${escapeHtml(input.resetLink)}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600">Reset Password</a></p>`,
     `<p>If the button does not work, use this secure link:<br /><a href="${escapeHtml(input.resetLink)}">${escapeHtml(input.resetLink)}</a></p>`,
     `<p>This link expires in ${input.expiresMinutes} minutes and can only be used once.</p>`,
     "<p>If you did not request a password reset, you can safely ignore this email.</p>",
-    "<p>Regards,<br />ChatStay Team</p>"
+    "<p>Regards,<br />ChatAstay Team</p>"
   ].join("");
 
   const text = [
     "Hello,",
     "",
-    "We received a request to reset your ChatStay account password.",
+    "We received a request to reset your ChatAstay hotel account password.",
     "",
     `Reset your password: ${input.resetLink}`,
     "",
@@ -25,7 +80,7 @@ export function buildPasswordResetEmail(input: PasswordResetEmailInput): { html:
     "If you did not request this change, you can safely ignore this email.",
     "",
     "Regards,",
-    "ChatStay Team"
+    "ChatAstay Team"
   ].join("\n");
 
   return { html, text };

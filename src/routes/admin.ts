@@ -758,7 +758,7 @@ async function sendPasswordResetEmail(to: string, resetLink: string): Promise<bo
     const message = buildPasswordResetEmail({ resetLink, expiresMinutes: 15 });
     await sendEmail({
       to,
-      subject: "Reset your ChatStay password",
+      subject: "Reset your ChatAstay password",
       html: message.html,
       text: message.text
     });

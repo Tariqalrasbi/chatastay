@@ -7,7 +7,19 @@ type SendEmailInput = {
   text?: string;
 };
 
+export function isEmailConfigured(): boolean {
+  const provider = String(process.env.EMAIL_PROVIDER ?? "").trim().toLowerCase();
+  if (provider === "resend" && process.env.EMAIL_API_KEY) return true;
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  return Boolean(host && user && pass);
+}
+
 export async function sendEmail(input: SendEmailInput): Promise<void> {
+  if (!isEmailConfigured()) {
+    throw new Error("Email provider not configured. Set EMAIL_PROVIDER/EMAIL_API_KEY (Resend) or SMTP_* env vars.");
+  }
   const provider = String(process.env.EMAIL_PROVIDER ?? "").trim().toLowerCase();
   const from = process.env.EMAIL_FROM || process.env.MAIL_FROM || process.env.ADMIN_EMAIL || "noreply@chatastay.com";
   if (provider === "resend" && process.env.EMAIL_API_KEY) {
@@ -32,12 +44,9 @@ export async function sendEmail(input: SendEmailInput): Promise<void> {
     return;
   }
 
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  if (!host || !user || !pass) {
-    throw new Error("Email provider not configured. Set EMAIL_PROVIDER/EMAIL_API_KEY (Resend) or SMTP_* env vars.");
-  }
+  const host = process.env.SMTP_HOST!;
+  const user = process.env.SMTP_USER!;
+  const pass = process.env.SMTP_PASS!;
   const transporter = nodemailer.createTransport({
     host,
     port: Number(process.env.SMTP_PORT) || 587,
