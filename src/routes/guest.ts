@@ -17,13 +17,15 @@ import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSessio
 import { hashPassword, verifyPassword } from "../core/authSecurity";
 import {
   consumeTravellerPasswordReset,
-  issueTravellerVerificationEmail,
   isTravellerEmailVerified,
+  isTravellerVerificationResendRateLimited,
+  issueTravellerVerificationEmail,
   requestTravellerPasswordReset,
   travellerPasswordResetTokenValid,
   travellerRequireEmailVerification,
   verifyTravellerEmailToken
 } from "../core/travellerAuth";
+import { isEmailConfigured } from "../core/email";
 import { parseGuestPhone, parseGuestPhoneFromFormFields, toWhatsAppDigits } from "../core/phoneNumber";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
 
@@ -151,8 +153,14 @@ function redirectToTravellerLogin(res: { redirect(url: string): void }, next: st
   res.redirect(`/guest/account/login?next=${encodeURIComponent(next)}`);
 }
 
-function redirectToVerifyPending(res: { redirect(url: string): void }, email: string): void {
-  res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(email)}`);
+function redirectToVerifyPending(
+  res: { redirect(url: string): void },
+  email: string,
+  opts?: { sent?: boolean }
+): void {
+  const params = new URLSearchParams({ email });
+  if (opts?.sent) params.set("sent", "1");
+  res.redirect(`/guest/account/verify-pending?${params.toString()}`);
 }
 
 async function requireVerifiedTraveller(
@@ -182,10 +190,13 @@ const PHONE_COUNTRY_OPTIONS: Array<{ iso: string; label: string; code: string }>
 ];
 
 function phoneCountrySelectHtml(selectedIso = "OM"): string {
-  return PHONE_COUNTRY_OPTIONS.map(
-    (c) =>
-      `<option value="${escapeHtml(c.iso)}" data-code="${escapeHtml(c.code)}"${c.iso === selectedIso ? " selected" : ""}>${escapeHtml(c.label)}</option>`
-  ).join("");
+  return [...PHONE_COUNTRY_OPTIONS]
+    .sort((a, b) => a.label.localeCompare(b.label, "en", { sensitivity: "base" }))
+    .map(
+      (c) =>
+        `<option value="${escapeHtml(c.iso)}" data-code="${escapeHtml(c.code)}"${c.iso === selectedIso ? " selected" : ""}>${escapeHtml(c.label)}</option>`
+    )
+    .join("");
 }
 
 const NATIONALITY_OPTIONS = [
@@ -203,9 +214,13 @@ const NATIONALITY_OPTIONS = [
 ];
 
 function nationalitySelectHtml(selected = ""): string {
-  const opts = NATIONALITY_OPTIONS.map(
-    (n) => `<option value="${escapeHtml(n)}"${n === selected ? " selected" : ""}>${escapeHtml(n)}</option>`
-  ).join("");
+  const sorted = [...NATIONALITY_OPTIONS]
+    .filter((n) => n !== "Other")
+    .sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
+  if (NATIONALITY_OPTIONS.includes("Other")) sorted.push("Other");
+  const opts = sorted
+    .map((n) => `<option value="${escapeHtml(n)}"${n === selected ? " selected" : ""}>${escapeHtml(n)}</option>`)
+    .join("");
   return `<option value="">— Optional —</option>${opts}`;
 }
 
@@ -582,7 +597,7 @@ guestRouter.post("/account/register", async (req, res) => {
     setTravellerCookie(res, account.id);
     if (needsVerify) {
       await issueTravellerVerificationEmail(account.id);
-      redirectToVerifyPending(res, email);
+      redirectToVerifyPending(res, email, { sent: true });
       return;
     }
     res.redirect("/guest/trips?created=1");
@@ -644,19 +659,40 @@ guestRouter.post("/account/login", async (req, res) => {
   res.redirect(next.startsWith("/guest/") ? next : "/guest/trips");
 });
 
+function verificationPendingNoticeHtml(result?: { sent: boolean; verifyLink?: string; reason?: string }): string {
+  if (!result) return "";
+  if (result.reason === "email_not_configured" && result.verifyLink) {
+    return `<p class="badge pending">Email provider not configured. Use this link to verify:<br /><a href="${escapeHtml(result.verifyLink)}">${escapeHtml(result.verifyLink)}</a></p>`;
+  }
+  if (result.sent) return `<p class="badge ok">Verification email sent.</p>`;
+  if (result.reason === "send_failed") {
+    return `<p class="badge alert">Could not send email. Try again later.</p>`;
+  }
+  return "";
+}
+
 guestRouter.get("/account/verify-pending", async (req, res) => {
   const email = typeof req.query.email === "string" ? req.query.email : "";
   const account = await getTravellerAccount(req);
   const displayEmail = account?.email ?? email;
-  const devHint =
-    account && travellerRequireEmailVerification() && !isTravellerEmailVerified(account)
-      ? `<form method="post" action="/guest/account/resend-verification" style="margin-top:12px"><button type="submit">Resend verification email</button></form>`
+  const needsVerify =
+    account && travellerRequireEmailVerification() && !isTravellerEmailVerified(account);
+  const providerHint =
+    needsVerify && !isEmailConfigured()
+      ? `<p class="badge pending">Email provider not configured on this server. Use resend below for a verification link, or configure EMAIL_PROVIDER / SMTP.</p>`
       : "";
+  const devHint = needsVerify
+    ? `<form method="post" action="/guest/account/resend-verification" style="margin-top:12px"><button type="submit">Resend verification email</button></form>`
+    : "";
+  const sentNotice =
+    req.query.sent === "1" ? `<p class="badge ok">If email is configured, we sent a verification link.</p>` : "";
   const content = `
 <a class="guest-auth-logo" href="/">ChatAstay</a>
 <h1>Verify your email</h1>
-<p class="auth-lead">We sent a verification link${displayEmail ? ` to <strong>${escapeHtml(displayEmail)}</strong>` : ""}. Open it to access My Trips.</p>
+<p class="auth-lead">Please verify your email before continuing.${displayEmail ? ` We sent a link to <strong>${escapeHtml(displayEmail)}</strong>.` : ""}</p>
 <p class="muted">Check your inbox and spam folder. Links expire after 24 hours.</p>
+${sentNotice}
+${providerHint}
 ${devHint}
 <div class="guest-auth-links"><a href="/guest/account/login">Back to sign in</a></div>`;
   res.type("html").send(guestAuthLayout(content, { title: "Verify email · ChatAstay" }));
@@ -672,13 +708,20 @@ guestRouter.post("/account/resend-verification", async (req, res) => {
     res.redirect("/guest/trips");
     return;
   }
+  if (isTravellerVerificationResendRateLimited(req, account.id)) {
+    res
+      .type("html")
+      .status(429)
+      .send(
+        guestAuthLayout(
+          `<h1>Verify your email</h1><p class="badge alert">Too many requests. Please wait a few minutes and try again.</p><p class="guest-auth-links"><a href="/guest/account/verify-pending?email=${encodeURIComponent(account.email)}">Back</a></p>`,
+          { title: "Verify email · ChatAstay" }
+        )
+      );
+    return;
+  }
   const result = await issueTravellerVerificationEmail(account.id);
-  const extra =
-    result.verifyLink && !result.sent
-      ? `<p class="badge pending">Email is not configured on this server. Use this link to verify:<br /><a href="${escapeHtml(result.verifyLink)}">${escapeHtml(result.verifyLink)}</a></p>`
-      : result.sent
-        ? `<p class="badge ok">Verification email sent.</p>`
-        : `<p class="badge alert">Could not send email. Try again later.</p>`;
+  const extra = verificationPendingNoticeHtml(result);
   res
     .type("html")
     .send(
@@ -693,13 +736,20 @@ guestRouter.get("/account/verify-email", async (req, res) => {
   const token = String(req.query.token ?? "").trim();
   const result = await verifyTravellerEmailToken(token);
   if (!result.ok) {
+    const message =
+      result.reason === "expired"
+        ? "This verification link has expired."
+        : result.reason === "missing_token"
+          ? "No verification token was provided."
+          : "This verification link is invalid.";
+    const title = result.reason === "expired" ? "Link expired" : "Verification failed";
     res
       .type("html")
       .status(400)
       .send(
         guestAuthLayout(
-          `<h1>Verification failed</h1><p class="badge alert">This link is invalid or has expired.</p><p class="guest-auth-links"><a href="/guest/account/verify-pending">Request a new link</a></p>`,
-          { title: "Verify email · ChatAstay" }
+          `<h1>${escapeHtml(title)}</h1><p class="badge alert">${escapeHtml(message)}</p><p class="guest-auth-links"><a href="/guest/account/verify-pending">Request a new link</a></p>`,
+          { title: `${title} · ChatAstay` }
         )
       );
     return;

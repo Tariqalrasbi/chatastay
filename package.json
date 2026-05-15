@@ -31,7 +31,8 @@
     "backfill:guest-phones:dry": "node scripts/backfill-guest-phones.cjs --dry-run",
     "report:duplicate-phones": "node scripts/report-duplicate-guest-phones.cjs",
     "test": "npm run test:critical",
-    "test:critical": "tsx scripts/critical-flows.test.ts"
+    "test:critical": "tsx scripts/critical-flows.test.ts",
+    "test:traveller-verification": "tsx scripts/traveller-verification.test.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

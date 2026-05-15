@@ -1,11 +1,18 @@
 import type { Request } from "express";
 import { prisma } from "../db";
-import { generateSecureToken, hashPassword, hashToken } from "./authSecurity";
+import { generateSecureToken, hashPassword } from "./authSecurity";
+import {
+  accountKindRequiresEmailVerification,
+  hashVerificationToken,
+  isAccountEmailVerified,
+  isVerificationResendRateLimited,
+  issueAccountVerificationEmail,
+  verifyAccountEmailToken
+} from "./accountEmailVerification";
 import { sendEmail, isEmailConfigured } from "./email";
-import { buildTravellerPasswordResetEmail, buildTravellerVerificationEmail } from "./emailTemplates";
+import { buildTravellerPasswordResetEmail } from "./emailTemplates";
 
 const passwordResetTtlMs = 15 * 60 * 1000;
-const verificationTtlMs = 24 * 60 * 60 * 1000;
 const resetRequestRateLimitWindowMs = 15 * 60 * 1000;
 const resetRequestRateLimitMax = 8;
 const resetRequestRateLimit = new Map<string, number[]>();
@@ -16,15 +23,32 @@ export function getTravellerAppBaseUrl(): string {
   return (process.env.APP_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 }
 
-/** When false, new signups are auto-verified (e.g. local dev without email). */
 export function travellerRequireEmailVerification(): boolean {
-  if (process.env.TRAVELLER_REQUIRE_EMAIL_VERIFICATION === "false") return false;
-  if (!isEmailConfigured() && process.env.NODE_ENV !== "production") return false;
-  return true;
+  return accountKindRequiresEmailVerification("traveller");
+}
+
+export function isTravellerEmailVerified(account: { emailVerifiedAt: Date | null }): boolean {
+  return isAccountEmailVerified(account);
+}
+
+export function isTravellerVerificationResendRateLimited(req: Request, accountId: string): boolean {
+  return isVerificationResendRateLimited(req, `traveller:${accountId}`);
+}
+
+export async function issueTravellerVerificationEmail(
+  accountId: string
+): Promise<{ sent: boolean; verifyLink?: string; reason?: string }> {
+  return issueAccountVerificationEmail("traveller", accountId);
+}
+
+export async function verifyTravellerEmailToken(rawToken: string): Promise<{ ok: boolean; reason?: string }> {
+  const result = await verifyAccountEmailToken("traveller", rawToken);
+  if (result.ok) return { ok: true };
+  return { ok: false, reason: result.reason };
 }
 
 function hashAuthToken(token: string): string {
-  return hashToken(token);
+  return hashVerificationToken(token);
 }
 
 function resetRateLimitKey(req: Request, email: string): string {
@@ -39,80 +63,6 @@ function isResetRateLimited(req: Request, email: string): boolean {
   hits.push(now);
   resetRequestRateLimit.set(key, hits);
   return hits.length > resetRequestRateLimitMax;
-}
-
-export function isTravellerEmailVerified(account: { emailVerifiedAt: Date | null }): boolean {
-  return Boolean(account.emailVerifiedAt);
-}
-
-export async function issueTravellerVerificationEmail(
-  accountId: string
-): Promise<{ sent: boolean; verifyLink?: string; reason?: string }> {
-  const account = await prisma.travellerAccount.findUnique({
-    where: { id: accountId },
-    select: { id: true, email: true, fullName: true, isActive: true, emailVerifiedAt: true }
-  });
-  if (!account?.isActive || !account.email || account.emailVerifiedAt) {
-    return { sent: false, reason: "not_eligible" };
-  }
-
-  const token = generateSecureToken();
-  const tokenHash = hashAuthToken(token);
-  const expiresAt = new Date(Date.now() + verificationTtlMs);
-  await prisma.travellerAccount.update({
-    where: { id: account.id },
-    data: {
-      emailVerificationTokenHash: tokenHash,
-      emailVerificationExpiresAt: expiresAt
-    }
-  });
-
-  const verifyLink = `${getTravellerAppBaseUrl()}/guest/account/verify-email?token=${encodeURIComponent(token)}`;
-  if (!isEmailConfigured()) {
-    console.info("[TravellerAuth] Email not configured — verification link:", verifyLink);
-    return { sent: false, verifyLink, reason: "email_not_configured" };
-  }
-
-  try {
-    const message = buildTravellerVerificationEmail({
-      verifyLink,
-      fullName: account.fullName,
-      expiresHours: 24
-    });
-    await sendEmail({
-      to: account.email,
-      subject: "Verify your ChatAstay traveller account",
-      html: message.html,
-      text: message.text
-    });
-    return { sent: true };
-  } catch (err) {
-    console.error("[TravellerAuth] Verification email failed:", err instanceof Error ? err.message : err);
-    return { sent: false, verifyLink, reason: "send_failed" };
-  }
-}
-
-export async function verifyTravellerEmailToken(rawToken: string): Promise<{ ok: boolean; reason?: string }> {
-  const token = rawToken.trim();
-  if (!token) return { ok: false, reason: "missing_token" };
-  const tokenHash = hashAuthToken(token);
-  const account = await prisma.travellerAccount.findFirst({
-    where: { emailVerificationTokenHash: tokenHash },
-    select: { id: true, isActive: true, emailVerificationExpiresAt: true }
-  });
-  if (!account?.isActive) return { ok: false, reason: "invalid" };
-  if (!account.emailVerificationExpiresAt || account.emailVerificationExpiresAt.getTime() <= Date.now()) {
-    return { ok: false, reason: "expired" };
-  }
-  await prisma.travellerAccount.update({
-    where: { id: account.id },
-    data: {
-      emailVerifiedAt: new Date(),
-      emailVerificationTokenHash: null,
-      emailVerificationExpiresAt: null
-    }
-  });
-  return { ok: true };
 }
 
 export async function requestTravellerPasswordReset(email: string, req: Request): Promise<void> {
