@@ -1,3 +1,4 @@
+import { toWhatsAppDigits } from "../core/phoneNumber";
 import { logWhatsAppMessage } from "./messageLogger";
 
 /** When true, WhatsApp failures throw (e.g. tests). Default: log and return so the HTTP server never dies on Meta/API errors. */
@@ -250,7 +251,7 @@ export async function sendWhatsAppText({ to, body, phoneNumberId, conversationId
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to,
+      to: toWhatsAppDigits(to),
       type: "text",
       text: { body }
     })
@@ -297,7 +298,7 @@ export async function trySendWhatsAppText({
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to,
+      to: toWhatsAppDigits(to),
       type: "text",
       text: { body }
     })
@@ -376,7 +377,7 @@ export async function trySendWhatsAppTemplate(
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to: params.to.replace(/\D/g, ""),
+      to: toWhatsAppDigits(params.to),
       type: "template",
       template: {
         name: templateName,

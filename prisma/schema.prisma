@@ -782,6 +782,12 @@ model Guest {
   hotel                       Hotel                        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
   fullName                    String?
   phoneE164                   String
+  /// Dial code with + (e.g. +968). Parsed from phoneE164; optional until backfill.
+  phoneCountryCode            String?
+  /// National number without country code (e.g. 93271271).
+  phoneNationalNumber         String?
+  /// Last raw input from staff/forms for manual correction audit.
+  phoneRaw                    String?
   email                       String?
   /// ISO nationality / country of passport (optional; front desk & reporting).
   nationality                 String?
@@ -813,6 +819,7 @@ model Guest {
   travellerAccounts           TravellerAccount[]
 
   @@unique([hotelId, phoneE164])
+  @@index([hotelId, phoneCountryCode])
 }
 
 /// Public traveller account for website guests. Kept separate from HotelUser so guest login

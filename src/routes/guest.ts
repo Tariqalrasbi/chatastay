@@ -15,6 +15,7 @@ import { formatHotelOfferDetails, readActiveHotelOffers } from "../core/hotelOff
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { markCalendarSessionUsed, resolveCalendarSession, saveConversationSession, upsertBookingDraft } from "../core/sessionStore";
 import { hashPassword, verifyPassword } from "../core/authSecurity";
+import { parseGuestPhone, toWhatsAppDigits } from "../core/phoneNumber";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
 
 export const guestRouter = Router();
@@ -28,8 +29,11 @@ function escapeHtml(input: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function normalizePhone(input: string): string {
-  return input.replace(/\D/g, "");
+function normalizePhone(input: string, defaultCountryIso = "OM"): string {
+  const parsed = parseGuestPhone(input, defaultCountryIso);
+  if (parsed.phoneE164) return parsed.phoneE164;
+  const digits = toWhatsAppDigits(input);
+  return digits ? `+${digits}` : "";
 }
 
 function formatDate(input: Date): string {

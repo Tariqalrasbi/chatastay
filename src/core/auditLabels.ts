@@ -453,6 +453,12 @@ export function describeAuditAction(
         category: "Front Desk",
         accent: "teal"
       };
+    case "GUEST_PHONE_UPDATED":
+      return {
+        icon: "📱",
+        label: "Guest phone updated",
+        tone: "neutral" as const
+      };
     case "GUEST_SEGMENTATION_UPDATED":
       return {
         icon: "🏷️",

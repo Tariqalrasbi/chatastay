@@ -214,6 +214,8 @@ import {
   sendMarketingCampaignWhatsApp,
   verifyCampaignWhatsAppReady
 } from "../core/campaignSend";
+import { guestPhoneData, parseGuestPhoneFromFormFields, toWhatsAppDigits } from "../core/phoneNumber";
+import { upsertGuestWithPhone } from "../core/guestPhoneService";
 import { renderCampaignComposePage } from "./campaignCenterHtml";
 import { loadManagementKpis, parseKpiPreset } from "../core/managementKpiDashboard";
 import { runHotelDailyDigest } from "../core/hotelDailyDigest";
@@ -3095,25 +3097,15 @@ function buildTemplateMessage(template: string, values: Record<string, string | 
 }
 
 function normalizePhoneForWhatsApp(input: string): string {
-  return input.replace(/\D/g, "");
-}
-
-function normalizeCountryCodeForWhatsApp(input: string, fallback = "+968"): string {
-  const raw = String(input ?? "").trim();
-  const digits = raw.replace(/\D/g, "");
-  if (digits) return digits;
-  return fallback.replace(/\D/g, "");
+  return toWhatsAppDigits(input);
 }
 
 function combineWhatsAppCountryAndLocal(countryCodeRaw: string | undefined, phoneRaw: string): string {
-  const raw = String(phoneRaw ?? "").trim();
-  const direct = normalizePhoneForWhatsApp(raw);
-  if (!direct) return "";
-  if (raw.startsWith("+") || raw.startsWith("00")) return direct;
-
-  const countryCode = normalizeCountryCodeForWhatsApp(countryCodeRaw ?? "+968");
-  if (direct.startsWith(countryCode) && direct.length >= countryCode.length + 6) return direct;
-  return `${countryCode}${direct}`;
+  return parseGuestPhoneFromFormFields({
+    countryCodeRaw,
+    phoneRaw,
+    defaultCountryIso: "OM"
+  }).phoneE164;
 }
 
 function renderWhatsAppPhoneFields(opts: {
@@ -3710,12 +3702,12 @@ function buildBookingId(): string {
   return `WS-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
 }
 
-function normalizeGuestPhoneE164(input: string): string {
-  const d = input.replace(/\D/g, "");
-  if (!d) return "";
-  if (d.startsWith("968")) return `+${d}`;
-  if (d.length === 8) return `+968${d}`;
-  return `+${d}`;
+function normalizeGuestPhoneE164(input: string, defaultCountryIso = "OM"): string {
+  return parseGuestPhoneFromFormFields({
+    phoneRaw: input,
+    countryCodeRaw: undefined,
+    defaultCountryIso
+  }).phoneE164;
 }
 
 function nightsBetweenCheckInOut(checkIn: Date, checkOut: Date): number {
@@ -11051,7 +11043,7 @@ adminRouter.get("/front-desk/check-in/room-options", requirePermission("BOOKINGS
 adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE"), idCardUpload.single("idCard"), async (req, res) => {
   const hotel = await prisma.hotel.findFirst({
     where: { slug: activeHotelSlug() },
-    select: { id: true, displayName: true, currency: true }
+    select: { id: true, displayName: true, currency: true, country: true }
   });
   if (!hotel) {
     res.redirect("/admin/room-board");
@@ -11120,11 +11112,17 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
     await fail("Guest full name is required.");
     return;
   }
-  const phoneE164 = normalizeGuestPhoneE164(combineWhatsAppCountryAndLocal(guestPhoneCountryCode, guestPhoneRaw));
-  if (!phoneE164 || phoneE164.length < 8) {
+  const phoneParsed = parseGuestPhoneFromFormFields({
+    countryCodeRaw: guestPhoneCountryCode,
+    phoneRaw: guestPhoneRaw,
+    defaultCountryIso: hotel.country
+  });
+  if (!phoneParsed.phoneE164 || phoneParsed.phoneE164Digits.length < 10) {
     await fail("Enter a valid phone number.");
     return;
   }
+  const phoneFields = guestPhoneData(phoneParsed);
+  let guestPhoneE164 = phoneFields.phoneE164;
   if (checkOut.getTime() <= checkIn.getTime()) {
     await fail("Check-out must be after check-in.");
     return;
@@ -11218,21 +11216,26 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
         rooms: 1
       });
 
-      const guest = await tx.guest.upsert({
-        where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164 } },
-        create: {
+      const guest = await upsertGuestWithPhone(
+        {
           hotelId: hotel.id,
-          phoneE164,
-          fullName: guestFullName,
-          email: guestEmail || null,
-          ...(nationality ? { nationality } : {})
+          phoneRaw: guestPhoneRaw,
+          defaultCountryIso: hotel.country,
+          create: {
+            hotelId: hotel.id,
+            fullName: guestFullName,
+            email: guestEmail || null,
+            ...(nationality ? { nationality } : {})
+          },
+          update: {
+            fullName: guestFullName,
+            ...(guestEmail ? { email: guestEmail } : {}),
+            ...(nationality ? { nationality } : {})
+          }
         },
-        update: {
-          fullName: guestFullName,
-          ...(guestEmail ? { email: guestEmail } : {}),
-          ...(nationality ? { nationality } : {})
-        }
-      });
+        tx
+      );
+      guestPhoneE164 = guest.phoneE164;
 
       const referenceCode = await allocateBookingReferenceCode(tx, {
         hotelId: hotel.id,
@@ -11346,7 +11349,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
       bookingId,
       metadata: {
         roomUnitId: unit.id,
-        guestPhone: phoneE164,
+        guestPhone: guestPhoneE164,
         checkIn: dateKey,
         checkOut: formatDateForInput(checkOut),
         nights,
@@ -11371,7 +11374,7 @@ adminRouter.post("/front-desk/check-in", requirePermission("BOOKINGS", "CREATE")
       metadata: {
         date: dateKey,
         fullName: guestFullName,
-        phone: phoneE164,
+        phone: guestPhoneE164,
         email: guestEmail,
         nationality: nationality || undefined,
         idNumber: idNumber || undefined,
@@ -17147,7 +17150,7 @@ adminRouter.get("/guests", requirePermission("BOOKINGS", "VIEW"), async (req, re
 adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async (req, res) => {
   const hotel = await prisma.hotel.findUnique({
     where: { slug: activeHotelSlug() },
-    select: { id: true, displayName: true, currency: true }
+    select: { id: true, displayName: true, currency: true, country: true }
   });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Guest</h2><p>No hotel data found.</p>", true));
@@ -17561,8 +17564,17 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
   const followupErrorNotice = followupErrorRaw
     ? `<p class="badge alert">${escapeHtml(decodeURIComponent(followupErrorRaw).slice(0, 240))}</p>`
     : "";
+  const phoneErrorRaw = typeof req.query.phoneError === "string" ? req.query.phoneError : "";
+  const phoneErrorNotice =
+    phoneErrorRaw === "invalid"
+      ? '<p class="badge alert">Enter a valid phone number before saving.</p>'
+      : phoneErrorRaw === "duplicate"
+        ? '<p class="badge alert">Another guest already uses this WhatsApp number at this property.</p>'
+        : "";
   const savedNotice =
-    savedRaw === "1"
+    savedRaw === "phone"
+      ? '<p class="badge ok">Phone number updated.</p>'
+      : savedRaw === "1"
       ? '<p class="badge ok">Profile saved.</p>'
       : savedRaw === "followup"
         ? '<p class="badge ok">Follow-up removed from queue.</p>'
@@ -17650,6 +17662,7 @@ adminRouter.get("/guests/:guestId", requirePermission("BOOKINGS", "VIEW"), async
 <h2>Guest CRM</h2>
 <p class="muted">${escapeHtml(hotel.displayName)} — Guest profile, stay history, WhatsApp, feedback, and F&amp;B context (property-scoped).</p>
 ${savedNotice}
+${phoneErrorNotice}
 ${followupErrorNotice}
 <div class="actions">
   <a class="btn-link" href="/admin/guests">All guests</a>
@@ -17672,11 +17685,25 @@ ${guestHubSectionHtml}
   <table>
     <tbody>
       <tr><th>Name</th><td>${escapeHtml(g.fullName ?? "—")}</td></tr>
-      <tr><th>Phone</th><td>${escapeHtml(g.phoneE164)}</td></tr>
+      <tr><th>Full WhatsApp</th><td><code>${escapeHtml(g.phoneE164)}</code></td></tr>
+      <tr><th>Country code</th><td>${escapeHtml(g.phoneCountryCode ?? "—")}</td></tr>
+      <tr><th>National number</th><td>${escapeHtml(g.phoneNationalNumber ?? "—")}</td></tr>
       <tr><th>Email</th><td>${escapeHtml(g.email ?? "—")}</td></tr>
       <tr><th>Nationality</th><td>${escapeHtml(g.nationality ?? "—")}</td></tr>
     </tbody>
   </table>
+  <form method="post" action="/admin/guests/${encodeURIComponent(g.id)}/phone" style="margin-top:14px;display:grid;gap:10px;max-width:520px">
+    <p class="muted" style="margin:0;font-size:13px">Correct country code or national number if WhatsApp delivery fails.</p>
+    ${renderWhatsAppPhoneFields({
+      phoneName: "guestPhone",
+      countryCodeName: "guestPhoneCountryCode",
+      customCountryCodeName: "guestPhoneCountryCodeCustom",
+      label: "WhatsApp number",
+      phoneInputStyle: "width:100%;padding:8px;border:1px solid var(--border);border-radius:8px",
+      groupStyle: "display:grid;grid-template-columns:100px 88px 1fr;gap:8px;align-items:end"
+    })}
+    <button type="submit" style="padding:8px 14px;border:0;border-radius:8px;background:#128c7e;color:#fff;font-weight:600;width:fit-content">Update phone</button>
+  </form>
 </section>
 
 <section style="margin:16px 0; padding:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; max-width:920px">

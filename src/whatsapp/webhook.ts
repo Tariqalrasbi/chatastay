@@ -306,6 +306,7 @@ import { Router } from "express";
 import { extractSingleDates, parseGuestMessage } from "../core/parse";
 import { ChannelProvider, ConversationState, MessageDirection, PropertyStatus } from "@prisma/client";
 import { prisma } from "../db";
+import { upsertGuestWithPhone, phoneSessionKeyPart } from "../core/guestPhoneService";
 import {
   findAvailableRoomType as findAvailableRoomTypeShared,
   getAvailableCheckInDates as getAvailableCheckInDatesShared,
@@ -373,12 +374,8 @@ const hotelContextCache = new Map<
   }
 >();
 
-function normalizePhone(input: string): string {
-  return input.replace(/\D/g, "");
-}
-
 function sessionKey(hotelId: string, from: string): string {
-  return `${hotelId}:${normalizePhone(from)}`;
+  return `${hotelId}:${phoneSessionKeyPart(from)}`;
 }
 
 function normalizeInput(text: string): string {
@@ -1075,13 +1072,13 @@ async function getHotelRuntimeContext(hotelId: string): Promise<{
   return next;
 }
 
-async function resolveHotelContext(phoneNumberId?: string): Promise<{ id: string; displayName: string; currency: string; outboundPhoneNumberId?: string }> {
+async function resolveHotelContext(phoneNumberId?: string): Promise<{ id: string; displayName: string; currency: string; country: string; outboundPhoneNumberId?: string }> {
   // Mirror of resolveHotel() in conversationController: only ACTIVE hotels are eligible for inbound
   // routing. Suspended hotels are dropped here as well so cron-driven webhook re-checks (status,
   // template feedback, etc.) don't accidentally write into a tenant the platform owner has archived.
   const hotels = await prisma.hotel.findMany({
     where: { isActive: true },
-    select: { id: true, displayName: true, currency: true, slug: true },
+    select: { id: true, displayName: true, currency: true, country: true, slug: true },
     orderBy: { createdAt: "asc" }
   });
   if (!hotels.length) {
@@ -1091,7 +1088,7 @@ async function resolveHotelContext(phoneNumberId?: string): Promise<{ id: string
     for (const hotel of hotels) {
       const config = loadPartnerSetupConfig(hotel.id);
       if (config.whatsappPhoneNumberId && config.whatsappPhoneNumberId === phoneNumberId) {
-        return { id: hotel.id, displayName: hotel.displayName, currency: hotel.currency, outboundPhoneNumberId: phoneNumberId };
+        return { id: hotel.id, displayName: hotel.displayName, currency: hotel.currency, country: hotel.country, outboundPhoneNumberId: phoneNumberId };
       }
     }
   }
@@ -1101,6 +1098,7 @@ async function resolveHotelContext(phoneNumberId?: string): Promise<{ id: string
     id: fallback.id,
     displayName: fallback.displayName,
     currency: fallback.currency,
+    country: fallback.country,
     outboundPhoneNumberId: phoneNumberId || fallbackConfig.whatsappPhoneNumberId || undefined
   };
 }
@@ -1164,12 +1162,14 @@ whatsappWebhookRouter.post("/", async (req, res) => {
     const hotel = await resolveHotelContext(inboundPhoneNumberId);
     const config = loadPartnerSetupConfig(hotel.id);
     const runtimeContext = await getHotelRuntimeContext(hotel.id);
-    const normalizedPhone = normalizePhone(from);
-    const guest = await prisma.guest.upsert({
-      where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedPhone } },
-      update: {},
-      create: { hotelId: hotel.id, phoneE164: normalizedPhone }
+    const guest = await upsertGuestWithPhone({
+      hotelId: hotel.id,
+      phoneRaw: from,
+      defaultCountryIso: hotel.country,
+      create: { hotelId: hotel.id },
+      update: {}
     });
+    const normalizedPhone = guest.phoneE164;
     const existingConversation = await prisma.conversation.findFirst({
       where: { hotelId: hotel.id, guestId: guest.id, state: { in: ["NEW", "QUALIFYING", "QUOTED", "PAYMENT_PENDING", "CONFIRMED"] } },
       orderBy: { updatedAt: "desc" }

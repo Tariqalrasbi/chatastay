@@ -48,6 +48,8 @@ import {
   isWithinWindow,
   nextWindowStartMessage
 } from "../core/serviceOperatingHours";
+import { upsertGuestWithPhone, phoneSessionKeyPart } from "../core/guestPhoneService";
+import { toWhatsAppDigits } from "../core/phoneNumber";
 import { loadPartnerSetupConfig } from "../core/partnerSetup";
 import { trackDecisionEventSafe } from "../core/decisionAnalytics";
 import {
@@ -2601,7 +2603,7 @@ async function lookupBookings(
 }
 
 function normalizePhone(input: string): string {
-  return input.replace(/\D/g, "");
+  return toWhatsAppDigits(input);
 }
 
 function normalizeSessionState(raw: string | undefined): ConversationState {
@@ -2636,7 +2638,7 @@ function inferEvent(state: ConversationState, text: string, parsed: ReturnType<t
 
 async function resolveHotel(
   inboundPhoneNumberId?: string
-): Promise<{ id: string; displayName: string; currency: string; timezone: string; phoneNumberId?: string }> {
+): Promise<{ id: string; displayName: string; currency: string; country: string; timezone: string; phoneNumberId?: string }> {
   // Only active (non-suspended) hotels can receive WhatsApp traffic. This enforces the SaaS lifecycle
   // rule "SUSPENDED / ARCHIVED properties must not receive WhatsApp messages." A platform admin
   // suspends a hotel via /owner/hotels/:id/toggle-active (Hotel.isActive=false) and from that moment
@@ -2645,7 +2647,7 @@ async function resolveHotel(
   const hotels = await prisma.hotel.findMany({
     where: { isActive: true },
     orderBy: { createdAt: "asc" },
-    select: { id: true, displayName: true, currency: true, timezone: true }
+    select: { id: true, displayName: true, currency: true, country: true, timezone: true }
   });
   if (!hotels.length) {
     throw new Error("No active hotels configured");
@@ -2657,6 +2659,7 @@ async function resolveHotel(
         return {
           id: hotel.id,
           displayName: hotel.displayName,
+          country: hotel.country,
           currency: hotel.currency,
           timezone: hotel.timezone,
           phoneNumberId: config.whatsappPhoneNumberId
@@ -2704,6 +2707,7 @@ async function resolveHotel(
   return {
     id: fallback.id,
     displayName: fallback.displayName,
+    country: fallback.country,
     currency: fallback.currency,
     timezone: fallback.timezone,
     phoneNumberId: outboundPhoneNumberId
@@ -2935,12 +2939,14 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   const hotel = await resolveHotel(input.inboundPhoneNumberId);
   const hotelConfig = loadPartnerSetupConfig(hotel.id);
   const optimization = hotelConfig.optimizationSettings;
-  const normalizedPhone = normalizePhone(input.from);
-  const guest = await prisma.guest.upsert({
-    where: { hotelId_phoneE164: { hotelId: hotel.id, phoneE164: normalizedPhone } },
-    update: {},
-    create: { hotelId: hotel.id, phoneE164: normalizedPhone }
+  const guest = await upsertGuestWithPhone({
+    hotelId: hotel.id,
+    phoneRaw: input.from,
+    defaultCountryIso: hotel.country,
+    create: { hotelId: hotel.id },
+    update: {}
   });
+  const normalizedPhone = toWhatsAppDigits(guest.phoneE164);
   const guestMemoryBundle = await loadGuestMemoryContext(guest.id);
 
   const conversation =
