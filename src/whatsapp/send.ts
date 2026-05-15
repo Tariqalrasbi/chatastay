@@ -66,12 +66,17 @@ interface SendFlowInput {
   conversationId?: string;
 }
 
+function isWhatsAppPlaceholder(value: string | undefined): boolean {
+  const s = value?.trim() ?? "";
+  return !s || /^replace-me$/i.test(s) || /^PASTE_/i.test(s) || s === "your-token-here";
+}
+
 function getWhatsAppConfig(phoneNumberIdOverride?: string): { token: string; phoneNumberId: string } | null {
   const token = process.env.WHATSAPP_TOKEN?.trim();
   const phoneNumberId =
     (phoneNumberIdOverride && phoneNumberIdOverride.trim()) || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
 
-  if (!token || !phoneNumberId) {
+  if (!token || !phoneNumberId || isWhatsAppPlaceholder(token) || isWhatsAppPlaceholder(phoneNumberId)) {
     return null;
   }
   return { token, phoneNumberId };
@@ -103,21 +108,48 @@ function metaSendAccepted(payload: MetaSendMessageResponse): { ok: true; message
   };
 }
 
+/** Validates token + phone number id against Meta (read-only). */
+export async function probeWhatsAppOutbound(
+  phoneNumberIdOverride?: string
+): Promise<{ ok: true; displayPhoneNumber: string | null; verifiedName: string | null } | { ok: false; errorMessage: string }> {
+  const cfg = getWhatsAppConfig(phoneNumberIdOverride);
+  if (!cfg) {
+    return {
+      ok: false,
+      errorMessage:
+        "WhatsApp is not configured (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be set to real values, not placeholders)."
+    };
+  }
+  const url = `https://graph.facebook.com/v21.0/${cfg.phoneNumberId}?fields=display_phone_number,verified_name`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${cfg.token}` }
+  });
+  const bodyText = await response.text();
+  if (!response.ok) {
+    return { ok: false, errorMessage: formatWhatsAppHttpError(response.status, bodyText) };
+  }
+  try {
+    const payload = JSON.parse(bodyText) as { display_phone_number?: string; verified_name?: string };
+    return {
+      ok: true,
+      displayPhoneNumber: payload.display_phone_number ?? null,
+      verifiedName: payload.verified_name ?? null
+    };
+  } catch {
+    return { ok: true, displayPhoneNumber: null, verifiedName: null };
+  }
+}
+
 /** Call once at server startup — cannot fix Meta error 190 (expired token), but catches missing/placeholder env. */
 export function logWhatsAppStartupHints(): void {
   const token = process.env.WHATSAPP_TOKEN?.trim();
   const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
-  const isPlaceholder = (s: string | undefined) =>
-    !s ||
-    /^replace-me$/i.test(s) ||
-    /^PASTE_/i.test(s) ||
-    s === "your-token-here";
-  if (isPlaceholder(token)) {
+  if (isWhatsAppPlaceholder(token)) {
     console.warn(
       "[chatastay] WHATSAPP_TOKEN is missing or still a placeholder. Set a Graph API token in .env (see .env.example)."
     );
   }
-  if (isPlaceholder(phoneId)) {
+  if (isWhatsAppPlaceholder(phoneId)) {
     console.warn(
       "[chatastay] WHATSAPP_PHONE_NUMBER_ID is missing or placeholder. Copy the Phone number ID from Meta → WhatsApp → API setup."
     );
@@ -289,6 +321,89 @@ export async function trySendWhatsAppText({
     phoneNumber: to,
     direction: "outgoing",
     messageText: body
+  });
+  return { ok: true };
+}
+
+export type WhatsAppTemplateSendInput = {
+  to: string;
+  templateName: string;
+  languageCode: string;
+  /** Values for {{1}}, {{2}}, … in the approved template body. */
+  bodyParameters: string[];
+  phoneNumberId?: string;
+  conversationId?: string;
+};
+
+/**
+ * Sends a Meta-approved template (required for marketing outside the 24-hour customer service window).
+ */
+export async function trySendWhatsAppTemplate(
+  params: WhatsAppTemplateSendInput
+): Promise<{ ok: true } | { ok: false; errorMessage: string }> {
+  const cfg = getWhatsAppConfig(params.phoneNumberId);
+  if (!cfg) {
+    return {
+      ok: false,
+      errorMessage:
+        "WhatsApp is not configured (set WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID, or partner Phone number ID)."
+    };
+  }
+  const templateName = params.templateName.trim();
+  if (!templateName) {
+    return { ok: false, errorMessage: "Campaign template name is not configured." };
+  }
+  const languageCode = (params.languageCode.trim() || "en").toLowerCase();
+  const components =
+    params.bodyParameters.length > 0
+      ? [
+          {
+            type: "body",
+            parameters: params.bodyParameters.map((text) => ({
+              type: "text",
+              text: String(text).slice(0, 1024)
+            }))
+          }
+        ]
+      : undefined;
+
+  const url = `https://graph.facebook.com/v21.0/${cfg.phoneNumberId}/messages`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${cfg.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: params.to.replace(/\D/g, ""),
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        ...(components ? { components } : {})
+      }
+    })
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    return { ok: false, errorMessage: formatWhatsAppHttpError(response.status, errorText) };
+  }
+  let payload: MetaSendMessageResponse = {};
+  try {
+    payload = (await response.json()) as MetaSendMessageResponse;
+  } catch {
+    return { ok: false, errorMessage: "WhatsApp API returned an unreadable template response." };
+  }
+  const accepted = metaSendAccepted(payload);
+  if (!accepted.ok) {
+    return { ok: false, errorMessage: accepted.errorMessage };
+  }
+  await logWhatsAppMessage({
+    conversationId: params.conversationId,
+    phoneNumber: params.to,
+    direction: "outgoing",
+    messageText: `[template:${templateName}] ${params.bodyParameters.join(" | ")}`.slice(0, 4090)
   });
   return { ok: true };
 }

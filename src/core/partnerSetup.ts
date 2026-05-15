@@ -19,6 +19,10 @@ export type PartnerSetupConfig = {
   instantQuoteTemplate: string;
   instantUnavailableTemplate: string;
   instantConfirmationTemplate: string;
+  /** Meta-approved template name for bulk marketing campaigns (one {{1}} body variable). */
+  whatsappCampaignTemplateName: string;
+  /** BCP-47 language code for the campaign template (e.g. en, ar). */
+  whatsappCampaignTemplateLanguage: string;
   aiKnowledgeBase: string;
   aiKnowledgeBaseEn: string;
   aiKnowledgeBaseAr: string;
@@ -54,6 +58,8 @@ const defaultPartnerSetupConfig: PartnerSetupConfig = {
     "Sorry, that room type is limited for your dates. We can offer {{alternative_room}} instead. Would you like details?",
   instantConfirmationTemplate:
     "Great news {{guest_name}}. Your stay is confirmed: {{room_type}} from {{check_in}} to {{check_out}}. Booking ID: {{booking_id}}.",
+  whatsappCampaignTemplateName: "",
+  whatsappCampaignTemplateLanguage: "en",
   aiKnowledgeBase: "",
   aiKnowledgeBaseEn: "",
   aiKnowledgeBaseAr: "",
@@ -109,6 +115,10 @@ function sanitizePartnerConfig(parsed: Partial<PartnerSetupConfig> | undefined):
     instantQuoteTemplate: source.instantQuoteTemplate ?? defaultPartnerSetupConfig.instantQuoteTemplate,
     instantUnavailableTemplate: source.instantUnavailableTemplate ?? defaultPartnerSetupConfig.instantUnavailableTemplate,
     instantConfirmationTemplate: source.instantConfirmationTemplate ?? defaultPartnerSetupConfig.instantConfirmationTemplate,
+    whatsappCampaignTemplateName:
+      source.whatsappCampaignTemplateName ?? defaultPartnerSetupConfig.whatsappCampaignTemplateName,
+    whatsappCampaignTemplateLanguage:
+      source.whatsappCampaignTemplateLanguage ?? defaultPartnerSetupConfig.whatsappCampaignTemplateLanguage,
     aiKnowledgeBase: source.aiKnowledgeBase ?? defaultPartnerSetupConfig.aiKnowledgeBase,
     aiKnowledgeBaseEn: source.aiKnowledgeBaseEn ?? defaultPartnerSetupConfig.aiKnowledgeBaseEn,
     aiKnowledgeBaseAr: source.aiKnowledgeBaseAr ?? defaultPartnerSetupConfig.aiKnowledgeBaseAr,

@@ -203,8 +203,12 @@ import {
   resolveCampaignAudience,
   serializeCampaignFilters
 } from "../core/campaignAudience";
-import { deriveMarketingCampaignStatus, sendMarketingCampaignWhatsApp } from "../core/campaignSend";
-import { resolveWhatsAppSendConfig } from "../whatsapp/send";
+import {
+  deriveMarketingCampaignStatus,
+  resolveCampaignTemplateConfig,
+  sendMarketingCampaignWhatsApp,
+  verifyCampaignWhatsAppReady
+} from "../core/campaignSend";
 import { renderCampaignComposePage } from "./campaignCenterHtml";
 import { loadManagementKpis, parseKpiPreset } from "../core/managementKpiDashboard";
 import { runHotelDailyDigest } from "../core/hotelDailyDigest";
@@ -15928,11 +15932,23 @@ adminRouter.get("/campaigns", requirePermission("CONVERSATIONS", "VIEW"), async 
 });
 
 adminRouter.get("/campaigns/new", requirePermission("CONVERSATIONS", "VIEW"), async (_req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true, country: true }
+  });
   if (!hotel) {
     res.type("html").send(renderLayout("<h2>Campaign</h2><p>No hotel data found.</p>", true));
     return;
   }
+
+  const partnerCfg = loadPartnerSetupConfig(hotel.id);
+  const waPhoneNumberId =
+    partnerCfg.whatsappPhoneNumberId?.trim() || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
+  const templateCfg = resolveCampaignTemplateConfig(hotel.id);
+  const waProbe = await verifyCampaignWhatsAppReady(hotel.id, waPhoneNumberId);
+  const whatsappStatusHtml = waProbe.ok
+    ? `<p class="badge ok" style="max-width:760px;display:inline-block">WhatsApp API: connected${waProbe.displayPhoneNumber ? ` · ${escapeHtml(waProbe.displayPhoneNumber)}` : ""}.${templateCfg.templateName ? ` Marketing template: <strong>${escapeHtml(templateCfg.templateName)}</strong> (${escapeHtml(templateCfg.languageCode)}).` : " No marketing template configured — only guests who messaged in the last 24 hours will receive free-text promos."}</p>`
+    : `<p class="badge alert" style="max-width:760px;display:inline-block">WhatsApp API: <strong>not ready</strong> — ${escapeHtml(waProbe.errorMessage)}</p>`;
 
   const [roomTypes, offers] = await Promise.all([
     prisma.roomType.findMany({
@@ -15952,14 +15968,18 @@ adminRouter.get("/campaigns/new", requirePermission("CONVERSATIONS", "VIEW"), as
     errorMsg: null,
     pageTitle: "Compose group message",
     formAction: "/admin/campaigns/new",
-    backHref: "/admin/conversations/group-messages"
+    backHref: "/admin/conversations/group-messages",
+    whatsappStatusHtml
   });
 
   res.type("html").send(renderLayout(inner, true));
 });
 
 adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), async (req, res) => {
-  const hotel = await prisma.hotel.findUnique({ where: { slug: activeHotelSlug() } });
+  const hotel = await prisma.hotel.findUnique({
+    where: { slug: activeHotelSlug() },
+    select: { id: true, displayName: true, country: true }
+  });
   if (!hotel) {
     res.redirect("/admin/campaigns");
     return;
@@ -15979,6 +15999,15 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
     Promise.resolve(readOffers())
   ]);
 
+  const partnerCfgPost = loadPartnerSetupConfig(hotel.id);
+  const waPhoneNumberIdPost =
+    partnerCfgPost.whatsappPhoneNumberId?.trim() || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
+  const templateCfgPost = resolveCampaignTemplateConfig(hotel.id);
+  const waProbePost = await verifyCampaignWhatsAppReady(hotel.id, waPhoneNumberIdPost);
+  const whatsappStatusHtmlPost = waProbePost.ok
+    ? `<p class="badge ok" style="max-width:760px;display:inline-block">WhatsApp API: connected${waProbePost.displayPhoneNumber ? ` · ${escapeHtml(waProbePost.displayPhoneNumber)}` : ""}.${templateCfgPost.templateName ? ` Marketing template: <strong>${escapeHtml(templateCfgPost.templateName)}</strong>.` : " No marketing template — only 24h-window guests get free-text."}</p>`
+    : `<p class="badge alert" style="max-width:760px;display:inline-block">WhatsApp API: <strong>not ready</strong> — ${escapeHtml(waProbePost.errorMessage)}</p>`;
+
   const renderForm = (previewCount: number | null, errorMsg: string | null) => {
     const inner = renderCampaignComposePage({
       hotelDisplayName: hotel.displayName,
@@ -15989,7 +16018,8 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
       errorMsg,
       pageTitle: "Compose group message",
       formAction: "/admin/campaigns/new",
-      backHref: "/admin/conversations/group-messages"
+      backHref: "/admin/conversations/group-messages",
+      whatsappStatusHtml: whatsappStatusHtmlPost
     });
     res.type("html").send(renderLayout(inner, true));
   };
@@ -16033,14 +16063,9 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
     return;
   }
 
-  const partnerCfg = loadPartnerSetupConfig(hotel.id);
-  const waPhoneNumberId =
-    partnerCfg.whatsappPhoneNumberId?.trim() || process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
-  if (!resolveWhatsAppSendConfig(waPhoneNumberId)) {
-    renderForm(
-      count,
-      "WhatsApp is not configured on this server (WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID, or Phone number ID in Property setup). No messages can be sent until that is fixed."
-    );
+  const waReady = await verifyCampaignWhatsAppReady(hotel.id, waPhoneNumberIdPost);
+  if (!waReady.ok) {
+    renderForm(count, waReady.errorMessage);
     return;
   }
 
@@ -16069,6 +16094,7 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
     const result = await sendMarketingCampaignWhatsApp({
       hotelId: hotel.id,
       hotelDisplayName: hotel.displayName,
+      hotelCountryIso: hotel.country,
       campaignId: campaign.id,
       guests,
       messageBody,
@@ -16102,6 +16128,8 @@ adminRouter.post("/campaigns/new", requirePermission("CONVERSATIONS", "EDIT"), a
         skippedNoPhone: result.skippedNoPhone,
         skippedDoNotDisturb: result.skippedDoNotDisturb,
         skippedMarketingOptOut: result.skippedMarketingOptOut,
+        skippedOutside24h: result.skippedOutsideServiceWindow,
+        usedTemplate: result.usedTemplate,
         firstError: result.firstErrorMessage
       }
     });
@@ -16149,19 +16177,6 @@ adminRouter.get("/campaigns/:id", requirePermission("CONVERSATIONS", "VIEW"), as
   const doneRaw = typeof req.query.done === "string" ? req.query.done : "";
   const statusRaw = typeof req.query.status === "string" ? req.query.status : campaign.status;
   const errorRaw = typeof req.query.error === "string" ? decodeURIComponent(req.query.error) : "";
-  const sentNotice =
-    doneRaw === "1" && statusRaw === "SENT"
-      ? `<p class="badge ok">Campaign sent — ${campaign.sentOkCount} WhatsApp message(s) delivered.</p>`
-      : doneRaw === "1" && statusRaw === "PARTIAL"
-        ? `<p class="badge pending">Campaign partially sent — ${campaign.sentOkCount} delivered, ${campaign.sentFailedCount} failed. Check the delivery table below for errors (e.g. expired WhatsApp token or guests outside the 24-hour window).</p>`
-        : doneRaw === "1" && statusRaw === "FAILED"
-          ? `<p class="badge alert">No messages were delivered.${errorRaw ? ` ${escapeHtml(errorRaw)}` : campaign.sentFailedCount > 0 ? " See failed rows below for Meta/WhatsApp errors." : campaign.sentOkCount === 0 && campaign.attemptedCount === 0 ? " Everyone in the audience was skipped (no phone, DND, or marketing opt-out)." : ""}</p>`
-          : req.query.sent
-            ? '<p class="badge ok">Campaign processed.</p>'
-            : "";
-  const filters = deserializeCampaignFilters(campaign.filtersJson);
-  const filterSummary = escapeHtml(JSON.stringify(filters, null, 2).slice(0, 2000));
-
   const skipAgg = await prisma.marketingCampaignRecipient.groupBy({
     by: ["outcome"],
     where: { campaignId: campaign.id },
@@ -16171,13 +16186,27 @@ adminRouter.get("/campaigns/:id", requirePermission("CONVERSATIONS", "VIEW"), as
     skipAgg.find((r) => r.outcome === "SKIPPED_DO_NOT_DISTURB")?._count._all ?? 0;
   const skipOptOut =
     skipAgg.find((r) => r.outcome === "SKIPPED_MARKETING_OPT_OUT")?._count._all ?? 0;
+  const skipOutside24h = skipAgg.find((r) => r.outcome === "SKIPPED_OUTSIDE_24H")?._count._all ?? 0;
+  const sentNotice =
+    doneRaw === "1" && statusRaw === "SENT"
+      ? `<p class="badge ok">Campaign sent — ${campaign.sentOkCount} WhatsApp message(s) delivered.</p>`
+      : doneRaw === "1" && statusRaw === "PARTIAL"
+        ? `<p class="badge pending">Campaign partially sent — ${campaign.sentOkCount} delivered, ${campaign.sentFailedCount} failed. Check the delivery table below for errors (e.g. expired WhatsApp token or guests outside the 24-hour window).</p>`
+        : doneRaw === "1" && statusRaw === "FAILED"
+          ? `<p class="badge alert">No messages were delivered.${errorRaw ? ` ${escapeHtml(errorRaw)}` : campaign.sentFailedCount > 0 ? " See failed rows below for Meta/WhatsApp errors." : skipOutside24h > 0 ? ` ${skipOutside24h} guest(s) were outside the 24-hour WhatsApp window — configure WHATSAPP_CAMPAIGN_TEMPLATE_NAME on the server.` : campaign.sentOkCount === 0 && campaign.attemptedCount === 0 ? " Everyone in the audience was skipped (no phone, DND, marketing opt-out, or outside 24h window)." : ""}</p>`
+          : req.query.sent
+            ? '<p class="badge ok">Campaign processed.</p>'
+            : "";
+  const filters = deserializeCampaignFilters(campaign.filtersJson);
+  const filterSummary = escapeHtml(JSON.stringify(filters, null, 2).slice(0, 2000));
+  const templateCfgDetail = resolveCampaignTemplateConfig(hotel.id);
 
   const sampleRows = campaign.recipients
     .map(
       (r) => `<tr>
   <td>${escapeHtml(r.guest.fullName ?? "—")}</td>
   <td>${escapeHtml(r.guest.phoneE164)}</td>
-  <td><span class="badge ${r.outcome === "SENT" ? "ok" : r.outcome === "NO_PHONE" ? "pending" : "alert"}">${escapeHtml(r.outcome)}</span></td>
+  <td><span class="badge ${r.outcome === "SENT" ? "ok" : r.outcome === "NO_PHONE" || r.outcome === "SKIPPED_OUTSIDE_24H" ? "pending" : "alert"}">${escapeHtml(r.outcome)}</span></td>
   <td>${r.errorDetail ? escapeHtml(r.errorDetail.slice(0, 120)) : "—"}</td>
 </tr>`
     )
@@ -16200,6 +16229,8 @@ ${sentNotice}
         <tr><th>Skipped (no phone)</th><td>${campaign.skippedNoPhoneCount}</td></tr>
         <tr><th>Skipped (DND)</th><td>${skipDnd}</td></tr>
         <tr><th>Skipped (marketing opt-out)</th><td>${skipOptOut}</td></tr>
+        <tr><th>Skipped (outside 24h window)</th><td>${skipOutside24h}</td></tr>
+        <tr><th>Marketing template</th><td>${templateCfgDetail.templateName ? escapeHtml(templateCfgDetail.templateName) : '<span class="muted">Not configured — free-text only within 24h</span>'}</td></tr>
         <tr><th>Channel</th><td>${escapeHtml(campaign.channel)}</td></tr>
         <tr><th>Linked offer ID</th><td>${campaign.linkedOfferId ? escapeHtml(campaign.linkedOfferId) : "—"}</td></tr>
       </tbody>
@@ -27653,6 +27684,12 @@ adminRouter.post("/setup", requirePermission("USERS", "EDIT"), async (req, res) 
     instantQuoteTemplate: String(req.body.instantQuoteTemplate ?? "").trim(),
     instantUnavailableTemplate: String(req.body.instantUnavailableTemplate ?? "").trim(),
     instantConfirmationTemplate: String(req.body.instantConfirmationTemplate ?? "").trim(),
+    whatsappCampaignTemplateName: String(
+      req.body.whatsappCampaignTemplateName ?? existingConfig.whatsappCampaignTemplateName ?? ""
+    ).trim(),
+    whatsappCampaignTemplateLanguage: String(
+      req.body.whatsappCampaignTemplateLanguage ?? existingConfig.whatsappCampaignTemplateLanguage ?? "en"
+    ).trim(),
     aiKnowledgeBase: String(req.body.aiKnowledgeBase ?? "").trim(),
     aiKnowledgeBaseEn: String(req.body.aiKnowledgeBaseEn ?? "").trim(),
     aiKnowledgeBaseAr: String(req.body.aiKnowledgeBaseAr ?? "").trim(),

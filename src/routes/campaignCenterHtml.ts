@@ -53,8 +53,9 @@ export function renderCampaignComposePage(params: {
   pageTitle?: string;
   formAction?: string;
   backHref?: string;
+  whatsappStatusHtml?: string | null;
 }): string {
-  const { body, previewCount, errorMsg } = params;
+  const { body, previewCount, errorMsg, whatsappStatusHtml } = params;
   const pageTitle = params.pageTitle ?? "Group messages";
   const formAction = params.formAction ?? "/admin/campaigns/new";
   const backHref = params.backHref ?? "/admin/campaigns";
@@ -132,7 +133,8 @@ export function renderCampaignComposePage(params: {
   return `
 <h2>${esc(pageTitle)}</h2>
 <p class="muted" style="max-width:760px">${esc(params.hotelDisplayName)} — Send WhatsApp group messages, flash messages, offers, and marketing updates to this hotel's own guest database only. Target guests using tags, VIP, language, source, room history, and stay history, then preview the audience before sending.</p>
-<p class="badge pending" style="max-width:760px;display:inline-block">Important: WhatsApp promotional sends should follow guest consent and Meta template/window rules. Guests marked do-not-disturb or marketing opt-out are skipped automatically.</p>
+<p class="badge pending" style="max-width:760px;display:inline-block">Important: Bulk promos to guests who have <strong>not</strong> messaged in the last 24 hours require a <strong>Meta-approved marketing template</strong> (<code>WHATSAPP_CAMPAIGN_TEMPLATE_NAME</code> on the server or campaign template name in Property setup). Free-text campaigns only reach guests in the 24-hour service window.</p>
+${whatsappStatusHtml ?? ""}
 ${errBlock}
 ${previewBlock}
 <form method="post" action="${esc(formAction)}" style="max-width:900px; display:grid; gap:14px">
