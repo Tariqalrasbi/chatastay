@@ -11727,8 +11727,11 @@ adminRouter.post("/front-desk/check-out", requirePermission("ROOMS", "EDIT"), as
       res.redirect(withToast);
       return;
     }
+    const hi = result.auditBookingId
+      ? `&highlightBooking=${encodeURIComponent(result.auditBookingId)}`
+      : "";
     res.redirect(
-      `/admin/room-board/unit/${encodeURIComponent(result.roomUnitId)}/details?date=${encodeURIComponent(result.departureDateKey)}&checkoutSuccess=1&manualCheckOut=1`
+      `/admin/room-board/unit/${encodeURIComponent(result.roomUnitId)}/details?date=${encodeURIComponent(result.departureDateKey)}&checkoutSuccess=1&manualCheckOut=1${hi}`
     );
   };
 
@@ -12852,11 +12855,10 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   const dateEndExclusive = addDays(boardDate, 1);
   const unitDetailDayRange = inventoryDayRangeExclusive(boardDate);
   const savedNotice = req.query.saved ? '<p class="badge ok">Room &amp; guest details saved.</p>' : "";
-  const checkoutSuccessNotice =
-    req.query.checkoutSuccess === "1"
-      ? `<p class="badge ok" id="rud-checkout-success-banner">Guest checked out successfully. Room marked for housekeeping. <a class="btn-link primary" href="/admin/room-board?date=${encodeURIComponent(dateKey)}">Back to Room Rack</a></p>`
-      : "";
   const highlightBookingId = String(req.query.highlightBooking ?? "").trim();
+  /** After checkout, checkOut equals the board date so overlap queries must not hide the reservation. */
+  const isCheckoutConfirmationView =
+    req.query.checkoutSuccess === "1" && highlightBookingId.length > 0;
 
   const unit = await prisma.roomUnit.findFirst({
     where: { id: unitId, hotelId: hotel.id },
@@ -12895,15 +12897,22 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   let booking =
     highlightBookingId.length > 0
       ? await prisma.booking.findFirst({
-          where: {
-            id: highlightBookingId,
-            hotelId: hotel.id,
-            roomUnitId: unit.id,
-            roomTypeId: unit.roomTypeId,
-            checkIn: { lt: dateEndExclusive },
-            checkOut: { gt: boardDate },
-            status: { in: [...overlapStatuses] }
-          },
+          where: isCheckoutConfirmationView
+            ? {
+                id: highlightBookingId,
+                hotelId: hotel.id,
+                roomUnitId: unit.id,
+                roomTypeId: unit.roomTypeId
+              }
+            : {
+                id: highlightBookingId,
+                hotelId: hotel.id,
+                roomUnitId: unit.id,
+                roomTypeId: unit.roomTypeId,
+                checkIn: { lt: dateEndExclusive },
+                checkOut: { gt: boardDate },
+                status: { in: [...overlapStatuses] }
+              },
           include: { guest: true, paymentIntents: { orderBy: { createdAt: "desc" } } }
         })
       : null;
@@ -12922,10 +12931,28 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     });
   }
 
-  const checkoutEligibility =
-    booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.CHECKED_IN)
+  const checkoutSuccessNotice =
+    req.query.checkoutSuccess === "1"
+      ? `<p class="badge ok" id="rud-checkout-success-banner">Guest checked out successfully. Room marked for housekeeping.${
+          booking
+            ? ` <a class="btn-link" href="/admin/room-board/unit/${encodeURIComponent(unit.id)}/invoice?date=${encodeURIComponent(dateKey)}">Open guest invoice</a> · <a class="btn-link" href="/admin/bookings/${encodeURIComponent(booking.id)}">Reservation record</a>`
+            : ""
+        } <a class="btn-link primary" href="/admin/room-board?date=${encodeURIComponent(dateKey)}">Back to Room Rack</a></p>`
+      : "";
+
+  const checkoutEligibility = isCheckoutConfirmationView
+    ? {
+        ok: false as const,
+        code: "checkout_complete",
+        message: "Guest has been checked out."
+      }
+    : booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.CHECKED_IN)
       ? await evaluateGuestCheckoutEligibility(prisma, hotel.id, booking.id)
-      : { ok: false as const, code: "no_eligible_booking", message: "Checkout is available when an active confirmed or in-house reservation is linked to this room." };
+      : {
+          ok: false as const,
+          code: "no_eligible_booking",
+          message: "Checkout is available when an active confirmed or in-house reservation is linked to this room."
+        };
 
   let linkedRoomsBanner = "";
   if (booking?.bookingGroupId) {
@@ -13030,9 +13057,12 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   const effectiveTransactionNumber = manualDetails?.transactionNumber || latestPaymentIntent?.id || "";
   const effectiveBookedBy = manualDetails?.bookedBy || (booking?.source ? String(booking.source) : "");
   const effectiveTourCompany = manualDetails?.tourCompany || "";
-  const sourceNote = booking
-    ? `From booking ${displayBookingReference(booking)} (${booking.status}). Internal notes below are staff-only.`
-    : "No linked booking on this date. Use the form to enter guest details manually.";
+  const sourceNote =
+    isCheckoutConfirmationView && booking
+      ? `Checked out ${formatDate(booking.checkOut)}. Folio and invoice links remain below for front-desk review.`
+      : booking
+        ? `From booking ${displayBookingReference(booking)} (${booking.status}). Internal notes below are staff-only.`
+        : "No linked booking on this date. Use the form to enter guest details manually.";
 
   const cur = booking?.currency ?? hotel.currency;
   const [folioRows, menuItemsFolio, folioSummary, fbOrdersForLedger] = await Promise.all([
@@ -13334,7 +13364,9 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
     booking && highlightBookingId && highlightBookingId === booking.id ? " rud-card-stay-highlight" : "";
   const checkoutEligibilityJson = JSON.stringify(checkoutEligibility).replace(/</g, "\\u003c");
   const canOfferCheckoutButton = Boolean(
-    booking && (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.CHECKED_IN)
+    booking &&
+      !isCheckoutConfirmationView &&
+      (booking.status === BookingStatus.CONFIRMED || booking.status === BookingStatus.CHECKED_IN)
   );
 
   const content = `
@@ -13402,6 +13434,7 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
             <div><dt>Property</dt><dd>${escapeHtml(unit.roomType.property.name)}</dd></div>
             <div><dt>Board date</dt><dd>${escapeHtml(dateKey)}</dd></div>
             <div><dt>Stay status</dt><dd><span class="room-board-badge ${statusClass}">${escapeHtml(status)}</span></dd></div>
+            ${isCheckoutConfirmationView ? `<div><dt>Departure</dt><dd><span class="badge ok">Checked out</span></dd></div>` : ""}
             <div><dt>Booking reference</dt><dd><code class="rud-code">${bookingRefShort}</code></dd></div>
             <div><dt>Check-in / check-out</dt><dd>${stayCheck}</dd></div>
             <div><dt>Nights</dt><dd>${stayNights}</dd></div>
