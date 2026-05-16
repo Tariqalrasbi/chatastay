@@ -5,6 +5,7 @@ import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
 import { createBookingPaymentLink } from "../core/bookingPayments";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
+import { mergeGuestProfileFromBooking } from "../core/guestProfile";
 import {
   computeMealPlanSurchargeForStay,
   getMealPlanUnitRate,
@@ -1361,6 +1362,11 @@ guestRouter.post("/book", async (req, res) => {
         update: { ...(guestName ? { fullName: guestName } : {}) },
         create: { hotelId: hotel.id, phoneE164: normalizedGuestPhone, ...(guestName ? { fullName: guestName } : {}) }
       });
+  await mergeGuestProfileFromBooking({
+    guestId: guest.id,
+    fullName: guestName || guest.fullName,
+    localeHint: lang
+  }).catch(() => undefined);
 
   const conversation =
     (await prisma.conversation.findFirst({

@@ -11,6 +11,7 @@ import {
   BookingStatus,
   FolioOutletCategory,
   FolioTransactionType,
+  PaymentStatus,
   PropertyStatus
 } from "@prisma/client";
 import { createHttpApp } from "../src/httpApp";
@@ -103,6 +104,14 @@ function assertDigestTimezoneWindow(): void {
   assert(!Number.isNaN(rangeStart.getTime()), "digest helper converts Asia/Muscat local midnight to UTC");
   assert(!Number.isNaN(rangeEndExclusive.getTime()), "digest helper converts next Asia/Muscat midnight to UTC");
   assert(startWallClock.ymd === digestKey && startWallClock.minOfDay === 0, "digest helper round-trips local midnight");
+}
+
+
+function extractGuestBookingIdFromConfirmationHtml(html: string): string | null {
+  const fromRow = html.match(/Booking ID<\/th><td><strong>([^<]+)<\/strong>/i);
+  if (fromRow?.[1]) return fromRow[1].trim();
+  const fromId = html.match(/\b(WB-[A-Z0-9]+)\b/);
+  return fromId?.[1] ?? null;
 }
 
 async function main(): Promise<void> {
@@ -308,6 +317,8 @@ async function main(): Promise<void> {
   const guestCheckInStr = toIsoDate(guestCheckIn);
   const guestCheckOutStr = toIsoDate(guestCheckOut);
   const guestPhoneSuffix = String(Date.now()).slice(-7);
+  const guestPhoneE164 = `+9689${guestPhoneSuffix}`;
+  let webBookingId: string | null = null;
 
   {
     const res = await request(app)
@@ -327,6 +338,128 @@ async function main(): Promise<void> {
         lang: "en"
       });
     assert(res.status === 200 && res.text.includes("Booking Confirmed"), "POST /guest/book creates booking (guest flow)");
+    webBookingId = extractGuestBookingIdFromConfirmationHtml(res.text);
+    assert(webBookingId, "POST /guest/book confirmation includes booking ID");
+  }
+
+  if (webBookingId) {
+    const webBooking = await prisma.booking.findUnique({
+      where: { id: webBookingId },
+      include: { guest: true, roomType: true }
+    });
+    assert(webBooking, "Prisma: guest web booking row exists");
+    if (webBooking) {
+      assert(webBooking.status === BookingStatus.CONFIRMED, "guest web booking status is CONFIRMED");
+      assert(webBooking.paymentStatus === PaymentStatus.PENDING, "guest web booking paymentStatus is PENDING (pay later)");
+      assert(webBooking.source === "CHATASTAY_MARKETPLACE", "guest web booking source is CHATASTAY_MARKETPLACE");
+      assert(webBooking.guest.fullName === "Critical Flow Guest", "guest record stores submitted full name");
+      assert(webBooking.guest.phoneE164 === guestPhoneE164, "guest record stores normalized phone");
+      assert(webBooking.adults === 2 && webBooking.children === 0, "guest web booking stores adult/child counts");
+      assert(webBooking.nights === 1, "guest web booking night count matches 1-night stay");
+      assert(webBooking.totalAmount > 0, "guest web booking totalAmount is positive");
+      assert(webBooking.roomTypeId && webBooking.roomType, "guest web booking links to a room type");
+
+      const folio = await prisma.folio.findFirst({
+        where: { hotelId: hotel.id, bookingId: webBooking.id, folioCode: "MAIN" },
+        select: { id: true, folioStatus: true }
+      });
+      assert(folio?.folioStatus === "OPEN", "guest web booking has OPEN MAIN folio");
+
+      const draft = await prisma.bookingDraft.findFirst({
+        where: { hotelId: hotel.id, guestId: webBooking.guestId, bookingId: webBooking.id },
+        select: { status: true }
+      });
+      assert(draft?.status === "CONFIRMED", "booking draft marked CONFIRMED after web booking");
+
+      const conversation = webBooking.conversationId
+        ? await prisma.conversation.findUnique({ where: { id: webBooking.conversationId }, select: { state: true } })
+        : null;
+      assert(conversation?.state === "CONFIRMED", "conversation state CONFIRMED after web booking");
+
+      const crmEvent = await prisma.auditLog.findFirst({
+        where: {
+          hotelId: hotel.id,
+          bookingId: webBooking.id,
+          action: "DECISION_EVENT",
+          metadataJson: { contains: "booking_completed" }
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true }
+      });
+      assert(crmEvent, "CRM analytics audit log records booking_completed for web booking");
+
+      const adminList = await agent.get("/admin/bookings");
+      assert(
+        adminList.status === 200 && adminList.text.includes(webBookingId),
+        "GET /admin/bookings lists new guest web booking"
+      );
+      const adminDetail = await agent.get(`/admin/bookings/${encodeURIComponent(webBookingId)}`);
+      assert(
+        adminDetail.status === 200 && adminDetail.text.includes("Critical Flow Guest"),
+        "GET /admin/bookings/:id shows guest web booking detail"
+      );
+
+      if (webBooking.roomUnitId) {
+        const board = await agent.get(`/admin/room-board?date=${encodeURIComponent(guestCheckInStr)}`);
+        assert(
+          board.status === 200 && (board.text.includes("RESERVED") || board.text.includes("Reserved")),
+          "GET /admin/room-board reflects reserved unit for guest web booking check-in date"
+        );
+      }
+
+      process.env.THAWANI_WEBHOOK_ALLOW_UNSIGNED = "1";
+      const paymentIntent = await prisma.paymentIntent.create({
+        data: {
+          hotelId: hotel.id,
+          kind: "BOOKING",
+          provider: "thawani",
+          amount: webBooking.totalAmount,
+          currency: webBooking.currency,
+          status: PaymentStatus.REQUIRES_ACTION,
+          bookingId: webBooking.id
+        }
+      });
+      const thawaniPaid = await request(app)
+        .post("/api/payments/webhook/thawani")
+        .set("Content-Type", "application/json")
+        .send({
+          data: {
+            client_reference_id: paymentIntent.id,
+            payment_status: "paid",
+            invoice: `crit-flow-test-${paymentIntent.id}`
+          }
+        });
+      assert(thawaniPaid.status === 200 && thawaniPaid.body?.received === true, "Thawani webhook (test) accepts simulated paid event");
+      const paidBooking = await prisma.booking.findUnique({
+        where: { id: webBooking.id },
+        select: { paymentStatus: true }
+      });
+      assert(paidBooking?.paymentStatus === PaymentStatus.SUCCEEDED, "simulated payment webhook sets booking paymentStatus SUCCEEDED");
+      const folioPayment = await prisma.folioTransaction.findFirst({
+        where: {
+          hotelId: hotel.id,
+          bookingId: webBooking.id,
+          transactionType: FolioTransactionType.PAYMENT,
+          isVoided: false
+        },
+        select: { grossAmount: true }
+      });
+      assert(
+        folioPayment && Math.abs(folioPayment.grossAmount - webBooking.totalAmount) < 0.02,
+        "simulated payment posts folio PAYMENT matching booking total"
+      );
+      const paidCrm = await prisma.auditLog.findFirst({
+        where: {
+          hotelId: hotel.id,
+          bookingId: webBooking.id,
+          action: "DECISION_EVENT",
+          metadataJson: { contains: "payment_completed" }
+        },
+        select: { id: true }
+      });
+      assert(paidCrm, "CRM analytics audit log records payment_completed after simulated webhook");
+      delete process.env.THAWANI_WEBHOOK_ALLOW_UNSIGNED;
+    }
   }
 
   const manualCheckIn = addDays(base, 4000 + runSlot);
