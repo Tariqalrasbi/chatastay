@@ -10,10 +10,27 @@ type SendEmailInput = {
 export function isEmailConfigured(): boolean {
   const provider = String(process.env.EMAIL_PROVIDER ?? "").trim().toLowerCase();
   if (provider === "resend" && process.env.EMAIL_API_KEY) return true;
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const host = process.env.SMTP_HOST?.trim();
+  const user = process.env.SMTP_USER?.trim();
+  const pass = process.env.SMTP_PASS?.trim();
   return Boolean(host && user && pass);
+}
+
+/** One-line startup hint; never logs secrets. */
+export function logEmailStartupHints(): void {
+  if (isEmailConfigured()) {
+    const via =
+      String(process.env.EMAIL_PROVIDER ?? "")
+        .trim()
+        .toLowerCase() === "resend" && process.env.EMAIL_API_KEY
+        ? "Resend"
+        : "SMTP";
+    console.log(`[email] Outbound email configured (${via}).`);
+    return;
+  }
+  console.warn(
+    "[email] Outbound email NOT configured. Traveller verification codes will not send until SMTP_HOST, SMTP_USER, and SMTP_PASS (or Resend) are set in .env, then the server is restarted."
+  );
 }
 
 export async function sendEmail(input: SendEmailInput): Promise<void> {

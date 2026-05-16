@@ -43,9 +43,9 @@ export function isTravellerVerificationResendRateLimited(req: Request, accountId
 export async function issueTravellerVerificationEmail(
   accountId: string,
   opts?: { ip?: string }
-): Promise<{ sent: boolean; reason?: string }> {
+): Promise<{ sent: boolean; reason?: string; devConsole?: boolean }> {
   const result = await issueTravellerEmailOtpForAccount(accountId, opts);
-  if (result.sent) return { sent: true };
+  if (result.sent) return { sent: true, devConsole: result.devConsole };
   return { sent: false, reason: result.sent === false ? result.reason : undefined };
 }
 

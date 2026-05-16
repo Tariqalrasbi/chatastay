@@ -5,6 +5,7 @@ import { ensureHotelAccountNumbersSqlite } from "./core/sqliteHotelAccountNumber
 import { ensureHotelUserAuthColumnsSqlite } from "./core/sqliteHotelUserSchemaRepair";
 import { repairRoomCuidNotificationBodies } from "./core/notificationRoomNameRepair";
 import { localSqliteBackgroundSchedulersEnabled } from "./core/sqliteLocalDevSchemaGate";
+import { logEmailStartupHints } from "./core/email";
 import { logWhatsAppStartupHints } from "./whatsapp/send";
 import { startPreArrivalReminderScheduler } from "./jobs/preArrivalReminderJob";
 import { startOwnerDailyDigestScheduler } from "./jobs/ownerDailyDigestJob";
@@ -38,6 +39,7 @@ async function start(): Promise<void> {
   const server = app.listen(port, host, () => {
     const urlHost = host === "0.0.0.0" ? "localhost" : host;
     console.log(`ChatStay server listening on http://${urlHost}:${port}`);
+    logEmailStartupHints();
     console.log(`Open in browser: http://${urlHost}:${port}/admin/profile  (login required)`);
     console.log(`(Keep this terminal open while you use the app.)`);
     logWhatsAppStartupHints();

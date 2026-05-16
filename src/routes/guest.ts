@@ -139,10 +139,13 @@ function getRequestIp(req: { headers: Record<string, string | string[] | undefin
   return (typeof raw === "string" ? raw.split(",")[0]?.trim() : undefined) || req.ip || "unknown";
 }
 
-function otpIssueNoticeHtml(result: { sent: boolean; reason?: string }): string {
+function otpIssueNoticeHtml(result: { sent: boolean; reason?: string; devConsole?: boolean }): string {
+  if (result.sent && result.devConsole) {
+    return `<p class="badge pending">Email is not configured on this server. Your verification code was printed in the <strong>server terminal</strong> (development only). Restart after adding SMTP to <code>.env</code> to receive real emails.</p>`;
+  }
   if (result.sent) return `<p class="badge ok">Verification code sent. Check your inbox and spam folder.</p>`;
   if (result.reason === "email_not_configured") {
-    return `<p class="badge alert">Email is not configured on this server. Contact support.</p>`;
+    return `<p class="badge alert">Email is not configured on this server. If you run ChatStay yourself, add <code>SMTP_HOST</code>, <code>SMTP_USER</code>, and <code>SMTP_PASS</code> to <code>.env</code> and restart. Otherwise contact support.</p>`;
   }
   if (result.reason === "rate_limited") {
     return `<p class="badge alert">Too many requests. Please wait a few minutes and try again.</p>`;
@@ -626,7 +629,9 @@ guestRouter.post("/account/send-verification-code", async (req, res) => {
   }
   const result = await issueTravellerEmailOtpForPreRegistration(email, { ip: getRequestIp(req) });
   if (result.sent) {
-    res.redirect(`/guest/account/enter-verification-code?email=${encodeURIComponent(email)}&sent=1`);
+    const params = new URLSearchParams({ email, sent: "1" });
+    if (result.devConsole) params.set("devConsole", "1");
+    res.redirect(`/guest/account/enter-verification-code?${params.toString()}`);
     return;
   }
   const content = `
@@ -647,7 +652,12 @@ guestRouter.get("/account/enter-verification-code", (req, res) => {
     res.redirect("/guest/account/register");
     return;
   }
-  const sentNotice = req.query.sent === "1" ? `<p class="badge ok">Code sent to <strong>${escapeHtml(email)}</strong>.</p>` : "";
+  const sentNotice =
+    req.query.devConsole === "1"
+      ? `<p class="badge pending">Development: your code is in the <strong>server terminal</strong> (SMTP not loaded). Add SMTP to <code>.env</code> and restart to receive email.</p>`
+      : req.query.sent === "1"
+        ? `<p class="badge ok">Code sent to <strong>${escapeHtml(email)}</strong>.</p>`
+        : "";
   const errorNotice =
     typeof req.query.error === "string" && req.query.error
       ? `<p class="badge alert">${escapeHtml(otpVerifyErrorHtml(req.query.error))}</p>`
@@ -859,7 +869,9 @@ guestRouter.get("/account/verify-pending", async (req, res) => {
   if (needsVerify && account && req.query.sent !== "1" && !req.query.error) {
     const issued = await issueTravellerVerificationEmail(account.id, { ip: getRequestIp(req) });
     if (issued.sent) {
-      res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&sent=1`);
+      const params = new URLSearchParams({ email: account.email, sent: "1" });
+      if (issued.devConsole) params.set("devConsole", "1");
+      res.redirect(`/guest/account/verify-pending?${params.toString()}`);
       return;
     }
   }
@@ -869,7 +881,11 @@ guestRouter.get("/account/verify-pending", async (req, res) => {
       ? `<p class="badge pending">Email provider not configured on this server. Configure SMTP in the server environment.</p>`
       : "";
   const sentNotice =
-    req.query.sent === "1" ? `<p class="badge ok">Verification code sent to <strong>${escapeHtml(displayEmail)}</strong>.</p>` : "";
+    req.query.devConsole === "1"
+      ? `<p class="badge pending">Development: your code is in the <strong>server terminal</strong> (SMTP not loaded).</p>`
+      : req.query.sent === "1"
+        ? `<p class="badge ok">Verification code sent to <strong>${escapeHtml(displayEmail)}</strong>.</p>`
+        : "";
   const errorNotice =
     typeof req.query.error === "string" && req.query.error
       ? `<p class="badge alert">${escapeHtml(otpVerifyErrorHtml(req.query.error))}</p>`
@@ -917,7 +933,9 @@ guestRouter.post("/account/resend-verification", async (req, res) => {
   }
   const result = await issueTravellerVerificationEmail(account.id, { ip: getRequestIp(req) });
   if (result.sent) {
-    res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&sent=1`);
+    const params = new URLSearchParams({ email: account.email, sent: "1" });
+    if (result.devConsole) params.set("devConsole", "1");
+    res.redirect(`/guest/account/verify-pending?${params.toString()}`);
     return;
   }
   res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&error=send_failed`);

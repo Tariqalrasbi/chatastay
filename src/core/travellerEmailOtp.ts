@@ -23,8 +23,12 @@ const pendingPreRegOtpByEmail = new Map<string, PendingPreRegOtp>();
 const accountOtpPlainForTests = new Map<string, string>();
 
 export type IssueTravellerOtpResult =
-  | { sent: true }
+  | { sent: true; devConsole?: boolean }
   | { sent: false; reason: "not_eligible" | "email_not_configured" | "rate_limited" | "send_failed" };
+
+function devConsoleOtpEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" && process.env.TRAVELLER_OTP_DEV_CONSOLE !== "false";
+}
 
 export type VerifyTravellerOtpResult =
   | { ok: true }
@@ -114,10 +118,6 @@ export async function issueTravellerEmailOtpForAccount(
   if (isOtpSendRateLimited(otpRateLimitKey("account", account.email, opts?.ip))) {
     return { sent: false, reason: "rate_limited" };
   }
-  if (!isEmailConfigured()) {
-    return { sent: false, reason: "email_not_configured" };
-  }
-
   const code = generateTravellerEmailOtpCode();
   const codeHash = hashTravellerEmailOtpCode(code);
   const expiresAt = new Date(Date.now() + TRAVELLER_EMAIL_OTP_TTL_MS);
@@ -130,6 +130,16 @@ export async function issueTravellerEmailOtpForAccount(
   });
 
   if (process.env.NODE_ENV === "test") accountOtpPlainForTests.set(account.id, code);
+
+  if (!isEmailConfigured()) {
+    if (devConsoleOtpEnabled()) {
+      console.info(
+        `[TravellerAuth] Email not configured — verification code for ${account.email} (development only): ${code}`
+      );
+      return { sent: true, devConsole: true };
+    }
+    return { sent: false, reason: "email_not_configured" };
+  }
 
   try {
     await sendTravellerOtpEmail({
@@ -211,10 +221,6 @@ export async function issueTravellerEmailOtpForPreRegistration(
   if (isOtpSendRateLimited(otpRateLimitKey("prereg", normalized, opts?.ip))) {
     return { sent: false, reason: "rate_limited" };
   }
-  if (!isEmailConfigured()) {
-    return { sent: false, reason: "email_not_configured" };
-  }
-
   const code = generateTravellerEmailOtpCode();
   const codeHash = hashTravellerEmailOtpCode(code);
   const pending: PendingPreRegOtp = {
@@ -224,6 +230,16 @@ export async function issueTravellerEmailOtpForPreRegistration(
   };
   if (process.env.NODE_ENV === "test") pending.plainCodeForTests = code;
   pendingPreRegOtpByEmail.set(normalized, pending);
+
+  if (!isEmailConfigured()) {
+    if (devConsoleOtpEnabled()) {
+      console.info(
+        `[TravellerAuth] Email not configured — pre-registration code for ${normalized} (development only): ${code}`
+      );
+      return { sent: true, devConsole: true };
+    }
+    return { sent: false, reason: "email_not_configured" };
+  }
 
   try {
     await sendTravellerOtpEmail({
