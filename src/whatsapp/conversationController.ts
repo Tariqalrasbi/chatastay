@@ -4118,6 +4118,68 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
 
   if (needsLanguageSelection(persisted.language)) {
+    if (explicitLanguageChoice) {
+      const lang = explicitLanguageChoice;
+      persisted.language = lang;
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: {
+          ...persisted,
+          language: lang,
+          awaitingLanguagePick: false,
+          clearLanguage: false,
+          lastActivityAt: new Date().toISOString(),
+          phoneNumberId: hotel.phoneNumberId
+        }
+      });
+      await sendWelcomeMainMenu({
+        hotel,
+        guestId: guest.id,
+        normalizedPhone,
+        conversationId: conversation.id,
+        lang,
+        guestMemoryBundle,
+        aiIntent: "LANGUAGE_SELECTED_MAIN_MENU"
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
+    if (!hasOperationalBookingContext) {
+      await sendLanguageSelectionPrompt({
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
+      await saveConversationSession({
+        hotelId: hotel.id,
+        guestId: guest.id,
+        conversationId: conversation.id,
+        phoneE164: normalizedPhone,
+        state: {
+          ...persisted,
+          language: "",
+          clearLanguage: true,
+          awaitingLanguagePick: true,
+          lastActivityAt: new Date().toISOString(),
+          phoneNumberId: hotel.phoneNumberId
+        }
+      });
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: getLanguageSelectPrompt(),
+          aiIntent: "LANGUAGE_SELECT",
+          aiConfidence: 0.98
+        }
+      });
+      await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return;
+    }
     const lang = resolveInboundConversationLanguage(persisted.language, input.text);
     persisted.language = lang;
     await saveConversationSession({
@@ -4126,37 +4188,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
       conversationId: conversation.id,
       phoneE164: normalizedPhone,
       state: {
+        ...persisted,
         language: lang,
-        stage: "new",
+        awaitingLanguagePick: false,
         lastActivityAt: new Date().toISOString(),
-        conversationMode: "IDLE",
-        awaitingGuestName: false,
-        awaitingBookingLookup: false,
-        myBookingCandidateIds: [],
-        phoneNumberId: hotel.phoneNumberId,
-        checkIn: persisted.checkIn,
-        checkOut: persisted.checkOut,
-        guestCount: persisted.guestCount,
-        roomCount: persisted.roomCount,
-        suggestedRoomTypeId: persisted.suggestedRoomTypeId,
-        suggestedRoomTypeName: persisted.suggestedRoomTypeName,
-        suggestedPropertyId: persisted.suggestedPropertyId,
-        nights: persisted.nights,
-        totalAmount: persisted.totalAmount
+        phoneNumberId: hotel.phoneNumberId
       }
     });
-    await sendWelcomeMainMenu({
-      hotel,
-      guestId: guest.id,
-      normalizedPhone,
-      conversationId: conversation.id,
-      lang,
-      guestMemoryBundle,
-      aiIntent: "LANGUAGE_AUTO_DETECTED_MAIN_MENU"
-    });
-    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-    return;
   }
+
 
   if (isGlobalResetMessage(input.text)) {
     persisted.awaitingBookingLookup = false;
@@ -4647,6 +4687,74 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   }
   if (
     conversationMode === "BOOKING_MODE" &&
+    quoteAction === "cancel" &&
+    !persisted.bookingStep &&
+    !persisted.awaitingGuestName &&
+    (currentState === "quoted" || currentState === "awaiting_confirmation")
+  ) {
+    const lang = effectiveLang(persisted.language);
+    const cancelBody =
+      lang === "ar"
+        ? "تم إلغاء الحجز. يمكنك بدء حجز جديد في أي وقت من القائمة."
+        : "Booking cancelled. You can start a new booking anytime from the menu.";
+    await saveConversationSession({
+      hotelId: hotel.id,
+      guestId: guest.id,
+      conversationId: conversation.id,
+      phoneE164: normalizedPhone,
+      state: {
+        language: persisted.language || lang,
+        stage: "cancelled",
+        lastActivityAt: new Date().toISOString(),
+        conversationMode: "IDLE",
+        clearBookingParty: true,
+        awaitingGuestName: false,
+        awaitingBookingLookup: false,
+        awaitingLanguagePick: false,
+        clearLanguage: false,
+        myBookingCandidateIds: [],
+        bookingStep: undefined,
+        phoneNumberId: hotel.phoneNumberId,
+        fbCartDraft: null,
+        pendingPrebookOrder: null,
+        bookingFlowReturn: null
+      }
+    });
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { state: DbConversationState.CLOSED, lastMessageAt: new Date() }
+    });
+    await sendWhatsAppText({
+      to: normalizedPhone,
+      body: cancelBody,
+      phoneNumberId: hotel.phoneNumberId,
+      conversationId: conversation.id
+    });
+    await prisma.message.create({
+      data: {
+        hotelId: hotel.id,
+        conversationId: conversation.id,
+        direction: MessageDirection.OUTBOUND,
+        body: cancelBody,
+        aiIntent: "BOOKING_QUOTE_CANCELLED",
+        aiConfidence: 0.98
+      }
+    });
+    await sendWelcomeMainMenu({
+      hotel,
+      guestId: guest.id,
+      normalizedPhone,
+      conversationId: conversation.id,
+      lang,
+      guestMemoryBundle,
+      aiIntent: "BOOKING_CANCELLED_MAIN_MENU"
+    });
+    await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+    return;
+  }
+
+  if (
+    conversationMode === "BOOKING_MODE" &&
     (currentState === "quoted" || currentState === "awaiting_confirmation") &&
     !persisted.bookingStep &&
     !persisted.awaitingGuestName &&
@@ -5007,7 +5115,7 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
   if (
     conversationMode === "BOOKING_MODE" &&
     isBookingSummaryReturnText(input.text) &&
-    (currentState === "quoted" || currentState === "awaiting_confirmation")
+    (currentState === "quoted" || currentState === "awaiting_confirmation" || Boolean(persisted.bookingStep))
   ) {
     const hasSummaryPayload =
       Boolean(persisted.checkIn && persisted.checkOut) &&
@@ -8488,8 +8596,11 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
 
   if (isGreeting(normalizedInputText) || normalizedInputText === "menu") {
     if (needsLanguageSelection(persisted.language)) {
-      const lang = resolveInboundConversationLanguage(persisted.language, input.text);
-      persisted.language = lang;
+      await sendLanguageSelectionPrompt({
+        to: normalizedPhone,
+        phoneNumberId: hotel.phoneNumberId,
+        conversationId: conversation.id
+      });
       await saveConversationSession({
         hotelId: hotel.id,
         guestId: guest.id,
@@ -8497,7 +8608,9 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
         phoneE164: normalizedPhone,
         state: {
           ...persisted,
-          language: lang,
+          language: "",
+          clearLanguage: true,
+          awaitingLanguagePick: true,
           stage: "IDLE",
           lastActivityAt: new Date().toISOString(),
           conversationMode: "IDLE",
@@ -8507,14 +8620,15 @@ export async function handleIncomingWhatsAppMessage(input: InboundMessageInput):
           phoneNumberId: hotel.phoneNumberId
         }
       });
-      await sendWelcomeMainMenu({
-        hotel,
-        guestId: guest.id,
-        normalizedPhone,
-        conversationId: conversation.id,
-        lang,
-        guestMemoryBundle,
-        aiIntent: "LANGUAGE_AUTO_DETECTED_GREETING_MENU"
+      await prisma.message.create({
+        data: {
+          hotelId: hotel.id,
+          conversationId: conversation.id,
+          direction: MessageDirection.OUTBOUND,
+          body: getLanguageSelectPrompt(),
+          aiIntent: "LANGUAGE_SELECT_GREETING",
+          aiConfidence: 0.98
+        }
       });
       await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
       return;

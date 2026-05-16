@@ -86,6 +86,10 @@ export type PersistentSessionState = {
   inStayComplaintCategory?: string | null;
   /** Slug like `pillow` after guest picked an extra item; next message should be quantity 1–9. */
   inStayExtraAwaitQtyFor?: string | null;
+  /** Guest tapped Change language — accept only explicit language picks until cleared. */
+  awaitingLanguagePick?: boolean;
+  /** When true, persist empty language (do not restore previous language from DB). */
+  clearLanguage?: boolean;
 };
 
 export type CalendarLinkPayload = {
@@ -139,6 +143,10 @@ export async function loadConversationSession(params: {
   const persistedLastActivity = persistedLastActivityRaw ? new Date(persistedLastActivityRaw).getTime() : persisted.updatedAt.getTime();
   const isExpiredByInactivity = Number.isFinite(persistedLastActivity) && now - persistedLastActivity >= conversationInactivityTtlMs;
   if (isExpiredByInactivity) {
+    await resetExpiredConversationSession({
+      hotelId: params.hotelId,
+      guestId: params.guestId
+    });
     return {
       language: "",
       stage: "IDLE",
@@ -265,6 +273,61 @@ export async function loadConversationSession(params: {
         : undefined
   };
 }
+
+/** Clears stale booking wizard metadata after inactivity expiry (idempotent). */
+export async function resetExpiredConversationSession(params: {
+  hotelId: string;
+  guestId: string;
+}): Promise<void> {
+  const nowIso = new Date().toISOString();
+  const minimalMeta = {
+    lastActivityAt: nowIso,
+    conversationMode: "IDLE",
+    awaitingGuestName: false,
+    awaitingBookingLookup: false,
+    awaitingLanguagePick: false,
+    myBookingCandidateIds: null,
+    phoneNumberId: null,
+    guestName: null,
+    checkIn: null,
+    checkOut: null,
+    checkInOptions: [],
+    checkOutOptions: [],
+    manualCheckInDate: null,
+    manualCheckOutDate: null,
+    guestCount: null,
+    roomCount: null,
+    bookingStep: null,
+    capacityPickRoomTypes: null,
+    adultCount: null,
+    childCount: null,
+    bookingRoomOffers: null,
+    suggestedRoomTypeId: null,
+    suggestedRoomTypeName: null,
+    suggestedPropertyId: null,
+    nightlyRate: null,
+    nights: null,
+    totalAmount: null,
+    bookingMealPlanCode: null,
+    bookingPaymentPreference: null,
+    fbCartDraft: null,
+    pendingPrebookOrder: null,
+    bookingFlowReturn: null,
+    lastAvailabilityIssue: null,
+    roomStayAllocations: null,
+    distributionPhase: null
+  };
+  await prisma.conversationSession.updateMany({
+    where: { hotelId: params.hotelId, guestId: params.guestId },
+    data: {
+      language: "",
+      stage: "IDLE",
+      metadataJson: JSON.stringify(minimalMeta),
+      expiresAt: new Date(Date.now() + conversationInactivityTtlMs)
+    }
+  });
+}
+
 
 function parseRoomStayAllocations(raw: unknown): PersistentSessionState["roomStayAllocations"] {
   if (!Array.isArray(raw)) return undefined;
@@ -463,13 +526,16 @@ export async function saveConversationSession(params: {
       const p = prevMeta.distributionPhase;
       if (p === "menu" || p === "manual_pax" || p === "mixed_types") return p;
       return null;
-    })()
+    })(),
+    awaitingLanguagePick: Boolean(params.state.awaitingLanguagePick)
   };
   const prevLanguage = typeof prevRow?.language === "string" ? prevRow.language : undefined;
   const incoming = params.state.language;
   const language = (() => {
+    if (params.state.clearLanguage) return "";
     if (incoming === "ar" || incoming === "es" || incoming === "fr" || incoming === "en") return incoming;
     if (incoming === "") {
+      if (params.state.awaitingLanguagePick) return "";
       if (prevLanguage && prevLanguage.length > 0) return prevLanguage;
       return "";
     }
