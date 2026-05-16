@@ -32,7 +32,8 @@
     "report:duplicate-phones": "node scripts/report-duplicate-guest-phones.cjs",
     "test": "npm run test:critical",
     "test:critical": "tsx scripts/critical-flows.test.ts",
-    "test:traveller-verification": "tsx scripts/traveller-verification.test.ts"
+    "test:traveller-verification": "tsx scripts/traveller-verification.test.ts",
+    "test:whatsapp-booking": "tsx scripts/whatsapp-booking-flow.test.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
