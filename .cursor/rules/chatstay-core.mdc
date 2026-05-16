@@ -1,0 +1,22 @@
+---
+alwaysApply: true
+---
+
+# ChatStay Core Rules
+
+Always follow AGENTS.md.
+
+For every task:
+1. Inspect first.
+2. Identify the root cause.
+3. Make the smallest safe patch.
+4. Do not touch unrelated systems.
+5. Run build/test/check commands if possible.
+6. Summarize changed files and testing steps.
+
+Never:
+- rewrite WhatsApp routing unless requested
+- modify payment logic unless requested
+- change Prisma schema without explaining why
+- delete working features
+- create duplicate routes, menus, or flows
