@@ -1,17 +1,14 @@
 /**
- * Traveller email verification flow (in-process).
- * Run: tsx scripts/traveller-verification.test.ts
+ * Traveller email verification flow (OTP, in-process).
+ * Run: NODE_ENV=test tsx scripts/traveller-verification.test.ts
  */
 import "dotenv/config";
 import request from "supertest";
 import { createHttpApp } from "../src/httpApp";
 import { prisma } from "../src/db";
 import { hashPassword } from "../src/core/authSecurity";
-import {
-  hashVerificationToken,
-  issueAccountVerificationEmail,
-  verifyAccountEmailToken
-} from "../src/core/accountEmailVerification";
+import { issueTravellerVerificationEmail, verifyTravellerEmailOtp } from "../src/core/travellerAuth";
+import { peekTravellerEmailOtpForTests } from "../src/core/travellerEmailOtp";
 
 const testEmail = `verify-test-${Date.now()}@chatastay.test`;
 const testPassword = "TestVerify2026!";
@@ -33,6 +30,7 @@ function assert(cond: unknown, message: string): void {
 }
 
 async function main(): Promise<void> {
+  process.env.NODE_ENV = "test";
   process.env.TRAVELLER_REQUIRE_EMAIL_VERIFICATION = "true";
   const app = createHttpApp();
 
@@ -46,14 +44,17 @@ async function main(): Promise<void> {
   });
 
   try {
-    const issue = await issueAccountVerificationEmail("traveller", account.id);
-    assert(issue.verifyLink || issue.sent, "issueAccountVerificationEmail returns link or sent");
+    const issue = await issueTravellerVerificationEmail(account.id);
+    assert(issue.sent, "issueTravellerVerificationEmail sends OTP when configured");
 
     const row = await prisma.travellerAccount.findUnique({
       where: { id: account.id },
       select: { emailVerificationTokenHash: true, emailVerificationExpiresAt: true }
     });
-    assert(row?.emailVerificationTokenHash, "verification token hash stored");
+    assert(row?.emailVerificationTokenHash, "verification OTP hash stored");
+
+    const code = peekTravellerEmailOtpForTests({ accountId: account.id });
+    assert(code && code.length === 6, "test harness can read issued OTP");
 
     const loginRes = await request(app)
       .post("/guest/account/login")
@@ -72,19 +73,12 @@ async function main(): Promise<void> {
     const tripsRes = await agent.get("/guest/trips");
     assert(tripsRes.status === 302 && tripsRes.headers.location?.includes("verify-pending"), "My Trips blocked until verified");
 
-    const tokenMatch = issue.verifyLink?.match(/token=([^&]+)/);
-    const rawToken = tokenMatch ? decodeURIComponent(tokenMatch[1] ?? "") : "";
-    if (!rawToken) {
-      fail("could not extract verification token from link");
-    } else {
-      const verifyHttp = await request(app).get(`/guest/account/verify-email?token=${encodeURIComponent(rawToken)}`);
-      assert(verifyHttp.status === 200 && verifyHttp.text.includes("Email verified"), "verify-email page shows success");
+    if (code) {
+      const verifyResult = await verifyTravellerEmailOtp(account.id, code);
+      assert(verifyResult.ok, "verifyTravellerEmailOtp accepts valid code");
 
-      const hash = hashVerificationToken(rawToken);
-      const reuse = await verifyAccountEmailToken("traveller", rawToken);
-      const stale = await prisma.travellerAccount.findFirst({ where: { emailVerificationTokenHash: hash } });
-      assert(reuse.ok === false, "token cannot be reused");
-      assert(!stale?.emailVerificationTokenHash, "token hash cleared after verify");
+      const reuse = await verifyTravellerEmailOtp(account.id, code);
+      assert(reuse.ok, "already-verified account accepts idempotent verify");
 
       const tripsAfter = await agent.get("/guest/trips");
       assert(tripsAfter.status === 200, "My Trips accessible after verification");

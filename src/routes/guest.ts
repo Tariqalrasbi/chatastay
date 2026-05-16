@@ -23,9 +23,16 @@ import {
   requestTravellerPasswordReset,
   travellerPasswordResetTokenValid,
   travellerRequireEmailVerification,
+  verifyTravellerEmailOtp,
   verifyTravellerEmailToken
 } from "../core/travellerAuth";
 import { isEmailConfigured } from "../core/email";
+import {
+  issueTravellerEmailOtpForPreRegistration,
+  readPreRegistrationVerifiedEmail,
+  signPreRegistrationVerifiedEmail,
+  verifyTravellerEmailOtpForPreRegistration
+} from "../core/travellerEmailOtp";
 import { parseGuestPhone, parseGuestPhoneFromFormFields, toWhatsAppDigits } from "../core/phoneNumber";
 import { sendWhatsAppButtons, sendWhatsAppText } from "../whatsapp/send";
 
@@ -59,6 +66,7 @@ function addDays(input: Date, days: number): Date {
 
 const defaultHotelSlug = process.env.DEFAULT_HOTEL_SLUG ?? "al-ashkhara-beach-resort";
 const travellerCookieName = "chatastay_traveller_session";
+const travellerEmailVerifiedCookieName = "chatastay_traveller_email_verified";
 const travellerSessionSecret = process.env.TRAVELLER_SESSION_SECRET ?? process.env.ADMIN_SESSION_SECRET ?? "dev-traveller-secret";
 
 function signTravellerSession(accountId: string): string {
@@ -109,6 +117,49 @@ function clearTravellerCookie(res: { setHeader(name: string, value: string): voi
     "Set-Cookie",
     `${travellerCookieName}=; HttpOnly; Path=/guest; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax`
   );
+}
+
+function setPreRegistrationVerifiedEmailCookie(
+  res: { setHeader(name: string, value: string): void },
+  email: string
+): void {
+  res.setHeader(
+    "Set-Cookie",
+    `${travellerEmailVerifiedCookieName}=${signPreRegistrationVerifiedEmail(email)}; HttpOnly; Path=/guest; Max-Age=${30 * 60}; SameSite=Lax`
+  );
+}
+
+function readPreRegistrationVerifiedEmailFromRequest(req: { headers: { cookie?: string } }): string | null {
+  return readPreRegistrationVerifiedEmail(readCookie(req, travellerEmailVerifiedCookieName));
+}
+
+function getRequestIp(req: { headers: Record<string, string | string[] | undefined>; ip?: string }): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return (typeof raw === "string" ? raw.split(",")[0]?.trim() : undefined) || req.ip || "unknown";
+}
+
+function otpIssueNoticeHtml(result: { sent: boolean; reason?: string }): string {
+  if (result.sent) return `<p class="badge ok">Verification code sent. Check your inbox and spam folder.</p>`;
+  if (result.reason === "email_not_configured") {
+    return `<p class="badge alert">Email is not configured on this server. Contact support.</p>`;
+  }
+  if (result.reason === "rate_limited") {
+    return `<p class="badge alert">Too many requests. Please wait a few minutes and try again.</p>`;
+  }
+  if (result.reason === "not_eligible") {
+    return `<p class="badge alert">This email already has an account. <a href="/guest/account/login">Sign in</a> instead.</p>`;
+  }
+  return `<p class="badge alert">Could not send the verification code. Please try again.</p>`;
+}
+
+function otpVerifyErrorHtml(reason?: string): string {
+  if (reason === "expired") return "This code has expired. Request a new one.";
+  if (reason === "too_many_attempts") return "Too many incorrect attempts. Request a new code.";
+  if (reason === "missing") return "Enter the 6-digit code from your email.";
+  if (reason === "rate_limited") return "Too many requests. Please wait a few minutes and try again.";
+  if (reason === "send_failed") return "Could not send a verification code. Try resend in a moment.";
+  return "That code is incorrect. Please try again.";
 }
 
 function normalizeMealPlan(raw: unknown): MealPlanCode {
@@ -511,14 +562,39 @@ guestRouter.get("/account", async (req, res) => {
   res.type("html").send(guestLayout(content, "en", { title: "Traveller account · ChatAstay" }));
 });
 
-guestRouter.get("/account/register", (_req, res) => {
+guestRouter.get("/account/register", (req, res) => {
+  const verifiedEmail = readPreRegistrationVerifiedEmailFromRequest(req);
+  const queryEmail = typeof req.query.email === "string" ? normalizeEmail(req.query.email) : "";
+  const emailForCode = queryEmail || verifiedEmail || "";
+  const sentNotice = req.query.sent === "1" ? `<p class="badge ok">Verification code sent.</p>` : "";
+  const verifiedNotice =
+    req.query.verified === "1" && verifiedEmail
+      ? `<p class="badge ok">Email verified. Complete your account below.</p>`
+      : "";
+
+  if (!verifiedEmail) {
+    const stepOne = `
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Create account</h1>
+<p class="auth-lead">Step 1 of 2 — verify your email with a one-time code before creating your account.</p>
+${sentNotice}
+<form method="post" action="/guest/account/send-verification-code">
+  <label>Email <input name="email" type="email" required autocomplete="email" value="${escapeHtml(emailForCode)}" /></label>
+  <button type="submit">Send verification code</button>
+</form>
+<div class="guest-auth-links"><a href="/guest/account/login">Already have an account? Sign in</a></div>`;
+    res.type("html").send(guestAuthLayout(stepOne, { title: "Verify email · ChatAstay" }));
+    return;
+  }
+
   const content = `
 <a class="guest-auth-logo" href="/">ChatAstay</a>
 <h1>Create account</h1>
-<p class="auth-lead">For My Trips, booking history, and post-stay reviews. This is separate from hotel staff login.</p>
+<p class="auth-lead">Step 2 of 2 — your email is verified. Set up your traveller account.</p>
+${verifiedNotice}
 <form method="post" action="/guest/account/register">
   <label>Full name <input name="fullName" required autocomplete="name" /></label>
-  <label>Email <input name="email" type="email" required autocomplete="email" /></label>
+  <label>Email <input name="email" type="email" required readonly value="${escapeHtml(verifiedEmail)}" autocomplete="email" /></label>
   <label>Mobile / WhatsApp
     <span class="field-row">
       <select name="phoneCountry" aria-label="Country code">${phoneCountrySelectHtml()}</select>
@@ -542,6 +618,99 @@ guestRouter.get("/account/register", (_req, res) => {
   res.type("html").send(guestAuthLayout(content, { title: "Create account · ChatAstay" }));
 });
 
+guestRouter.post("/account/send-verification-code", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  if (!email) {
+    res.redirect("/guest/account/register");
+    return;
+  }
+  const result = await issueTravellerEmailOtpForPreRegistration(email, { ip: getRequestIp(req) });
+  if (result.sent) {
+    res.redirect(`/guest/account/enter-verification-code?email=${encodeURIComponent(email)}&sent=1`);
+    return;
+  }
+  const content = `
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Create account</h1>
+${otpIssueNoticeHtml(result)}
+<form method="post" action="/guest/account/send-verification-code">
+  <label>Email <input name="email" type="email" required value="${escapeHtml(email)}" /></label>
+  <button type="submit">Send verification code</button>
+</form>
+<div class="guest-auth-links"><a href="/guest/account/login">Sign in</a></div>`;
+  res.type("html").status(result.reason === "rate_limited" ? 429 : 400).send(guestAuthLayout(content, { title: "Verify email · ChatAstay" }));
+});
+
+guestRouter.get("/account/enter-verification-code", (req, res) => {
+  const email = typeof req.query.email === "string" ? normalizeEmail(req.query.email) : "";
+  if (!email) {
+    res.redirect("/guest/account/register");
+    return;
+  }
+  const sentNotice = req.query.sent === "1" ? `<p class="badge ok">Code sent to <strong>${escapeHtml(email)}</strong>.</p>` : "";
+  const errorNotice =
+    typeof req.query.error === "string" && req.query.error
+      ? `<p class="badge alert">${escapeHtml(otpVerifyErrorHtml(req.query.error))}</p>`
+      : "";
+  const content = `
+<a class="guest-auth-logo" href="/">ChatAstay</a>
+<h1>Enter verification code</h1>
+<p class="auth-lead">We sent a 6-digit code to <strong>${escapeHtml(email)}</strong>. Enter it below to confirm your email.</p>
+${sentNotice}
+${errorNotice}
+<form method="post" action="/guest/account/verify-code">
+  <input type="hidden" name="email" value="${escapeHtml(email)}" />
+  <input type="hidden" name="flow" value="register" />
+  <label>Verification code
+    <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" required autocomplete="one-time-code" placeholder="123456" style="letter-spacing:4px;font-size:20px" />
+  </label>
+  <button type="submit">Verify email</button>
+</form>
+<form method="post" action="/guest/account/send-verification-code" style="margin-top:12px">
+  <input type="hidden" name="email" value="${escapeHtml(email)}" />
+  <button type="submit" style="background:transparent;border:0;padding:0;color:#128c7e;cursor:pointer;font-weight:600">Resend code</button>
+</form>
+<div class="guest-auth-links"><a href="/guest/account/register">Change email</a></div>`;
+  res.type("html").send(guestAuthLayout(content, { title: "Enter code · ChatAstay" }));
+});
+
+guestRouter.post("/account/verify-code", async (req, res) => {
+  const flow = String(req.body.flow ?? "login");
+  const email = normalizeEmail(req.body.email);
+  const code = String(req.body.code ?? "");
+
+  if (flow === "register") {
+    if (!email) {
+      res.redirect("/guest/account/register");
+      return;
+    }
+    const result = verifyTravellerEmailOtpForPreRegistration(email, code);
+    if (!result.ok) {
+      res.redirect(
+        `/guest/account/enter-verification-code?email=${encodeURIComponent(email)}&error=${encodeURIComponent(result.reason ?? "invalid")}`
+      );
+      return;
+    }
+    setPreRegistrationVerifiedEmailCookie(res, email);
+    res.redirect("/guest/account/register?verified=1");
+    return;
+  }
+
+  const account = await getTravellerAccount(req);
+  if (!account) {
+    redirectToTravellerLogin(res, "/guest/trips");
+    return;
+  }
+  const verifyResult = await verifyTravellerEmailOtp(account.id, code);
+  if (!verifyResult.ok) {
+    res.redirect(
+      `/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&error=${encodeURIComponent(verifyResult.reason ?? "invalid")}`
+    );
+    return;
+  }
+  res.redirect("/guest/trips");
+});
+
 guestRouter.post("/account/register", async (req, res) => {
   const fullName = String(req.body.fullName ?? "").trim().slice(0, 160);
   const email = normalizeEmail(req.body.email);
@@ -559,6 +728,13 @@ guestRouter.post("/account/register", async (req, res) => {
       })
     : null;
   const normalizedPhone = parsedPhone?.isValid ? parsedPhone.phoneE164 : phoneRaw ? normalizePhone(phoneRaw, phoneCountryIso) : "";
+  const needsVerify = travellerRequireEmailVerification();
+  const preVerifiedEmail = readPreRegistrationVerifiedEmailFromRequest(req);
+
+  if (needsVerify && preVerifiedEmail !== email) {
+    res.redirect("/guest/account/register");
+    return;
+  }
 
   if (!fullName || !email || password.length < 8 || password !== confirmPassword) {
     res
@@ -595,7 +771,6 @@ guestRouter.post("/account/register", async (req, res) => {
         })
       : null;
 
-  const needsVerify = travellerRequireEmailVerification();
   try {
     const account = await prisma.travellerAccount.create({
       data: {
@@ -606,13 +781,13 @@ guestRouter.post("/account/register", async (req, res) => {
         nationality,
         preferredLanguage,
         passwordHash: await hashPassword(password),
-        emailVerifiedAt: needsVerify ? null : new Date()
+        emailVerifiedAt: needsVerify ? (preVerifiedEmail === email ? new Date() : null) : new Date()
       }
     });
     setTravellerCookie(res, account.id);
-    if (needsVerify) {
-      await issueTravellerVerificationEmail(account.id);
-      redirectToVerifyPending(res, email, { sent: true });
+    if (needsVerify && !account.emailVerifiedAt) {
+      const issued = await issueTravellerVerificationEmail(account.id, { ip: getRequestIp(req) });
+      redirectToVerifyPending(res, email, { sent: issued.sent });
       return;
     }
     res.redirect("/guest/trips?created=1");
@@ -674,41 +849,52 @@ guestRouter.post("/account/login", async (req, res) => {
   res.redirect(next.startsWith("/guest/") ? next : "/guest/trips");
 });
 
-function verificationPendingNoticeHtml(result?: { sent: boolean; verifyLink?: string; reason?: string }): string {
-  if (!result) return "";
-  if (result.reason === "email_not_configured" && result.verifyLink) {
-    return `<p class="badge pending">Email provider not configured. Use this link to verify:<br /><a href="${escapeHtml(result.verifyLink)}">${escapeHtml(result.verifyLink)}</a></p>`;
-  }
-  if (result.sent) return `<p class="badge ok">Verification email sent.</p>`;
-  if (result.reason === "send_failed") {
-    return `<p class="badge alert">Could not send email. Try again later.</p>`;
-  }
-  return "";
-}
-
 guestRouter.get("/account/verify-pending", async (req, res) => {
   const email = typeof req.query.email === "string" ? req.query.email : "";
   const account = await getTravellerAccount(req);
   const displayEmail = account?.email ?? email;
   const needsVerify =
     account && travellerRequireEmailVerification() && !isTravellerEmailVerified(account);
+
+  if (needsVerify && account && req.query.sent !== "1" && !req.query.error) {
+    const issued = await issueTravellerVerificationEmail(account.id, { ip: getRequestIp(req) });
+    if (issued.sent) {
+      res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&sent=1`);
+      return;
+    }
+  }
+
   const providerHint =
     needsVerify && !isEmailConfigured()
-      ? `<p class="badge pending">Email provider not configured on this server. Use resend below for a verification link, or configure EMAIL_PROVIDER / SMTP.</p>`
+      ? `<p class="badge pending">Email provider not configured on this server. Configure SMTP in the server environment.</p>`
       : "";
-  const devHint = needsVerify
-    ? `<form method="post" action="/guest/account/resend-verification" style="margin-top:12px"><button type="submit">Resend verification email</button></form>`
-    : "";
   const sentNotice =
-    req.query.sent === "1" ? `<p class="badge ok">If email is configured, we sent a verification link.</p>` : "";
+    req.query.sent === "1" ? `<p class="badge ok">Verification code sent to <strong>${escapeHtml(displayEmail)}</strong>.</p>` : "";
+  const errorNotice =
+    typeof req.query.error === "string" && req.query.error
+      ? `<p class="badge alert">${escapeHtml(otpVerifyErrorHtml(req.query.error))}</p>`
+      : "";
+  const codeForm = needsVerify
+    ? `<form method="post" action="/guest/account/verify-code" style="margin-top:12px">
+  <input type="hidden" name="flow" value="login" />
+  <label>Verification code
+    <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" required autocomplete="one-time-code" placeholder="123456" style="letter-spacing:4px;font-size:20px" />
+  </label>
+  <button type="submit">Confirm code</button>
+</form>
+<form method="post" action="/guest/account/resend-verification" style="margin-top:12px">
+  <button type="submit">Resend code</button>
+</form>`
+    : "";
   const content = `
 <a class="guest-auth-logo" href="/">ChatAstay</a>
 <h1>Verify your email</h1>
-<p class="auth-lead">Please verify your email before continuing.${displayEmail ? ` We sent a link to <strong>${escapeHtml(displayEmail)}</strong>.` : ""}</p>
-<p class="muted">Check your inbox and spam folder. Links expire after 24 hours.</p>
+<p class="auth-lead">Enter the 6-digit code we sent to ${displayEmail ? `<strong>${escapeHtml(displayEmail)}</strong>` : "your email"}.</p>
+<p class="muted">Check your inbox and spam folder. Codes expire after 15 minutes.</p>
 ${sentNotice}
+${errorNotice}
 ${providerHint}
-${devHint}
+${codeForm}
 <div class="guest-auth-links"><a href="/guest/account/login">Back to sign in</a></div>`;
   res.type("html").send(guestAuthLayout(content, { title: "Verify email · ChatAstay" }));
 });
@@ -724,27 +910,17 @@ guestRouter.post("/account/resend-verification", async (req, res) => {
     return;
   }
   if (isTravellerVerificationResendRateLimited(req, account.id)) {
-    res
-      .type("html")
-      .status(429)
-      .send(
-        guestAuthLayout(
-          `<h1>Verify your email</h1><p class="badge alert">Too many requests. Please wait a few minutes and try again.</p><p class="guest-auth-links"><a href="/guest/account/verify-pending?email=${encodeURIComponent(account.email)}">Back</a></p>`,
-          { title: "Verify email · ChatAstay" }
-        )
-      );
+    res.redirect(
+      `/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&error=${encodeURIComponent("rate_limited")}`
+    );
     return;
   }
-  const result = await issueTravellerVerificationEmail(account.id);
-  const extra = verificationPendingNoticeHtml(result);
-  res
-    .type("html")
-    .send(
-      guestAuthLayout(
-        `<h1>Verify your email</h1>${extra}<p class="guest-auth-links"><a href="/guest/account/verify-pending?email=${encodeURIComponent(account.email)}">Back</a></p>`,
-        { title: "Verify email · ChatAstay" }
-      )
-    );
+  const result = await issueTravellerVerificationEmail(account.id, { ip: getRequestIp(req) });
+  if (result.sent) {
+    res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&sent=1`);
+    return;
+  }
+  res.redirect(`/guest/account/verify-pending?email=${encodeURIComponent(account.email)}&error=send_failed`);
 });
 
 guestRouter.get("/account/verify-email", async (req, res) => {

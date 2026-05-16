@@ -11,6 +11,11 @@ import {
 } from "./accountEmailVerification";
 import { sendEmail, isEmailConfigured } from "./email";
 import { buildTravellerPasswordResetEmail } from "./emailTemplates";
+import {
+  issueTravellerEmailOtpForAccount,
+  verifyTravellerEmailOtpForAccount,
+  type VerifyTravellerOtpResult
+} from "./travellerEmailOtp";
 
 const passwordResetTtlMs = 15 * 60 * 1000;
 const resetRequestRateLimitWindowMs = 15 * 60 * 1000;
@@ -36,9 +41,19 @@ export function isTravellerVerificationResendRateLimited(req: Request, accountId
 }
 
 export async function issueTravellerVerificationEmail(
-  accountId: string
-): Promise<{ sent: boolean; verifyLink?: string; reason?: string }> {
-  return issueAccountVerificationEmail("traveller", accountId);
+  accountId: string,
+  opts?: { ip?: string }
+): Promise<{ sent: boolean; reason?: string }> {
+  const result = await issueTravellerEmailOtpForAccount(accountId, opts);
+  if (result.sent) return { sent: true };
+  return { sent: false, reason: result.sent === false ? result.reason : undefined };
+}
+
+export async function verifyTravellerEmailOtp(
+  accountId: string,
+  code: string
+): Promise<VerifyTravellerOtpResult> {
+  return verifyTravellerEmailOtpForAccount(accountId, code);
 }
 
 export async function verifyTravellerEmailToken(rawToken: string): Promise<{ ok: boolean; reason?: string }> {

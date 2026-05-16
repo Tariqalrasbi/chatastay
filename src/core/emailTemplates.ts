@@ -9,6 +9,39 @@ type TravellerVerificationEmailInput = {
   expiresHours: number;
 };
 
+type TravellerVerificationCodeEmailInput = {
+  code: string;
+  fullName?: string | null;
+  expiresMinutes: number;
+};
+
+export function buildTravellerVerificationCodeEmail(input: TravellerVerificationCodeEmailInput): {
+  html: string;
+  text: string;
+} {
+  const greeting = input.fullName ? `Hello ${escapeHtml(input.fullName)},` : "Hello,";
+  const code = escapeHtml(input.code);
+  const html = [
+    `<p>${greeting}</p>`,
+    "<p>Your ChatAstay verification code is:</p>",
+    `<p style="font-size:28px;font-weight:700;letter-spacing:6px;margin:16px 0">${code}</p>`,
+    `<p>Enter this code on the verification page. It expires in ${input.expiresMinutes} minutes.</p>`,
+    "<p>If you did not request this code, you can ignore this email.</p>",
+    "<p>Regards,<br />ChatAstay</p>"
+  ].join("");
+  const text = [
+    greeting.replace(/<[^>]+>/g, ""),
+    "",
+    `Your ChatAstay verification code: ${input.code}`,
+    "",
+    `This code expires in ${input.expiresMinutes} minutes.`,
+    "",
+    "Regards,",
+    "ChatAstay"
+  ].join("\n");
+  return { html, text };
+}
+
 export function buildTravellerVerificationEmail(input: TravellerVerificationEmailInput): { html: string; text: string } {
   const greeting = input.fullName ? `Hello ${escapeHtml(input.fullName)},` : "Hello,";
   const html = [
