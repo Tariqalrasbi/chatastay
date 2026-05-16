@@ -5,7 +5,6 @@ import { prisma } from "../db";
 import { findAvailableRoomType, findAvailableRoomTypes, getDayAvailability, toIsoDate } from "../core/availability";
 import { createBookingPaymentLink } from "../core/bookingPayments";
 import { createConfirmedBookingAtomic } from "../core/bookingService";
-import { mergeGuestProfileFromBooking } from "../core/guestProfile";
 import {
   computeMealPlanSurchargeForStay,
   getMealPlanUnitRate,
@@ -458,6 +457,21 @@ function guestLayout(content: string, lang: "en" | "ar" = "en", opts: GuestLayou
     </div>
   </div>
   <main>${isAuth ? `<div class="guest-auth-card">${content}${partnerFooter}</div>` : content}</main>
+  <script>
+  (function () {
+    document.querySelectorAll("table").forEach(function (table) {
+      var headers = Array.from(table.querySelectorAll("thead th")).map(function (th) {
+        return th.textContent ? th.textContent.trim() : "";
+      });
+      table.querySelectorAll("tbody tr").forEach(function (row) {
+        Array.from(row.querySelectorAll("td")).forEach(function (cell, index) {
+          if (cell.hasAttribute("data-label") || Number(cell.getAttribute("colspan") || "1") > 1) return;
+          cell.setAttribute("data-label", headers[index] || "Field " + (index + 1));
+        });
+      });
+    });
+  })();
+  </script>
 </body>
 </html>`;
 }
@@ -1362,11 +1376,6 @@ guestRouter.post("/book", async (req, res) => {
         update: { ...(guestName ? { fullName: guestName } : {}) },
         create: { hotelId: hotel.id, phoneE164: normalizedGuestPhone, ...(guestName ? { fullName: guestName } : {}) }
       });
-  await mergeGuestProfileFromBooking({
-    guestId: guest.id,
-    fullName: guestName || guest.fullName,
-    localeHint: lang
-  }).catch(() => undefined);
 
   const conversation =
     (await prisma.conversation.findFirst({

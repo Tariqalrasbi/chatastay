@@ -1829,6 +1829,129 @@
           overflow: hidden;
         }
       }
+
+      /* ===== Mobile polish: safe-area, touch targets, grids, scrollable tables ===== */
+      @media (max-width: 768px) {
+        .grid-4 {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 480px) {
+        .grid-4 {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 980px) {
+        .content {
+          padding-left: max(16px, env(safe-area-inset-left, 0px));
+          padding-right: max(16px, env(safe-area-inset-right, 0px));
+          padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+        }
+        .panel {
+          overflow-x: clip;
+        }
+        input:not([type="checkbox"]):not([type="radio"]),
+        select,
+        textarea {
+          font-size: 16px;
+        }
+        .sidebar-menu-toggle {
+          width: 100%;
+          max-width: 100%;
+        }
+        .admin-toast-stack {
+          top: max(12px, env(safe-area-inset-top, 0px));
+          right: max(12px, env(safe-area-inset-right, 0px));
+          left: max(12px, env(safe-area-inset-left, 0px));
+          max-width: none;
+        }
+        html[dir="rtl"] .admin-toast-stack {
+          left: max(12px, env(safe-area-inset-left, 0px));
+          right: max(12px, env(safe-area-inset-right, 0px));
+        }
+      }
+      @media (max-width: 640px) {
+        .actions {
+          gap: 10px;
+        }
+        .actions .btn-link {
+          min-height: 44px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 1 1 calc(50% - 6px);
+          text-align: center;
+        }
+        .rud-toolbar-secondary .btn-link {
+          flex: 1 1 100%;
+        }
+      }
+      @media (max-width: 480px) {
+        .table-scroll table {
+          min-width: 560px;
+        }
+        .table-scroll thead {
+          display: table-header-group;
+        }
+        .table-scroll tbody tr {
+          display: table-row;
+          margin-bottom: 0;
+          padding: 0;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+        }
+        .table-scroll tbody td {
+          display: table-cell;
+          text-align: inherit;
+          border-bottom: 1px solid var(--border);
+          padding: 11px 9px;
+          min-height: 0;
+        }
+        .table-scroll tbody td::before {
+          content: none;
+          float: none;
+          padding: 0;
+        }
+        .table-scroll tbody th {
+          display: table-cell;
+        }
+        table.bookings-report-table thead,
+        table.rud-ledger-table thead {
+          display: none;
+        }
+        table.bookings-report-table tbody tr,
+        table.rud-ledger-table tbody tr {
+          display: block;
+        }
+        table.bookings-report-table tbody td,
+        table.rud-ledger-table tbody td {
+          display: block;
+          text-align: right;
+          border-bottom: 1px dashed var(--border);
+          padding: 8px 0;
+        }
+        table.bookings-report-table tbody td::before,
+        table.rud-ledger-table tbody td::before {
+          content: attr(data-label);
+          float: left;
+          color: var(--muted);
+          font-weight: 600;
+          text-align: left;
+          padding-right: 10px;
+        }
+        html[dir="rtl"] table.bookings-report-table tbody td,
+        html[dir="rtl"] table.rud-ledger-table tbody td {
+          text-align: left;
+        }
+        html[dir="rtl"] table.bookings-report-table tbody td::before,
+        html[dir="rtl"] table.rud-ledger-table tbody td::before {
+          float: right;
+          text-align: right;
+          padding-right: 0;
+          padding-left: 10px;
+        }
+      }
     </style>
   </head>
   <body{{uiErrorContextAttrs}}>

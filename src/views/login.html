@@ -306,7 +306,7 @@
   }
   @media (max-width: 620px) {
     .login-card-shell {
-      padding: 8px 0;
+      padding: max(8px, env(safe-area-inset-top, 0px)) 12px max(16px, env(safe-area-inset-bottom, 0px));
     }
     .login-card {
       padding: 22px 18px;
@@ -314,6 +314,14 @@
     }
     .login-section {
       padding: 14px;
+    }
+    .login-input {
+      font-size: 16px;
+      min-height: 48px;
+    }
+    .login-btn {
+      min-height: 48px;
+      width: 100%;
     }
   }
   @media (prefers-reduced-motion: reduce) {
