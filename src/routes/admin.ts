@@ -6496,7 +6496,8 @@ adminRouter.post("/login", async (req, res) => {
 
 adminRouter.get("/forgot-password", async (req, res) => {
   if (isAuthenticated(req)) {
-    res.redirect("/admin/dashboard");
+    const s = getSession(req);
+    res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/");
     return;
   }
   const loginHotel = await resolveLoginHotel(req);
@@ -6532,7 +6533,8 @@ adminRouter.post("/forgot-password", async (req, res) => {
 
 adminRouter.get("/reset-password", async (req, res) => {
   if (isAuthenticated(req)) {
-    res.redirect("/admin/dashboard");
+    const s = getSession(req);
+    res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/");
     return;
   }
   const token = String(req.query.token ?? "").trim();
@@ -7915,8 +7917,9 @@ adminRouter.post("/users/:id/delete", requirePermission("USERS", "DELETE"), asyn
   }
 });
 
-adminRouter.get("/dashboard", requireAuth, (_req, res) => {
-  res.redirect("/admin/profile");
+adminRouter.get("/dashboard", requireAuth, (req, res) => {
+  const s = getSession(req);
+  res.redirect(s ? pickPostLoginRedirect(s.role, s.permissions) : "/admin/login");
 });
 
 adminRouter.get("/analytics/decision", requireAuth, async (req, res) => {
@@ -27698,7 +27701,12 @@ adminRouter.post("/setup", requirePermission("USERS", "EDIT"), async (req, res) 
     include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
-    res.redirect("/admin/dashboard");
+    res.status(400).type("html").send(
+      renderLayout(
+        '<h2>Setup</h2><p class="badge alert">Hotel context was not found. Sign out and sign in again, or contact support.</p><p><a class="btn-link" href="/admin/profile">Back to profile</a></p>',
+        true
+      )
+    );
     return;
   }
 
@@ -27865,7 +27873,12 @@ adminRouter.post("/setup/send-test", requirePermission("USERS", "EDIT"), async (
     include: { properties: { orderBy: { createdAt: "asc" } } }
   });
   if (!hotel) {
-    res.redirect("/admin/dashboard");
+    res.status(400).type("html").send(
+      renderLayout(
+        '<h2>Setup test message</h2><p class="badge alert">Hotel context was not found. Sign out and sign in again.</p><p><a class="btn-link" href="/admin/setup">Back to setup</a></p>',
+        true
+      )
+    );
     return;
   }
 

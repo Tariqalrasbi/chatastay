@@ -114,7 +114,7 @@ export async function issueTravellerEmailOtpForAccount(
   if (isOtpSendRateLimited(otpRateLimitKey("account", account.email, opts?.ip))) {
     return { sent: false, reason: "rate_limited" };
   }
-  if (!isEmailConfigured()) {
+  if (!isEmailConfigured() && process.env.NODE_ENV !== "test") {
     return { sent: false, reason: "email_not_configured" };
   }
 
@@ -130,6 +130,11 @@ export async function issueTravellerEmailOtpForAccount(
   });
 
   if (process.env.NODE_ENV === "test") accountOtpPlainForTests.set(account.id, code);
+
+  if (!isEmailConfigured()) {
+    console.info(`[TravellerAuth] Email not configured — verification OTP for ${account.email}: ${code}`);
+    return { sent: true };
+  }
 
   try {
     await sendTravellerOtpEmail({
@@ -211,7 +216,7 @@ export async function issueTravellerEmailOtpForPreRegistration(
   if (isOtpSendRateLimited(otpRateLimitKey("prereg", normalized, opts?.ip))) {
     return { sent: false, reason: "rate_limited" };
   }
-  if (!isEmailConfigured()) {
+  if (!isEmailConfigured() && process.env.NODE_ENV !== "test") {
     return { sent: false, reason: "email_not_configured" };
   }
 
@@ -224,6 +229,11 @@ export async function issueTravellerEmailOtpForPreRegistration(
   };
   if (process.env.NODE_ENV === "test") pending.plainCodeForTests = code;
   pendingPreRegOtpByEmail.set(normalized, pending);
+
+  if (!isEmailConfigured()) {
+    console.info(`[TravellerAuth] Email not configured — pre-registration OTP for ${normalized}: ${code}`);
+    return { sent: true };
+  }
 
   try {
     await sendTravellerOtpEmail({

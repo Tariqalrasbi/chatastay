@@ -1067,9 +1067,17 @@ guestRouter.get("/trips", async (req, res) => {
       </tr>`;
     })
     .join("");
+  const createdNotice =
+    req.query.created === "1"
+      ? '<p class="badge ok">Account created. Verify your email if prompted, then your bookings will appear below.</p>'
+      : "";
+  const reviewNotice =
+    req.query.review === "1" ? '<p class="badge ok">Thank you — your review was submitted.</p>' : "";
   const content = `
 <h1>My Trips</h1>
 <p class="muted">Signed in as ${escapeHtml(account.fullName || account.email)}.</p>
+${createdNotice}
+${reviewNotice}
 <form method="post" action="/guest/account/logout" style="display:inline"><button type="submit">Logout</button></form>
 <div class="table-scroll">
 <table>
