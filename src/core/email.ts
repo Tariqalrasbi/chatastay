@@ -7,25 +7,27 @@ type SendEmailInput = {
   text?: string;
 };
 
-export function isEmailConfigured(): boolean {
+export function emailProvider(): "resend" | "smtp" | null {
   const provider = String(process.env.EMAIL_PROVIDER ?? "").trim().toLowerCase();
-  if (provider === "resend" && process.env.EMAIL_API_KEY) return true;
+  if (provider === "resend") return "resend";
   const host = process.env.SMTP_HOST?.trim();
   const user = process.env.SMTP_USER?.trim();
   const pass = process.env.SMTP_PASS?.trim();
-  return Boolean(host && user && pass);
+  if (host && user && pass) return "smtp";
+  return null;
+}
+
+export function isEmailConfigured(): boolean {
+  const mode = emailProvider();
+  if (mode === "resend") return Boolean(process.env.EMAIL_API_KEY?.trim());
+  if (mode === "smtp") return true;
+  return false;
 }
 
 /** One-line startup hint; never logs secrets. */
 export function logEmailStartupHints(): void {
   if (isEmailConfigured()) {
-    const via =
-      String(process.env.EMAIL_PROVIDER ?? "")
-        .trim()
-        .toLowerCase() === "resend" && process.env.EMAIL_API_KEY
-        ? "Resend"
-        : "SMTP";
-    console.log(`[email] Outbound email configured (${via}).`);
+    console.log(`[email] Outbound email configured (${emailProvider()}).`);
     return;
   }
   console.warn(
@@ -37,13 +39,17 @@ export async function sendEmail(input: SendEmailInput): Promise<void> {
   if (!isEmailConfigured()) {
     throw new Error("Email provider not configured. Set EMAIL_PROVIDER/EMAIL_API_KEY (Resend) or SMTP_* env vars.");
   }
-  const provider = String(process.env.EMAIL_PROVIDER ?? "").trim().toLowerCase();
+  const mode = emailProvider();
   const from = process.env.EMAIL_FROM || process.env.MAIL_FROM || process.env.ADMIN_EMAIL || "noreply@chatastay.com";
-  if (provider === "resend" && process.env.EMAIL_API_KEY) {
+  if (mode === "resend") {
+    const apiKey = process.env.EMAIL_API_KEY?.trim();
+    if (!apiKey) {
+      throw new Error("EMAIL_PROVIDER=resend but EMAIL_API_KEY is not set.");
+    }
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.EMAIL_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({

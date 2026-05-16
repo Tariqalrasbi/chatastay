@@ -62,25 +62,42 @@ function sessionSecret(): string {
   return process.env.TRAVELLER_SESSION_SECRET ?? process.env.ADMIN_SESSION_SECRET ?? "dev-traveller-secret";
 }
 
+function encodeVerifiedEmailForCookie(email: string): string {
+  return Buffer.from(email, "utf8").toString("base64url");
+}
+
+function decodeVerifiedEmailFromCookie(encoded: string): string | null {
+  try {
+    const email = Buffer.from(encoded, "base64url").toString("utf8").trim().toLowerCase();
+    return email.includes("@") ? email : null;
+  } catch {
+    return null;
+  }
+}
+
 export function signPreRegistrationVerifiedEmail(email: string): string {
   const normalized = normalizeEmail(email);
   const exp = Date.now() + TRAVELLER_PRE_REG_VERIFIED_TTL_MS;
-  const payload = `${normalized}.${exp}`;
+  const emailPart = encodeVerifiedEmailForCookie(normalized);
+  const payload = `${emailPart}.${exp}`;
   const sig = crypto.createHmac("sha256", sessionSecret()).update(payload).digest("hex");
   return `${payload}.${sig}`;
 }
 
 export function readPreRegistrationVerifiedEmail(raw: string | undefined): string | null {
   if (!raw) return null;
-  const parts = raw.split(".");
-  if (parts.length !== 3) return null;
-  const email = parts[0] ?? "";
-  const exp = Number(parts[1]);
+  const lastDot = raw.lastIndexOf(".");
+  const midDot = raw.lastIndexOf(".", lastDot - 1);
+  if (lastDot <= 0 || midDot <= 0) return null;
+  const emailPart = raw.slice(0, midDot);
+  const exp = Number(raw.slice(midDot + 1, lastDot));
+  const sig = raw.slice(lastDot + 1);
+  const email = decodeVerifiedEmailFromCookie(emailPart);
   if (!email || !Number.isFinite(exp) || exp <= Date.now()) return null;
-  const payload = `${email}.${exp}`;
+  const payload = `${emailPart}.${exp}`;
   const expected = crypto.createHmac("sha256", sessionSecret()).update(payload).digest("hex");
   const a = Buffer.from(expected, "hex");
-  const b = Buffer.from(parts[2] ?? "", "hex");
+  const b = Buffer.from(sig, "hex");
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
   return email;
 }

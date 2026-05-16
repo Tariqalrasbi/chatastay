@@ -8,7 +8,11 @@ import { createHttpApp } from "../src/httpApp";
 import { prisma } from "../src/db";
 import { hashPassword } from "../src/core/authSecurity";
 import { issueTravellerVerificationEmail, verifyTravellerEmailOtp } from "../src/core/travellerAuth";
-import { peekTravellerEmailOtpForTests } from "../src/core/travellerEmailOtp";
+import {
+  peekTravellerEmailOtpForTests,
+  readPreRegistrationVerifiedEmail,
+  signPreRegistrationVerifiedEmail
+} from "../src/core/travellerEmailOtp";
 
 const testEmail = `verify-test-${Date.now()}@chatastay.test`;
 const testPassword = "TestVerify2026!";
@@ -44,6 +48,12 @@ async function main(): Promise<void> {
   });
 
   try {
+    const signedCookie = signPreRegistrationVerifiedEmail("user.name@gmail.com");
+    assert(
+      readPreRegistrationVerifiedEmail(signedCookie) === "user.name@gmail.com",
+      "pre-registration cookie round-trips emails with dots"
+    );
+
     const issue = await issueTravellerVerificationEmail(account.id);
     assert(issue.sent, "issueTravellerVerificationEmail sends OTP when configured");
 

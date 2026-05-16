@@ -121,12 +121,12 @@ function clearTravellerCookie(res: { setHeader(name: string, value: string): voi
 
 function setPreRegistrationVerifiedEmailCookie(
   res: { setHeader(name: string, value: string): void },
-  email: string
+  email: string,
+  opts?: { secure?: boolean }
 ): void {
-  res.setHeader(
-    "Set-Cookie",
-    `${travellerEmailVerifiedCookieName}=${signPreRegistrationVerifiedEmail(email)}; HttpOnly; Path=/guest; Max-Age=${30 * 60}; SameSite=Lax`
-  );
+  const secure = opts?.secure ?? process.env.NODE_ENV === "production";
+  const flags = `HttpOnly; Path=/guest; Max-Age=${30 * 60}; SameSite=Lax${secure ? "; Secure" : ""}`;
+  res.setHeader("Set-Cookie", `${travellerEmailVerifiedCookieName}=${signPreRegistrationVerifiedEmail(email)}; ${flags}`);
 }
 
 function readPreRegistrationVerifiedEmailFromRequest(req: { headers: { cookie?: string } }): string | null {
@@ -141,19 +141,28 @@ function getRequestIp(req: { headers: Record<string, string | string[] | undefin
 
 function otpIssueNoticeHtml(result: { sent: boolean; reason?: string; devConsole?: boolean }): string {
   if (result.sent && result.devConsole) {
-    return `<p class="badge pending">Email is not configured on this server. Your verification code was printed in the <strong>server terminal</strong> (development only). Restart after adding SMTP to <code>.env</code> to receive real emails.</p>`;
+    return authNoticeHtml(
+      "pending",
+      "Email is not configured on this server. Your verification code was printed in the <strong>server terminal</strong> (development only)."
+    );
   }
-  if (result.sent) return `<p class="badge ok">Verification code sent. Check your inbox and spam folder.</p>`;
+  if (result.sent) return authNoticeHtml("ok", "Verification code sent. Check your inbox and spam folder.");
   if (result.reason === "email_not_configured") {
-    return `<p class="badge alert">Email is not configured on this server. If you run ChatStay yourself, add <code>SMTP_HOST</code>, <code>SMTP_USER</code>, and <code>SMTP_PASS</code> to <code>.env</code> and restart. Otherwise contact support.</p>`;
+    return authNoticeHtml(
+      "alert",
+      "Email is not configured on this server. If you run ChatStay yourself, add SMTP or Resend to <code>.env</code> and restart. Otherwise contact support."
+    );
   }
   if (result.reason === "rate_limited") {
-    return `<p class="badge alert">Too many requests. Please wait a few minutes and try again.</p>`;
+    return authNoticeHtml("alert", "Too many requests. Please wait a few minutes and try again.");
   }
   if (result.reason === "not_eligible") {
-    return `<p class="badge alert">This email already has an account. <a href="/guest/account/login">Sign in</a> instead.</p>`;
+    return authNoticeHtml(
+      "alert",
+      'This email already has an account. <a href="/guest/account/login">Sign in</a> instead.'
+    );
   }
-  return `<p class="badge alert">Could not send the verification code. Please try again.</p>`;
+  return authNoticeHtml("alert", "Could not send the verification code. Please try again.");
 }
 
 function otpVerifyErrorHtml(reason?: string): string {
@@ -291,25 +300,55 @@ const GUEST_OVERFLOW_STYLES = `
 `;
 
 const GUEST_AUTH_STYLES = `
-    .guest-auth-page main { max-width: 440px; margin: 32px auto 48px; padding: 0; background: transparent; border: 0; box-shadow: none; animation: none; }
-    .guest-auth-card { background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(252,255,253,.94)); border: 1px solid rgba(220,232,227,.9); border-radius: 24px; padding: 28px 24px 22px; box-shadow: 0 28px 70px -18px rgba(7,68,58,.22), inset 0 1px 0 rgba(255,255,255,.85); }
-    .guest-auth-card h1 { font-size: 1.55rem; margin: 0 0 6px; color: #0b1f1c; background: none; -webkit-text-fill-color: unset; }
-    .guest-auth-card .auth-lead { margin: 0 0 18px; color: #64748b; font-size: 14.5px; line-height: 1.5; }
-    .guest-auth-logo { display: inline-flex; align-items: center; gap: 8px; font-weight: 900; font-size: 18px; color: #075e54; text-decoration: none; letter-spacing: -.03em; margin-bottom: 18px; }
-    .guest-auth-logo::before { content: ""; width: 28px; height: 28px; border-radius: 10px; background: linear-gradient(135deg,#25d366,#b9f7d3); box-shadow: 0 8px 18px rgba(37,211,102,.22); }
-    .guest-auth-card form { max-width: none; gap: 10px; }
-    .guest-auth-card label { display: grid; gap: 5px; font-size: 13px; }
-    .guest-auth-card .field-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; align-items: end; }
-  @media (max-width: 480px) { .guest-auth-card .field-row { grid-template-columns: 1fr; } }
-    .guest-auth-links { margin-top: 16px; font-size: 13.5px; display: flex; flex-wrap: wrap; gap: 8px 14px; }
-    .guest-auth-links a { color: #0b6e6e; font-weight: 700; text-decoration: none; }
-    .guest-auth-links a:hover { text-decoration: underline; }
-    .guest-auth-foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e6efeb; font-size: 12.5px; text-align: center; }
+    .guest-auth-page main { max-width: 460px; margin: 28px auto 56px; padding: 0; background: transparent; border: 0; box-shadow: none; animation: wa-fade-up 0.42s ease-out both; }
+    .guest-auth-card { background: linear-gradient(165deg, rgba(255,255,255,.99) 0%, rgba(248,255,251,.96) 100%); border: 1px solid rgba(210,230,222,.95); border-radius: 28px; padding: 32px 28px 26px; box-shadow: 0 32px 80px -24px rgba(7,68,58,.28), 0 8px 24px -8px rgba(15,44,38,.08), inset 0 1px 0 rgba(255,255,255,.9); }
+    .guest-auth-card h1 { font-size: clamp(1.45rem, 2.5vw, 1.75rem); margin: 0 0 8px; color: #0b1f1c; background: none; -webkit-text-fill-color: unset; letter-spacing: -.04em; font-weight: 800; }
+    .guest-auth-card .auth-lead { margin: 0 0 22px; color: #5f6f6b; font-size: 15px; line-height: 1.55; }
+    .guest-auth-logo { display: inline-flex; align-items: center; gap: 10px; font-weight: 900; font-size: 19px; color: #075e54; text-decoration: none; letter-spacing: -.04em; margin-bottom: 22px; transition: opacity .15s ease; }
+    .guest-auth-logo:hover { opacity: .88; }
+    .guest-auth-logo::before { content: ""; width: 32px; height: 32px; border-radius: 11px; background: linear-gradient(145deg,#25d366 0%,#128c7e 100%); box-shadow: 0 10px 22px rgba(37,211,102,.28); }
+    .auth-steps { list-style: none; display: flex; gap: 0; margin: 0 0 24px; padding: 0; counter-reset: none; }
+    .auth-steps li { flex: 1; position: relative; text-align: center; font-size: 12px; font-weight: 700; color: #94a3a8; padding-top: 36px; }
+    .auth-steps li::before { content: ""; position: absolute; top: 14px; left: 0; right: 0; height: 3px; background: #e2ece8; border-radius: 999px; z-index: 0; }
+    .auth-steps li:first-child::before { left: 50%; }
+    .auth-steps li:last-child::before { right: 50%; }
+    .auth-steps li span { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 28px; height: 28px; border-radius: 999px; background: #e8f2ee; color: #64748b; font-size: 13px; font-weight: 800; display: flex; align-items: center; justify-content: center; z-index: 1; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(7,68,58,.08); transition: background .2s ease, color .2s ease, transform .2s ease; }
+    .auth-steps li.active { color: #0b6e6e; }
+    .auth-steps li.active span { background: linear-gradient(145deg,#25d366,#128c7e); color: #fff; transform: translateX(-50%) scale(1.05); box-shadow: 0 6px 16px rgba(37,211,102,.35); }
+    .auth-steps li.done { color: #166534; }
+    .auth-steps li.done span { background: #dcfce7; color: #166534; }
+    .auth-notice { margin: 0 0 16px; padding: 12px 14px; border-radius: 14px; font-size: 13.5px; line-height: 1.45; }
+    .auth-notice.ok { background: #ecfdf3; color: #166534; border: 1px solid #bbf7d0; }
+    .auth-notice.alert { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .auth-notice.pending { background: #fffbeb; color: #854d0e; border: 1px solid #fde68a; }
+    .guest-auth-card form { max-width: none; gap: 14px; margin: 0; }
+    .guest-auth-card label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; color: #33443f; }
+    .guest-auth-card label.auth-otp-label { text-align: center; }
+    .auth-otp-input { text-align: center; font-size: 1.65rem; font-weight: 800; letter-spacing: 0.45em; padding: 14px 12px; font-variant-numeric: tabular-nums; }
+    .auth-otp-input::placeholder { letter-spacing: 0.2em; font-weight: 500; color: #cbd5e1; }
+    .guest-auth-card .field-row { display: grid; grid-template-columns: 118px 1fr; gap: 10px; align-items: end; }
+    .guest-auth-card .field-row label { margin: 0; }
+    .guest-auth-card input[readonly] { background: #f1f5f4; color: #475569; cursor: default; }
+    .auth-btn-primary { width: 100%; margin-top: 4px; padding: 14px 18px; font-size: 15px; border-radius: 14px; }
+    .auth-btn-ghost { width: 100%; margin-top: 6px; padding: 11px 14px; border-radius: 12px; background: transparent; color: #0b6e6e; border: 1px solid #cfe8e0; box-shadow: none; font-weight: 700; }
+    .auth-btn-ghost:hover:not(:disabled) { background: #f0fdf7; transform: none; filter: none; }
+    .auth-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 4px; color: #94a3a8; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+    .auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: #e2ece8; }
+    .guest-auth-links { margin-top: 20px; font-size: 14px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 18px; }
+    .guest-auth-links a { color: #0b6e6e; font-weight: 700; text-decoration: none; padding: 4px 2px; border-radius: 6px; transition: color .15s ease, background .15s ease; }
+    .guest-auth-links a:hover { color: #075e54; background: rgba(37,211,102,.1); text-decoration: none; }
+    .guest-auth-foot { margin-top: 22px; padding-top: 16px; border-top: 1px solid #e6efeb; font-size: 12.5px; text-align: center; }
     .guest-auth-foot a { color: #64748b; font-weight: 700; }
+    .guest-auth-page .guest-topbar { max-width: 460px; margin-bottom: 4px; }
+    @media (max-width: 480px) {
+      .guest-auth-card .field-row { grid-template-columns: 1fr; }
+      .guest-auth-card { padding: 26px 20px 22px; border-radius: 22px; }
+      .auth-otp-input { font-size: 1.45rem; letter-spacing: 0.35em; }
+    }
     @media (max-width: 640px) {
       .guest-topbar.guest-topbar--auth .links .hotel-login { display: none; }
       .guest-topbar .links a { font-size: 12px; padding: 6px 9px; }
-      .guest-auth-page main { margin: 12px auto 24px; padding: 0 12px; }
+      .guest-auth-page main { margin: 12px auto 28px; padding: 0 12px; }
     }
 `;
 
@@ -534,6 +573,35 @@ function guestAuthLayout(content: string, opts: Omit<GuestLayoutOpts, "variant">
   return guestLayout(content, "en", { ...opts, variant: "auth", hidePartnerNav: true });
 }
 
+function authLogoHtml(): string {
+  return `<a class="guest-auth-logo" href="/">ChatAstay</a>`;
+}
+
+function authStepsHtml(activeStep: 1 | 2): string {
+  return `<ol class="auth-steps" aria-label="Registration progress">
+  <li class="${activeStep === 1 ? "active" : "done"}"><span>1</span>Verify email</li>
+  <li class="${activeStep === 2 ? "active" : ""}"><span>2</span>Your details</li>
+</ol>`;
+}
+
+function authNoticeHtml(kind: "ok" | "alert" | "pending", inner: string): string {
+  if (!inner) return "";
+  return `<div class="auth-notice ${kind}" role="status">${inner}</div>`;
+}
+
+function authOtpFieldHtml(): string {
+  return `<label class="auth-otp-label">Verification code
+    <input class="auth-otp-input" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" required autocomplete="one-time-code" placeholder="000000" />
+  </label>`;
+}
+
+function isRequestSecure(req: { secure?: boolean; headers: Record<string, string | string[] | undefined> }): boolean {
+  if (req.secure) return true;
+  const proto = req.headers["x-forwarded-proto"];
+  const raw = Array.isArray(proto) ? proto[0] : proto;
+  return raw === "https";
+}
+
 guestRouter.get("/account", async (req, res) => {
   const account = await getTravellerAccount(req);
   if (account) {
@@ -569,42 +637,42 @@ guestRouter.get("/account/register", (req, res) => {
   const verifiedEmail = readPreRegistrationVerifiedEmailFromRequest(req);
   const queryEmail = typeof req.query.email === "string" ? normalizeEmail(req.query.email) : "";
   const emailForCode = queryEmail || verifiedEmail || "";
-  const sentNotice = req.query.sent === "1" ? `<p class="badge ok">Verification code sent.</p>` : "";
-  const verifiedNotice =
-    req.query.verified === "1" && verifiedEmail
-      ? `<p class="badge ok">Email verified. Complete your account below.</p>`
-      : "";
+  const showSentOnRegister = req.query.sent === "1";
+  const showVerifiedOnRegister = req.query.verified === "1" && Boolean(verifiedEmail);
 
   if (!verifiedEmail) {
     const stepOne = `
-<a class="guest-auth-logo" href="/">ChatAstay</a>
-<h1>Create account</h1>
-<p class="auth-lead">Step 1 of 2 — verify your email with a one-time code before creating your account.</p>
-${sentNotice}
+${authLogoHtml()}
+${authStepsHtml(1)}
+<h1>Create your account</h1>
+<p class="auth-lead">Enter your email and we’ll send a 6-digit code to confirm it’s yours.</p>
+${showSentOnRegister ? authNoticeHtml("ok", "Verification code sent. Check your inbox.") : ""}
 <form method="post" action="/guest/account/send-verification-code">
-  <label>Email <input name="email" type="email" required autocomplete="email" value="${escapeHtml(emailForCode)}" /></label>
-  <button type="submit">Send verification code</button>
+  <label>Email address <input name="email" type="email" required autocomplete="email" placeholder="you@example.com" value="${escapeHtml(emailForCode)}" /></label>
+  <button type="submit" class="auth-btn-primary">Send verification code</button>
 </form>
-<div class="guest-auth-links"><a href="/guest/account/login">Already have an account? Sign in</a></div>`;
-    res.type("html").send(guestAuthLayout(stepOne, { title: "Verify email · ChatAstay" }));
+<div class="auth-divider">or</div>
+<div class="guest-auth-links"><span class="muted">Already registered?</span> <a href="/guest/account/login">Sign in</a></div>`;
+    res.type("html").send(guestAuthLayout(stepOne, { title: "Create account · ChatAstay" }));
     return;
   }
 
   const content = `
-<a class="guest-auth-logo" href="/">ChatAstay</a>
-<h1>Create account</h1>
-<p class="auth-lead">Step 2 of 2 — your email is verified. Set up your traveller account.</p>
-${verifiedNotice}
+${authLogoHtml()}
+${authStepsHtml(2)}
+<h1>Almost there</h1>
+<p class="auth-lead">Email <strong>${escapeHtml(verifiedEmail)}</strong> is verified. Choose a password and optional details.</p>
+${showVerifiedOnRegister ? authNoticeHtml("ok", "Email verified successfully.") : ""}
 <form method="post" action="/guest/account/register">
-  <label>Full name <input name="fullName" required autocomplete="name" /></label>
+  <label>Full name <input name="fullName" required autocomplete="name" placeholder="Your name" /></label>
   <label>Email <input name="email" type="email" required readonly value="${escapeHtml(verifiedEmail)}" autocomplete="email" /></label>
-  <label>Mobile / WhatsApp
+  <label>Mobile / WhatsApp <span class="muted" style="font-weight:500">(optional)</span>
     <span class="field-row">
       <select name="phoneCountry" aria-label="Country code">${phoneCountrySelectHtml()}</select>
       <input name="phone" type="tel" autocomplete="tel" placeholder="9XXXXXXX" />
     </span>
   </label>
-  <label>Nationality (optional) <select name="nationality">${nationalitySelectHtml()}</select></label>
+  <label>Nationality <span class="muted" style="font-weight:500">(optional)</span> <select name="nationality">${nationalitySelectHtml()}</select></label>
   <label>Preferred language
     <select name="preferredLanguage">
       <option value="en">English</option>
@@ -613,11 +681,11 @@ ${verifiedNotice}
       <option value="fr">French</option>
     </select>
   </label>
-  <label>Password <input name="password" type="password" minlength="8" required autocomplete="new-password" /></label>
-  <label>Confirm password <input name="confirmPassword" type="password" minlength="8" required autocomplete="new-password" /></label>
-  <button type="submit">Create account</button>
+  <label>Password <input name="password" type="password" minlength="8" required autocomplete="new-password" placeholder="At least 8 characters" /></label>
+  <label>Confirm password <input name="confirmPassword" type="password" minlength="8" required autocomplete="new-password" placeholder="Repeat password" /></label>
+  <button type="submit" class="auth-btn-primary">Create account</button>
 </form>
-<div class="guest-auth-links"><a href="/guest/account/login">Already have an account? Sign in</a></div>`;
+<div class="guest-auth-links"><a href="/guest/account/login">Sign in instead</a></div>`;
   res.type("html").send(guestAuthLayout(content, { title: "Create account · ChatAstay" }));
 });
 
@@ -635,12 +703,13 @@ guestRouter.post("/account/send-verification-code", async (req, res) => {
     return;
   }
   const content = `
-<a class="guest-auth-logo" href="/">ChatAstay</a>
-<h1>Create account</h1>
+${authLogoHtml()}
+${authStepsHtml(1)}
+<h1>Create your account</h1>
 ${otpIssueNoticeHtml(result)}
 <form method="post" action="/guest/account/send-verification-code">
-  <label>Email <input name="email" type="email" required value="${escapeHtml(email)}" /></label>
-  <button type="submit">Send verification code</button>
+  <label>Email address <input name="email" type="email" required value="${escapeHtml(email)}" autocomplete="email" /></label>
+  <button type="submit" class="auth-btn-primary">Send verification code</button>
 </form>
 <div class="guest-auth-links"><a href="/guest/account/login">Sign in</a></div>`;
   res.type("html").status(result.reason === "rate_limited" ? 429 : 400).send(guestAuthLayout(content, { title: "Verify email · ChatAstay" }));
@@ -652,35 +721,34 @@ guestRouter.get("/account/enter-verification-code", (req, res) => {
     res.redirect("/guest/account/register");
     return;
   }
-  const sentNotice =
+  const codeSentNotice =
     req.query.devConsole === "1"
-      ? `<p class="badge pending">Development: your code is in the <strong>server terminal</strong> (SMTP not loaded). Add SMTP to <code>.env</code> and restart to receive email.</p>`
+      ? authNoticeHtml("pending", "Development: your code is in the server terminal.")
       : req.query.sent === "1"
-        ? `<p class="badge ok">Code sent to <strong>${escapeHtml(email)}</strong>.</p>`
+        ? authNoticeHtml("ok", `Code sent to ${escapeHtml(email)}. Check spam if needed.`)
         : "";
-  const errorNotice =
+  const codeErrorNotice =
     typeof req.query.error === "string" && req.query.error
-      ? `<p class="badge alert">${escapeHtml(otpVerifyErrorHtml(req.query.error))}</p>`
+      ? authNoticeHtml("alert", otpVerifyErrorHtml(req.query.error))
       : "";
   const content = `
-<a class="guest-auth-logo" href="/">ChatAstay</a>
-<h1>Enter verification code</h1>
-<p class="auth-lead">We sent a 6-digit code to <strong>${escapeHtml(email)}</strong>. Enter it below to confirm your email.</p>
-${sentNotice}
-${errorNotice}
+${authLogoHtml()}
+${authStepsHtml(1)}
+<h1>Check your email</h1>
+<p class="auth-lead">Enter the 6-digit code we sent to <strong>${escapeHtml(email)}</strong>.</p>
+${codeSentNotice}
+${codeErrorNotice}
 <form method="post" action="/guest/account/verify-code">
   <input type="hidden" name="email" value="${escapeHtml(email)}" />
   <input type="hidden" name="flow" value="register" />
-  <label>Verification code
-    <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" required autocomplete="one-time-code" placeholder="123456" style="letter-spacing:4px;font-size:20px" />
-  </label>
-  <button type="submit">Verify email</button>
+  ${authOtpFieldHtml()}
+  <button type="submit" class="auth-btn-primary">Continue</button>
 </form>
-<form method="post" action="/guest/account/send-verification-code" style="margin-top:12px">
+<form method="post" action="/guest/account/send-verification-code">
   <input type="hidden" name="email" value="${escapeHtml(email)}" />
-  <button type="submit" style="background:transparent;border:0;padding:0;color:#128c7e;cursor:pointer;font-weight:600">Resend code</button>
+  <button type="submit" class="auth-btn-ghost">Resend code</button>
 </form>
-<div class="guest-auth-links"><a href="/guest/account/register">Change email</a></div>`;
+<div class="guest-auth-links"><a href="/guest/account/register">Use a different email</a></div>`;
   res.type("html").send(guestAuthLayout(content, { title: "Enter code · ChatAstay" }));
 });
 
@@ -701,8 +769,8 @@ guestRouter.post("/account/verify-code", async (req, res) => {
       );
       return;
     }
-    setPreRegistrationVerifiedEmailCookie(res, email);
-    res.redirect("/guest/account/register?verified=1");
+    setPreRegistrationVerifiedEmailCookie(res, email, { secure: isRequestSecure(req) });
+    res.redirect(`/guest/account/register?verified=1&email=${encodeURIComponent(email)}`);
     return;
   }
 
@@ -816,15 +884,17 @@ guestRouter.post("/account/register", async (req, res) => {
 
 guestRouter.get("/account/login", (req, res) => {
   const next = typeof req.query.next === "string" ? req.query.next : "/guest/trips";
+  const resetOk = req.query.reset === "1";
   const content = `
-<a class="guest-auth-logo" href="/">ChatAstay</a>
-<h1>Sign in</h1>
-<p class="auth-lead">Access My Trips and your booking history.</p>
+${authLogoHtml()}
+<h1>Welcome back</h1>
+<p class="auth-lead">Sign in to view My Trips, bookings, and post-stay reviews.</p>
+${resetOk ? authNoticeHtml("ok", "Your password was updated. You can sign in now.") : ""}
 <form method="post" action="/guest/account/login">
   <input type="hidden" name="next" value="${escapeHtml(next)}" />
-  <label>Email <input name="email" type="email" required autocomplete="email" /></label>
-  <label>Password <input name="password" type="password" required autocomplete="current-password" /></label>
-  <button type="submit">Sign in</button>
+  <label>Email address <input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
+  <label>Password <input name="password" type="password" required autocomplete="current-password" placeholder="Your password" /></label>
+  <button type="submit" class="auth-btn-primary">Sign in</button>
 </form>
 <div class="guest-auth-links">
   <a href="/guest/account/forgot-password">Forgot password?</a>
@@ -876,40 +946,33 @@ guestRouter.get("/account/verify-pending", async (req, res) => {
     }
   }
 
-  const providerHint =
-    needsVerify && !isEmailConfigured()
-      ? `<p class="badge pending">Email provider not configured on this server. Configure SMTP in the server environment.</p>`
-      : "";
-  const sentNotice =
-    req.query.devConsole === "1"
-      ? `<p class="badge pending">Development: your code is in the <strong>server terminal</strong> (SMTP not loaded).</p>`
-      : req.query.sent === "1"
-        ? `<p class="badge ok">Verification code sent to <strong>${escapeHtml(displayEmail)}</strong>.</p>`
-        : "";
-  const errorNotice =
-    typeof req.query.error === "string" && req.query.error
-      ? `<p class="badge alert">${escapeHtml(otpVerifyErrorHtml(req.query.error))}</p>`
-      : "";
   const codeForm = needsVerify
-    ? `<form method="post" action="/guest/account/verify-code" style="margin-top:12px">
+    ? `<form method="post" action="/guest/account/verify-code">
   <input type="hidden" name="flow" value="login" />
-  <label>Verification code
-    <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" required autocomplete="one-time-code" placeholder="123456" style="letter-spacing:4px;font-size:20px" />
-  </label>
-  <button type="submit">Confirm code</button>
+  ${authOtpFieldHtml()}
+  <button type="submit" class="auth-btn-primary">Confirm code</button>
 </form>
-<form method="post" action="/guest/account/resend-verification" style="margin-top:12px">
-  <button type="submit">Resend code</button>
+<form method="post" action="/guest/account/resend-verification">
+  <button type="submit" class="auth-btn-ghost">Resend code</button>
 </form>`
     : "";
+  const pendingSentNotice =
+    req.query.devConsole === "1"
+      ? authNoticeHtml("pending", "Development: your code is in the server terminal.")
+      : req.query.sent === "1"
+        ? authNoticeHtml("ok", `Code sent to ${escapeHtml(displayEmail)}.`)
+        : "";
+  const pendingErrorNotice =
+    typeof req.query.error === "string" && req.query.error
+      ? authNoticeHtml("alert", otpVerifyErrorHtml(req.query.error))
+      : "";
   const content = `
-<a class="guest-auth-logo" href="/">ChatAstay</a>
+${authLogoHtml()}
 <h1>Verify your email</h1>
-<p class="auth-lead">Enter the 6-digit code we sent to ${displayEmail ? `<strong>${escapeHtml(displayEmail)}</strong>` : "your email"}.</p>
-<p class="muted">Check your inbox and spam folder. Codes expire after 15 minutes.</p>
-${sentNotice}
-${errorNotice}
-${providerHint}
+<p class="auth-lead">Enter the 6-digit code we sent to ${displayEmail ? `<strong>${escapeHtml(displayEmail)}</strong>` : "your email"}. Codes expire in 15 minutes.</p>
+${pendingSentNotice}
+${pendingErrorNotice}
+${needsVerify && !isEmailConfigured() ? authNoticeHtml("pending", "Email is not configured on this server.") : ""}
 ${codeForm}
 <div class="guest-auth-links"><a href="/guest/account/login">Back to sign in</a></div>`;
   res.type("html").send(guestAuthLayout(content, { title: "Verify email · ChatAstay" }));
