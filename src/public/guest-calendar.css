@@ -263,12 +263,32 @@
     max-width: 100%;
   }
 
+  .calendar-head,
+  .calendar-title-wrap {
+    flex-wrap: wrap;
+  }
+
+  .calendar-head button,
+  .calendar-title-wrap button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
   .calendar-day {
     min-height: 48px;
     padding: 3px;
+    touch-action: manipulation;
   }
 
   .calendar-day-meta {
     font-size: 9px;
+  }
+
+  .compact-controls {
+    max-width: 100%;
+  }
+
+  .calendar-form {
+    max-width: 100%;
   }
 }

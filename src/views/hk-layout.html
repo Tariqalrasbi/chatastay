@@ -516,8 +516,26 @@
           text-align: left;
         }
         body.hk-sidebar-open-mobile { overflow: hidden; }
-        main { padding: 18px; }
-        .panel { padding: 18px; }
+        main {
+          padding: 18px;
+          padding-left: max(18px, env(safe-area-inset-left, 0px));
+          padding-right: max(18px, env(safe-area-inset-right, 0px));
+          padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+        }
+        .panel { padding: 18px; overflow-x: clip; }
+        .hk-menu-toggle { width: 100%; }
+        input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px; }
+        button, .btn-link, aside nav a { min-height: 44px; }
+      }
+      @media (max-width: 480px) {
+        thead { display: none; }
+        tbody tr { display: block; margin-bottom: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+        tbody td { display: block; text-align: right; border-bottom: 1px dashed var(--border); padding: 8px 0; }
+        tbody td::before { content: attr(data-label); float: left; color: var(--muted); font-weight: 600; }
+        .table-scroll thead { display: table-header-group; }
+        .table-scroll tbody tr { display: table-row; margin: 0; padding: 0; border: 0; background: transparent; }
+        .table-scroll tbody td { display: table-cell; text-align: inherit; padding: 11px 9px; }
+        .table-scroll tbody td::before { content: none; }
       }
     </style>
   </head>

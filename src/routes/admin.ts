@@ -4963,6 +4963,11 @@ function renderOnboardShell(
   .ob-remove-btn{background:transparent;border:0;color:#9a3412;font-weight:800;cursor:pointer}
   .ob-locked{padding:18px;border:1px dashed #f59e0b;background:#fff7ed;border-radius:18px;color:#7c2d12;font-weight:700}
   @media(max-width:880px){.ob-grid{grid-template-columns:1fr}.ob-resume{position:static}}
+  @media(max-width:640px){
+    .ob-add-btn,.ob-card button[type="submit"],.ob-card input,.ob-card select{min-height:44px;font-size:16px}
+    .ob-shell{padding:12px}
+    .ob-hero{padding:20px 16px}
+  }
 </style>
 <div class="ob-shell">
 <section class="ob-hero">
@@ -10895,8 +10900,8 @@ ${updatedNotice}${manualCheckInNotice}${manualCheckOutNotice}${invoiceSentFromCh
     display:inline-flex;
     align-items:center;
     justify-content:center;
-    min-width:36px;
-    min-height:36px;
+    min-width:44px;
+    min-height:44px;
     border:1px solid #d8dee6;
     border-radius:8px;
     background:#f8fafc;
@@ -14649,6 +14654,21 @@ adminRouter.get("/room-board/unit/:unitId/details", requirePermission("ROOMS", "
   .rud-badge-room { background:#dbeafe; color:#1e40af; }
   .rud-badge-type { background:#ecfeff; color:#0e7490; }
   .rud-sidebar { position:sticky; top:16px; }
+  @media (max-width: 640px) {
+    .rud-sidebar { position: static; top: auto; }
+    #folio-toast.rud-toast {
+      left: 12px;
+      right: 12px;
+      bottom: max(16px, env(safe-area-inset-bottom, 0px));
+      max-width: none;
+    }
+    .rud-toolbar-secondary .btn-link { flex: 1 1 100%; justify-content: center; }
+    .rud-btn, .rud-btn-save { min-height: 44px; width: 100%; }
+    .rud-toolbar-primary { flex-direction: column; align-items: stretch; }
+    .rud-filter-chip { min-height: 40px; padding: 8px 14px; }
+    .rud-search-input { max-width: none; }
+    .rud-dl > div { grid-template-columns: 1fr; gap: 4px; }
+  }
   .rud-card-fin { border-color:#cbd5e1; box-shadow:0 4px 20px rgba(15,23,42,.06); }
   .rud-fin-lines { list-style:none; margin:0; padding:0; }
   .rud-fin-lines li { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:10px 0; border-bottom:1px solid #f1f5f9; font-size:14px; }
