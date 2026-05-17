@@ -1001,7 +1001,7 @@ function loginPageHtml(hotel?: LoginHotelContext): string {
       ? `<p class="badge alert">No hotel account found for <code>${escapeHtml(hotel.requestedKey)}</code>. Use the numeric account number from the Owner Console.</p>`
       : "";
   return readView("login.html")
-    .replace("Al Ashkhara Beach Resort — one portal for management and operations.", `${escapeHtml(hotelDisplayName)} — one portal for management and operations.`)
+    .replace("{{HOTEL_DISPLAY_LINE}}", `${escapeHtml(hotelDisplayName)} — sign in to manage reservations, rooms, and guest messaging.`)
     .replaceAll("{{HOTEL_ACCOUNT_KEY}}", escapeHtml(hotelAccountKey))
     .replaceAll("{{HOTEL_HIDDEN_FIELD}}", hotelContextField)
     .replace("{{LOGIN_ALERTS}}", loginAlerts)
